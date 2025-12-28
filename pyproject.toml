@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aitoolman"
+version = "0.1.0"
+authors = [
+  { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
+]
+description = "Controllable and Transparent LLM Application Framework"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+  "httpx[http2]",
+  "httpx-sse",
+  "uuid-utils",
+  "jinja2",
+  "json-repair",
+  "BeautifulSoup4",
+  "lxml",
+  "xmltodict",
+]
+[project.optional-dependencies]
+zmq = [
+    "pyzmq"
+]
+ws = [
+    "websockets"
+]
+
+[project.urls]
+Homepage = "https://github.com/gumblex/aitoolman"
+Issues = "https://github.com/gumblex/aitoolman/issues"
