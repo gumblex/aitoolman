@@ -127,12 +127,20 @@ def main():
         '--router-endpoint', default='tcp://localhost:5555',
         help='ZeroMQ ROUTER endpoint (e.g., tcp://localhost:5555)')
     parser_client.add_argument('-m', '--model-name', required=True, help='Model name to use')
+    parser_client.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
     parser_local = subparsers.add_parser('local')
     parser_local.add_argument(
         "-c", "--config", type=str, default='llm_config.toml',
         help="Path to the TOML config file"
     )
     parser_local.add_argument('-m', '--model-name', required=True, help='Model name to use')
+    parser_local.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
     parser_monitor = subparsers.add_parser('monitor')
     parser_monitor.add_argument(
         '--pub-endpoint', default='tcp://localhost:5556',
@@ -140,6 +148,10 @@ def main():
     parser_monitor.add_argument(
         '--db-path',
         help='SQLite database path for DB monitor')
+    parser_monitor.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
 
     args = parser.parse_args()
     if args.verbose:

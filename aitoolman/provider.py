@@ -14,7 +14,7 @@ import httpx
 import httpx_sse
 
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
 def _get_retry_after(response: httpx.Response) -> Optional[int]:
@@ -96,6 +96,9 @@ class LLMFormatStrategy(abc.ABC):
 class OpenAICompatibleFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.INFO)
+
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers = []
@@ -172,38 +175,40 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                     "text": message.content
                 })
 
-            # 添加多媒体部分
-            media_item = {}
+            if message.media_content.raw_value:
+                content_list.append(message.media_content.raw_value)
+            else:
+                # 添加多媒体部分
+                media_item = {}
+                # 确定URL或数据
+                url = None
+                if message.media_content.url:
+                    url = message.media_content.url
+                elif message.media_content.data and message.media_content.mime_type:
+                    # 生成data URL
+                    url = util.generate_data_url(
+                        message.media_content.data,
+                        message.media_content.mime_type
+                    )
+                elif message.media_content.filename:
+                    # 从文件读取并生成data URL
+                    mime_type = util.get_mime_type(message.media_content.filename)
+                    with open(message.media_content.filename, 'rb') as f:
+                        data = f.read()
+                    url = util.generate_data_url(data, mime_type)
+                if not url:
+                    raise ValueError("No media content")
 
-            # 确定URL或数据
-            url = None
-            if message.media_content.url:
-                url = message.media_content.url
-            elif message.media_content.data and message.media_content.mime_type:
-                # 生成data URL
-                url = util.generate_data_url(
-                    message.media_content.data,
-                    message.media_content.mime_type
-                )
-            elif message.media_content.filename:
-                # 从文件读取并生成data URL
-                mime_type = util.get_mime_type(message.media_content.filename)
-                with open(message.media_content.filename, 'rb') as f:
-                    data = f.read()
-                url = util.generate_data_url(data, mime_type)
-            if not url:
-                raise ValueError("No media content")
+                # 根据媒体类型构建不同的结构
+                if message.media_content.media_type in ("image", "video"):
+                    url_type = message.media_content.media_type + "_url"
+                    media_item["type"] = url_type
+                    image_url_obj = {"url": url}
+                    if message.media_content.options:
+                        image_url_obj.update(message.media_content.options)
+                    media_item[url_type] = image_url_obj
 
-            # 根据媒体类型构建不同的结构
-            if message.media_content.media_type in ("image", "video"):
-                url_type = message.media_content.media_type + "_url"
-                media_item["type"] = url_type
-                image_url_obj = {"url": url}
-                if message.media_content.options:
-                    image_url_obj.update(message.media_content.options)
-                media_item[url_type] = image_url_obj
-
-            content_list.append(media_item)
+                content_list.append(media_item)
             result["content"] = content_list
         elif message.content is not None:
             result["content"] = message.content
@@ -230,7 +235,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                 body["tools"] = self.serialize_tool_description(request.tools)
             except Exception as ex:
                 raise ValueError("Tool description format invalid (%s: %s)" % (type(ex).__name__, ex))
-        # logger.debug("body: %s", body)
+        self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
     def parse_batch_response(self, response: LLMResponse, response_data: Dict[str, Any]) -> None:
@@ -263,7 +268,6 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         # 2. 处理流式结束标记（统一返回工具调用）
         if line == "[DONE]":
             # 转换累积的工具调用为ToolCall列表
-            # logger.debug("stream_tool_buffers: %s", self.stream_tool_buffers)
             final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
             response_message = {
                 "content": self.stream_content_buffer,
@@ -285,10 +289,10 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
-            logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
+            self.logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
             return StreamEvent.empty()
 
-        # logger.debug('chunk_data: %s', chunk_data)
+        self.logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
 
         # 4. 处理Token统计
         usage = chunk_data.get("usage")
@@ -315,7 +319,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                 self.stream_tool_buffers.append(tool_item)
                 continue
             elif not self.stream_tool_buffers:
-                logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
+                self.logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
                 continue
 
             tool_item = self.stream_tool_buffers[-1]
@@ -345,6 +349,9 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 class AnthropicFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.INFO)
+
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers = []
@@ -502,6 +509,7 @@ class AnthropicFormat(LLMFormatStrategy):
         if request.tools and self.model_config.get("abilities", {}).get("tool"):
             body["tools"] = self.serialize_tool_description(request.tools)
 
+        self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
     def parse_batch_response(self, response: LLMResponse,
@@ -546,13 +554,14 @@ class AnthropicFormat(LLMFormatStrategy):
     def parse_stream_event(self, response: LLMResponse,
                            event: httpx_sse.ServerSentEvent) -> StreamEvent:
         """Parse streaming response chunk"""
+        self.logger.debug('[%s] stream event: %s', response.request_id, event)
         # Handle event type
         event_type = event.event
         line = event.data.strip()
         if event_type == "error":
             response.finish_reason = FinishReason.error_request.value
             response.error_text = line
-            logger.error("[%s: Anthropic] Stream error: %s",
+            self.logger.error("[%s: Anthropic] Stream error: %s",
                          response.request_id, line)
             return StreamEvent(True, "", "", [], None)
 
@@ -584,7 +593,7 @@ class AnthropicFormat(LLMFormatStrategy):
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
-            logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
+            self.logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
                            response.request_id, line)
             return StreamEvent.empty()
 
@@ -658,6 +667,8 @@ class LLMProviderManager:
     }
 
     def __init__(self, config: Dict[str, Any]):
+        self.logger = logging.getLogger(self.__class__.__name__)
+
         self.default_config = config['default']
         self.api_config = config['api']
 
@@ -736,7 +747,7 @@ class LLMProviderManager:
             if retry_after is None:
                 retry_after = self.retry_duration * (self.retry_factor ** retries)
 
-            logger.warning(
+            self.logger.warning(
                 "[%s] Retry (%d/%d) after %.1fs, status code: %s",
                 request.request_id, retries + 1, self.max_retries, retry_after, status_code
             )
@@ -879,7 +890,7 @@ class LLMProviderManager:
                 "Unsupported API type: %s" % api_type,
                 FinishReason.error_request
             )
-            logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
+            self.logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
             return
 
         format_strategy = self.format_strategies[api_type](model_config)
@@ -928,14 +939,14 @@ class LLMProviderManager:
         try:
             await self._call_llm_api(request, response)
         except asyncio.CancelledError:
-            logger.info("[%s] Request cancelled.", request.request_id)
+            self.logger.info("[%s] Request cancelled.", request.request_id)
             await self._end_request_with_error(
                 request, response,
                 "cancelled",
                 FinishReason.cancelled
             )
         except Exception as e:
-            logger.exception("[%s] API call error", request.request_id)
+            self.logger.exception("[%s] API call error", request.request_id)
             await self._end_request_with_error(
                 request, response,
                 f"API call error: {type(e).__name__} - {str(e)}",
@@ -965,14 +976,14 @@ class LLMProviderManager:
         """取消指定请求"""
         rt = self.active_requests.get(request_id)
         if not rt:
-            logger.warning("[%s] Request not found to cancel", request_id)
+            self.logger.warning("[%s] Request not found to cancel", request_id)
             return
         rt.request.is_cancelled = True
         rt.task.cancel()
         try:
             await rt.task
         except asyncio.CancelledError:
-            logger.info("[%s] Cancelled", request_id)
+            self.logger.info("[%s] Cancelled", request_id)
         finally:
             try:
                 del self.active_requests[request_id]
@@ -995,7 +1006,7 @@ class LLMProviderManager:
                     cancelled_count += 1
                 del self.active_requests[request_id]
 
-        logger.info(
+        self.logger.info(
             "[Client: %s, Context: %s] Cancelled %d/%d requests",
             client_id, context_id, cancelled_count, total_count)
 

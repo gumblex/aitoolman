@@ -14,18 +14,21 @@ class MediaContent:
     # image/video
     media_type: str
     # 按以下优先顺序
-    # 1. data+mime_type
+    # 1. raw_value
+    raw_value: Optional[Dict] = None
+    # 2. data+mime_type
     data: Optional[bytes] = None
     mime_type: Optional[str] = None
-    # 2. filename
+    # 3. filename
     filename: Optional[str] = None
-    # 3. url
+    # 4. url
     url: Optional[str] = None
     options: Optional[Dict] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """将MediaContent对象序列化为字典"""
         result = {
+            "raw_value": self.raw_value,
             "media_type": self.media_type,
             "mime_type": self.mime_type,
             "filename": self.filename,
@@ -45,6 +48,7 @@ class MediaContent:
 
         # 创建MediaContent对象
         return cls(
+            raw_value=data.get("raw_value"),
             media_type=data.get("media_type"),
             data=bytes_data,
             mime_type=data.get("mime_type"),

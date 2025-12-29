@@ -113,6 +113,7 @@ class LLMZmqServer:
             reasoning_channel=reasoning_channel
         )
         self.active_requests[request_id] = request
+        logger.info("[%s] Start request. model: %s", request_id, model_name)
         self.provider_manager.process_request(request, self.on_request_completed)
 
     async def on_request_completed(self, request: LLMRequest):

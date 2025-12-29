@@ -261,9 +261,9 @@ class LLMMonitor:
             data['client_id'],
             data['request_id'],
             data['model_name'],
-            data.get('queue_time', 0),
-            data.get('time_to_first_token', 0),
-            data.get('total_response_time', 0),
+            data.get('queue_time', 0) or 0,
+            data.get('time_to_first_token', 0) or 0,
+            data.get('total_response_time', 0) or 0,
             data.get('prompt_tokens', 0),
             data.get('completion_tokens', 0),
             data.get('finish_reason', 'unknown')
