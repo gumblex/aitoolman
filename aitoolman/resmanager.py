@@ -69,7 +69,6 @@ class ResourceManager:
 
             self.capacities[key] = capacity
             self._initialize_resource(key, capacity)
-            logger.info(f"添加资源 {key}，容量: {capacity}")
 
     async def remove_resource(self, key: str, force: bool = False):
         """
@@ -92,7 +91,7 @@ class ResourceManager:
             pending_count = await self._cancel_all_pending(key)
 
             if force and active_count > 0:
-                logger.warning(f"强制移除资源 {key}，有 {active_count} 个活跃任务将被中断")
+                logger.warning("[%s] Force remove, with %s tasks cancelled.", key, active_count)
 
             # 清理资源
             del self.capacities[key]
@@ -101,7 +100,7 @@ class ResourceManager:
             del self._pending_requests[key]
             del self._available_slots[key]
 
-            logger.info(f"移除资源 {key}，取消 {pending_count} 个等待请求")
+            logger.info("[%s] Removed. Cancelled %s pending tasks.", key, pending_count)
             return True
 
     @asynccontextmanager
@@ -152,7 +151,7 @@ class ResourceManager:
         else:
             # 等待资源可用
             queue_position = len(self._waiting_queues[key])
-            logger.debug(f"[{task_name}] 排队等待资源 {key} (队列位置: {queue_position})")
+            logger.debug("[%s] Task '%s' waiting at %s", key, task_name, queue_position)
 
             try:
                 await request.future
@@ -178,7 +177,7 @@ class ResourceManager:
             request.future.set_result(True)
 
         wait_time = time.monotonic() - request.enqueue_time
-        logger.debug(f"[{task_name}] 成功获取资源 {key} (等待时间: {wait_time:.2f}秒)")
+        logger.debug("[%s] Task '%s' acquired resource, waited for %.2f", task_name, key, wait_time)
 
     async def _handle_cancellation(self, key: str, request: ResourceRequest, task_name: str):
         """处理取消操作"""
@@ -207,8 +206,6 @@ class ResourceManager:
                         next_future.set_result(True)
                 else:
                     self._available_slots[key] += 1
-
-            logger.debug(f"[{task_name}] 释放资源 {key}")
 
     async def cancel_request(self, key: str, task_name: str) -> bool:
         """
@@ -239,7 +236,7 @@ class ResourceManager:
                     if not request.future.done():
                         request.future.cancel()
 
-                    logging.debug(f"[{task_name}] 资源请求已被取消")
+                    logging.debug("[%s] Cancelled for task '%s'", key, task_name)
                     return True
         return False
 
@@ -270,7 +267,7 @@ class ResourceManager:
                     request.future.cancel()
                 count += 1
 
-        logger.debug(f"已取消 {key} 资源的 {count} 个等待请求")
+        logger.debug("[%s] Cancelled %s pending requests", key, count)
         return count
 
     def get_stats(self, key: str) -> Dict:

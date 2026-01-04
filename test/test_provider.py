@@ -15,7 +15,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.model_config = {
             "model": "gpt-3.5-turbo",
             "url": "https://api.openai.com/v1/chat/completions",
-            "default_options": {"temperature": 0.7}
+            "body_options": {"temperature": 0.7}
         }
         self.format_strategy = OpenAICompatibleFormat(self.model_config)
 

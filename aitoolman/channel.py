@@ -9,6 +9,14 @@ from typing import Any, Optional, Dict, Set
 logger = logging.getLogger(__name__)
 
 
+class TextFragmentInput(typing.Protocol):
+    async def read_message(self) -> Optional[str]:
+        ...
+
+    async def read_fragment(self) -> Optional[str]:
+        ...
+
+
 class TextFragmentOutput(typing.Protocol):
     async def write_message(self, message: Optional[str]):
         ...

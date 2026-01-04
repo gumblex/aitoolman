@@ -226,9 +226,8 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             "messages": [self.serialize_message(m) for m in request.messages],
             "stream": request.stream
         }
-        # 合并默认配置与请求选项（如temperature、top_p）
         body.update(
-            {**self.model_config.get("default_options", {}), **request.options})
+            {**self.model_config.get("body_options", {}), **request.options})
         # 工具调用支持
         if request.tools:
             try:
@@ -700,9 +699,8 @@ class LLMProviderManager:
         """初始化ZeroMQ sockets和HTTP客户端"""
         await self.http_client.__aenter__()
 
-    @staticmethod
     async def _end_request_with_error(
-        request: LLMRequest, response: LLMResponse, error_text: str, finish_reason: FinishReason
+        self, request: LLMRequest, response: LLMResponse, error_text: str, finish_reason: FinishReason
     ):
         response.error_text = error_text
         response.finish_reason = finish_reason.value
@@ -874,7 +872,7 @@ class LLMProviderManager:
         """核心API调用入口，返回完整的LLM响应对象"""
 
         # 校验模型配置
-        model_config = self.api_config.get(request.model_name)
+        model_config = self.api_config.get(request.model_name, {}).copy()
         if not model_config:
             await self._end_request_with_error(
                 request, response,
@@ -892,6 +890,12 @@ class LLMProviderManager:
             )
             self.logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
             return
+
+        body_options = self.default_config.get('body_options')
+        if body_options:
+            model_options = body_options.copy()
+            model_options.update(model_config.get('body_options', {}))
+            model_config['body_options'] = model_options
 
         format_strategy = self.format_strategies[api_type](model_config)
 
@@ -923,7 +927,18 @@ class LLMProviderManager:
             else:
                 await self._handle_batch_request(
                     request, response, model_config, request_body, format_strategy)
-
+            if response.finish_reason.startswith('error') or response.finish_reason in ('cancelled', 'unknown'):
+                self.logger.warning(
+                    "[%s] Request error (%s): %s",
+                    request.request_id, response.finish_reason, response.error_text)
+            else:
+                self.logger.info(
+                    "[%s] Request end (%s). %s/%s tokens, queue %.1fs/first %.1fs/total %.1fs",
+                    request.request_id, response.finish_reason,
+                    response.prompt_tokens, response.completion_tokens,
+                    response.queue_time or 0, response.time_to_first_token or 0,
+                    response.total_response_time or 0
+                )
 
     async def _request_wrapper(self, request: LLMRequest, callback=None) -> LLMResponse:
         # 初始化响应对象

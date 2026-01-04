@@ -20,7 +20,6 @@ license-files = ["LICEN[CS]E*"]
 dependencies = [
   "httpx[http2]",
   "httpx-sse",
-  "uuid-utils",
   "jinja2",
   "json-repair",
   "BeautifulSoup4",
@@ -28,6 +27,9 @@ dependencies = [
   "xmltodict",
 ]
 [project.optional-dependencies]
+uuid = [
+    "uuid-utils",
+]
 zmq = [
     "pyzmq"
 ]

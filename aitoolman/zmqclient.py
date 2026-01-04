@@ -166,7 +166,7 @@ class LLMZmqClient(LLMClient):
             raise RuntimeError("Client not connected")
 
         # 构造LLMRequest
-        request = self.make_request(
+        request = self._make_request(
             model_name, messages, tools, options, stream,
             context_id, response_channel, reasoning_channel
         )

@@ -25,7 +25,7 @@ class LLMClient(abc.ABC):
     async def close(self):
         pass
 
-    def make_request(
+    def _make_request(
             self,
             model_name: str,
             messages: List[Message],
@@ -82,7 +82,7 @@ class LLMLocalClient(LLMClient):
             response_channel: Optional[TextChannel] = None,
             reasoning_channel: Optional[TextChannel] = None
     ) -> LLMRequest:
-        request = self.make_request(
+        request = self._make_request(
             model_name, messages, tools, options, stream,
             context_id, response_channel, reasoning_channel
         )

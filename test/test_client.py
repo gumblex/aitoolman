@@ -26,7 +26,7 @@ class TestLLMLocalClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_make_request(self):
         async with LLMLocalClient(self.config) as client:
-            request = client.make_request(
+            request = client._make_request(
                 model_name="gpt-3.5-turbo",
                 messages=[Message({"role": "user", "content": "Hello"})],
                 stream=False
