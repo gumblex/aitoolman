@@ -93,7 +93,7 @@ class DefaultLLMModule(LLMModule):
 
         if self.config.post_processor:
             try:
-                result.data = self.config.post_processor(result.response_text)
+                result.data = self.app.processors[self.config.post_processor](result.response_text)
             except Exception:
                 self.logger.exception("Post-process failed: %s", kwargs)
                 result.status = FinishReason.error_format

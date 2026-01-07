@@ -24,17 +24,16 @@ async def print_channel_text(
     async for event in _channel.collect_text_channels(
             channels, read_fragments=True
     ):
-        if not event.message:
-            continue
-        if event.channel == 'reasoning':
-            if not reasoning_started:
-                print("\n[Thinking]", flush=True)
-                reasoning_started = True
-            print(event.message, end="", flush=True)
-        elif event.channel == 'response':
-            if not response_started:
-                print("\n[Response]", flush=True)
-                response_started = True
+        if event.channel == 'reasoning' and not reasoning_started:
+            print("\n[Thinking]", flush=True)
+            reasoning_started = True
+        elif (
+            ((event.channel == 'reasoning' and event.is_end) or event.channel == 'response') and
+            not response_started
+        ):
+            print("\n[Response]", flush=True)
+            response_started = True
+        if event.message:
             print(event.message, end="", flush=True)
     print("\n")
 
