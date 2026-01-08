@@ -22,7 +22,7 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **"AI �
 4. **响应处理**：API 响应 → TextChannel 流 → 后处理 → 最终结果
 
 ### 1.3 核心组件
-- **LLMApplication**：应用上下文，管理模块、模板、变量和通道
+- **LLMApplication**：应用上下文，管理模块、模板、变量、通道和后处理器
 - **LLMModule**：封装"输入→模板→LLM→输出"的完整流程
 - **LLMClient**：抽象 LLM 提供商调用，支持本地和远程（ZeroMQ）模式
 - **TextChannel**：异步消息通道，支持流式片段传输
@@ -32,7 +32,7 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **"AI �
 
 ### 2.1 LLMApplication - 应用上下文
 
-**作用**：管理 LLM 模块、模板、变量和通道的容器
+**作用**：管理 LLM 模块、模板、变量、通道和后处理器的容器
 
 ```python
 class LLMApplication:
@@ -40,6 +40,7 @@ class LLMApplication:
         self,
         client: LLMClient,                      # LLM 客户端实例
         config_dict: Optional[Dict[str, Any]] = None,  # 配置字典（从 TOML 加载）
+        processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # 自定义后处理器
         channels: Optional[Dict[str, TextChannel]] = None,  # 自定义通道
         context_id: Optional[str] = None      # 上下文 ID
     ) -> None
@@ -51,6 +52,7 @@ class LLMApplication:
 - `vars: Dict[str, Any]` - 全局变量，可在所有模板中访问
 - `modules: Dict[str, LLMModule]` - 已加载的模块实例
 - `templates: Dict[str, jinja2.Template]` - 全局模板
+- `processors: Dict[str, Callable[[str], Any]]` - 后处理器字典
 
 **关键方法**：
 ```python
@@ -58,13 +60,36 @@ class LLMApplication:
 module = app.module_name  # 自动从配置初始化模块
 
 # 添加后处理器
-app.add_processor("parse_json", lambda s: json.loads(s))
+app.add_processor("custom.parse_xml", parse_xml_function)
+
+# 获取后处理器
+processor = app.get_processor("builtin.parse_json")
 
 # 渲染全局模板
 text = app.render_template("template_name", **variables)
 
 # 添加自定义通道
 app.add_channel("custom", TextChannel(read_fragments=True))
+
+# 创建应用工厂（批量创建应用实例）
+@classmethod
+def factory(
+    cls,
+    client: LLMClient,
+    config_dict: Optional[Dict[str, Any]] = None,
+    processors: Optional[Dict[str, Callable[[str], Any]]] = None,
+    channels: Optional[Dict[str, TextChannel]] = None,
+) -> Callable[..., 'LLMApplication']:
+    """创建可复用的应用工厂函数"""
+    pass
+
+# 使用工厂创建实例
+app_factory = LLMApplication.factory(
+    client=client,
+    config_dict=app_config,
+    processors={"custom.parser": custom_parser}
+)
+app = app_factory()
 ```
 
 ### 2.2 LLMModule / DefaultLLMModule - LLM 模块
@@ -76,13 +101,26 @@ class DefaultLLMModule(LLMModule):
     def __init__(self, app: LLMApplication, config: ModuleConfig) -> None
 ```
 
-**调用方式**：
+**推荐调用方式**（依赖注入模式，支持批量处理）：
 ```python
-# 异步调用模块
-result: LLMModuleResult = await app.module_name(
-    _media=MediaContent(...),  # 可选：多媒体内容
-    **kwargs                      # 模板变量
-)
+async def process_task(app: aitoolman.LLMApplication, task_data: Dict[str, Any]) -> Dict[str, Any]:
+    """单个任务处理函数"""
+    result: LLMModuleResult = await app.module_name(
+        _media=MediaContent(...),  # 可选：多媒体内容
+        **task_data                # 模板变量
+    )
+    result.raise_for_status()  # 自动处理异常
+    return {
+        "task_id": task_data["id"],
+        "result": result.data if result.data else result.text
+    }
+
+# 批量处理示例
+async with asyncio.TaskGroup() as tg:
+    tasks = [tg.create_task(process_task(app_factory(), task)) for task in task_list]
+    for task in tasks:
+        result = await task
+        print(f"任务 {result['task_id']} 结果: {result['result']}")
 ```
 
 **ModuleConfig 数据类**：
@@ -96,7 +134,7 @@ class ModuleConfig:
     stream: bool = False                    # 是否流式输出
     output_channel: Optional[TextFragmentOutput] = None  # 输出通道
     reasoning_channel: Optional[TextFragmentOutput] = None  # 推理通道
-    post_processor: Optional[Callable[[str], Any]] = None  # 后处理器函数
+    post_processor: Optional[str] = None    # 后处理器名称（对应app.processors中的键）
     save_context: bool = False              # 是否保存对话上下文
     options: Dict[str, Any] = field(default_factory=dict)  # 请求选项（temperature 等）
 ```
@@ -107,7 +145,16 @@ class ModuleConfig:
 
 ```python
 class LLMClient(abc.ABC):
-    def __init__(self) -> None
+    def __init__(self) -> None:
+        ...
+
+    async def initialize(self) -> None:
+        """初始化客户端（自动在__aenter__中调用）"""
+        pass
+
+    async def close(self) -> None:
+        """关闭客户端（自动在__aexit__中调用）"""
+        pass
 ```
 
 **关键方法**：
@@ -126,6 +173,10 @@ request: LLMRequest = await client.request(
 
 # 取消请求
 await client.cancel(request_id: str)
+
+# 替代 with 的开始和结束方法
+await client.initialize()
+await client.close()
 ```
 
 **实现类**：
@@ -134,7 +185,7 @@ await client.cancel(request_id: str)
 
 **使用模式**：
 ```python
-# 作为异步上下文管理器
+# 作为异步上下文管理器（推荐）
 async with LLMLocalClient(api_config) as client:
     app = LLMApplication(client, app_config)
     result = await app.module_name(...)
@@ -280,6 +331,7 @@ class LLMResponse:
     # 时间统计
     start_time: Optional[float] = None
     queue_time: Optional[float] = None
+    queue_length: Optional[int] = None
     time_to_first_token: Optional[float] = None
     total_response_time: Optional[float] = None
     # 响应内容
@@ -291,6 +343,28 @@ class LLMResponse:
     error_text: Optional[str] = None
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    # 完整请求/响应数据
+    response_message: Optional[Dict[str, Any]] = None
+
+    def raise_for_status(self) -> None:
+        """根据finish_reason抛出对应的异常"""
+        pass
+
+    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+        """
+        执行工具调用
+
+        Args:
+            fn_map: 工具名称到函数的映射
+
+        Returns:
+            工具调用ID到结果的字典
+
+        Raises:
+            LLMError: 若调用失败
+            LLMResponseFormatError: 若工具未找到
+        """
+        pass
 ```
 
 **LLMModuleResult - 模块结果**：
@@ -299,24 +373,48 @@ class LLMResponse:
 class LLMModuleResult:
     response_text: str = ""                   # 原始响应文本
     response_reasoning: str = ""            # 原始推理内容
-    text: str = ""                           # 处理后文本（后处理器输出）
+    text: str = ""                           # 处理后文本（后处理前的原始文本）
     tool_calls: Dict[str, ToolCall] = field(default_factory=dict)  # 工具调用
     status: FinishReason = FinishReason.stop  # 完成状态
     error_text: Optional[str] = None         # 错误信息
+    request_params: Dict[str, Any] = field(default_factory=dict)  # 请求参数
+    request_messages: List[Message] = field(default_factory=list)  # 请求消息
+    response_message: Optional[Dict[str, Any]] = None  # 原始响应消息
     data: Any = None                         # 后处理结果
+
+    def raise_for_status(self) -> None:
+        """根据status抛出对应的异常"""
+        pass
+
+    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+        """
+        执行工具调用
+
+        Args:
+            fn_map: 工具名称到函数的映射
+
+        Returns:
+            工具调用ID到结果的字典
+        """
+        pass
 ```
 
 ### 2.8 postprocess.py - 后处理工具
 
-**内置处理器**：
+**内置工具函数**：
 ```python
-# JSON 解析（自动修复格式）
+# 提取XML根标签内容（不解析，仅提取原始内容）
+xml_content = postprocess.get_xml_tag_content(xml_string, root="result")
+
+# JSON 解析（自动修复格式错误）
 data = postprocess.parse_json(json_string)
 
-# XML 解析（提取指定根标签）
+# XML 解析（提取指定根标签并解析为字典）
 xml_dict = postprocess.parse_xml(xml_string, root="root_tag")
+```
 
-# 默认处理器字典
+**默认处理器字典**：
+```python
 DEFAULT_PROCESSORS = {
     "builtin.parse_json": parse_json,
 }
@@ -324,15 +422,18 @@ DEFAULT_PROCESSORS = {
 
 **自定义处理器**：
 ```python
-def custom_processor(text: str) -> Any:
-    # 实现自定义解析逻辑
-    return processed_data
+def custom_xml_processor(text: str) -> Tuple[str, str]:
+    """自定义XML解析处理器"""
+    content = postprocess.get_xml_tag_content(text, root="classification")
+    main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
+    sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
+    return (main_category, sub_category)
 
 # 注册到应用
-app.add_processor("custom", custom_processor)
+app.add_processor("custom.parse_classification", custom_xml_processor)
 
 # 在模块配置中使用
-# post_processor = "custom"
+# post_processor = "custom.parse_classification"
 ```
 
 ## 3. 提示词配置文件格式（app_prompt.toml）
@@ -358,9 +459,10 @@ options = { temperature = 0.7, max_tokens = 4000 }  # 默认请求选项
 [module."模块名称"]
 model = "Doubao-Seed-1.6"    # 覆盖默认模型
 stream = true                 # 覆盖默认流式设置
-templates = { user = "用户模板 {{input}}", system = "系统指令" }
+template.user = "用户模板 {{input}}"
+template.system = "系统指令"
 tools = { }                   # 工具配置（见下文）
-post_processor = "builtin.parse_json"  # 后处理器名称
+post_processor = "builtin.parse_json"  # 后处理器名称（对应app.processors中的键）
 save_context = true           # 覆盖默认上下文设置
 options = { temperature = 0.5 }  # 覆盖默认选项
 ```
@@ -380,7 +482,7 @@ options = { temperature = 0.5 }  # 覆盖默认选项
 **示例**：
 ```toml
 [module.summerize]
-templates.user = """
+template.user = """
 文章标题：{{title}}
 文章内容：<article>{{content}}</article>
 
@@ -420,7 +522,7 @@ tools."工具名称".param."参数名".required = true   # 是否必需
 model = "Doubao-Seed-1.6"
 stream = true
 save_context = true
-templates.user = """
+template.user = """
 你作为日程助手，分析用户指令：
 - 如果有具体待办事项，调用 add_task 工具
 - 如果没有，请用户详细说明
@@ -460,12 +562,12 @@ options = { temperature = 0.7, max_tokens = 4000 }
 
 # 原始文本处理模块
 [module.raw]
-templates.user = "{{content}}"
+template.user = "{{content}}"
 
 # 文章总结模块
 [module.summerize]
 model = "Doubao-Seed-1.6"
-templates.user = """
+template.user = """
 文章标题：{{title}}
 文章内容：<article>{{content}}</article>
 
@@ -476,11 +578,11 @@ templates.user = """
 
 输出格式：
 <response>
-{
-  "论点": [...],
-  "案例": [...],
-  "总结": "..."
-}
+<point>论点1</point>
+<point>论点2</point>
+<case>案例1</case>
+<case>案例2</case>
+<summery>总结</summery>
 </response>
 """
 post_processor = "builtin.parse_json"
@@ -490,7 +592,7 @@ post_processor = "builtin.parse_json"
 model = "Doubao-Seed-1.6"
 stream = true
 save_context = true
-templates.user = """
+template.user = """
 你作为日程助手，分析用户指令：
 - 如果有具体待办事项，调用 add_task 工具
 - 如果没有，请用户详细说明
@@ -512,7 +614,7 @@ tools.add_task.param.content.required = true
 # JSON 提取模块
 [module.json_extractor]
 model = "Doubao-Seed-1.6"
-templates.user = """
+template.user = """
 从以下文本中提取结构化信息：
 {{text}}
 
@@ -531,7 +633,7 @@ post_processor = "builtin.parse_json"
 model = "Doubao-Seed-1.6"
 stream = true
 save_context = true
-templates.user = "{{message}}"
+template.user = "{{message}}"
 ```
 
 ## 5. 示例应用结构
@@ -554,36 +656,27 @@ my_llm_app/
 ### 5.2 应用入口（main.py）
 
 ```python
+import re
 import asyncio
 import aitoolman
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 
-# 应用逻辑函数（依赖注入模式）
-async def process_document(
-    app: aitoolman.LLMApplication,
-    title: str,
-    content: str
-) -> Dict[str, Any]:
-    """
-    文档处理工作流：总结 → 提取关键点 → 生成报告
-    """
-    # 1. 总结文档
-    summary_result = await app.summerize(title=title, content=content)
+# 自定义后处理器
+def parse_classification(text: str) -> Tuple[str, str]:
+    content = aitoolman.postprocess.get_xml_tag_content(text, root="classification")
+    main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
+    sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
+    return (main_category, sub_category)
 
-    if summary_result.status != aitoolman.FinishReason.stop:
-        raise ValueError(f"总结失败: {summary_result.error_text}")
-
-    summary_data = summary_result.data  # 后处理器已解析 JSON
-
-    # 2. 生成执行摘要
-    report_result = await app.generate_report(
-        summary=summary_data,
-        format="markdown"
-    )
-
+# 单个任务处理函数
+async def process_ticket(app: aitoolman.LLMApplication, ticket: Dict[str, Any]) -> Dict[str, Any]:
+    """处理工单分类"""
+    result = await app.classify_ticket(**ticket)
+    result.raise_for_status()  # 自动处理异常
     return {
-        "summary": summary_data,
-        "report": report_result.text
+        "ticket_id": ticket["工单ID"],
+        "main_category": result.data[0],
+        "sub_category": result.data[1]
     }
 
 async def main():
@@ -591,65 +684,66 @@ async def main():
     api_config = aitoolman.load_config("config/llm_config.toml")
     app_config = aitoolman.load_config("config/app_prompt.toml")
 
-    # 2. 创建客户端（异步上下文管理器）
+    # 2. 创建客户端并初始化
     async with aitoolman.LLMLocalClient(api_config) as client:
-        # 3. 创建应用上下文
-        app = aitoolman.LLMApplication(client, app_config)
+        # 3. 创建应用工厂
+        app_factory = aitoolman.LLMApplication.factory(
+            client=client,
+            config_dict=app_config,
+            processors={
+                "custom.parse_classification": parse_classification
+            }
+        )
 
-        # 4. 设置全局变量（可选）
-        app.vars["app_name"] = "My LLM App"
-        app.vars["version"] = "1.0.0"
+        # 4. 批量处理工单
+        tickets: List[Dict[str, Any]] = [
+            {"工单ID": "123", "内容描述": "工单内容1", "诉求地址": "地址1"},
+            {"工单ID": "456", "内容描述": "工单内容2", "诉求地址": "地址2"}
+        ]
 
-        # 文档处理
-        document = {
-            "title": "人工智能发展趋势",
-            "content": "人工智能正在从感知智能向认知智能发展..."
-        }
-        result = await process_document(app, **document)
-        print("\n=== 处理结果 ===")
-        print(f"总结: {result['summary']}")
-        print(f"报告: {result['report']}")
+        async with asyncio.TaskGroup() as tg:
+            tasks = [tg.create_task(process_ticket(app_factory(), ticket)) for ticket in tickets]
+            for task in tasks:
+                result = await task
+                print(f"工单 {result['ticket_id']} 分类结果: {result['main_category']} / {result['sub_category']}")
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     asyncio.run(main())
 ```
 
 ### 5.3 自定义后处理器（processors.py）
 
 ```python
-import json
 import re
-from typing import Dict, Any, List
+from typing import Tuple, List
+import aitoolman.postprocess
 
-def extract_markdown_sections(text: str) -> Dict[str, str]:
-    """
-    从 Markdown 文本中提取章节
-    """
-    sections = {}
-    pattern = r'^##\s+(.*?)\n(.*?)(?=^##|\Z)'  # 匹配二级标题
-    matches = re.finditer(pattern, text, re.MULTILINE | re.DOTALL)
+def parse_xml_classification(xml_str: str) -> Tuple[str, str]:
+    """解析分类结果XML"""
+    content = aitoolman.postprocess.get_xml_tag_content(xml_str, root="result")
+    if not content:
+        raise ValueError("无效的分类结果")
 
-    for match in matches:
-        title = match.group(1).strip()
-        content = match.group(2).strip()
-        sections[title] = content
+    main_category = re.search(r"<main>(.*?)</main>", content, re.DOTALL).group(1).strip()
+    sub_category = re.search(r"<sub>(.*?)</sub>", content, re.DOTALL).group(1).strip()
+    return (main_category, sub_category)
 
-    return sections
-
-# 在应用启动时注册
-# app.add_processor("extract_sections", extract_markdown_sections)
+def extract_keywords(text: str) -> List[str]:
+    """提取文本关键词"""
+    # 实现自定义关键词提取逻辑
+    return ["关键词1", "关键词2"]
 ```
 
 ### 5.4 复杂工作流示例（workflows.py）
 
 ```python
 import aitoolman
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List
 
 class DocumentPipeline:
-    """
-    文档处理流水线（面向对象封装）
-    """
+    """文档处理流水线"""
 
     def __init__(self, app: aitoolman.LLMApplication):
         self.app = app
@@ -657,11 +751,13 @@ class DocumentPipeline:
     async def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """情感分析"""
         result = await self.app.sentiment_analysis(text=text)
+        result.raise_for_status()
         return result.data
 
     async def extract_entities(self, text: str) -> List[Dict[str, str]]:
         """实体提取"""
         result = await self.app.entity_extraction(text=text)
+        result.raise_for_status()
         return result.data.get("entities", [])
 
     async def generate_summary(
@@ -676,6 +772,7 @@ class DocumentPipeline:
             content=content,
             max_length=max_length
         )
+        result.raise_for_status()
         return result.text
 
     async def process_document(
@@ -684,9 +781,7 @@ class DocumentPipeline:
         enable_sentiment: bool = True,
         enable_entities: bool = True
     ) -> Dict[str, Any]:
-        """
-        完整文档处理
-        """
+        """完整文档处理工作流"""
         results = {
             "metadata": document,
             "summary": await self.generate_summary(
@@ -708,18 +803,23 @@ class DocumentPipeline:
         return results
 
 # 使用示例
-async def process_with_pipeline(app: aitoolman.LLMApplication):
-    pipeline = DocumentPipeline(app)
+async def run_pipeline():
+    api_config = aitoolman.load_config("config/llm_config.toml")
+    app_config = aitoolman.load_config("config/app_prompt.toml")
 
-    doc = {
-        "title": "AI 技术突破",
-        "content": "最新研究表明，AI 在图像识别领域取得重大进展..."
-    }
+    async with aitoolman.LLMLocalClient(api_config) as client:
+        app = aitoolman.LLMApplication(client, app_config)
+        pipeline = DocumentPipeline(app)
 
-    result = await pipeline.process_document(doc)
-    print(f"摘要: {result['summary']}")
-    print(f"情感: {result['sentiment']}")
-    print(f"实体: {result['entities']}")
+        doc = {
+            "title": "AI 技术突破",
+            "content": "最新研究表明，AI 在图像识别领域取得重大进展..."
+        }
+
+        result = await pipeline.process_document(doc)
+        print(f"摘要: {result['summary']}")
+        print(f"情感: {result['sentiment']}")
+        print(f"实体: {result['entities']}")
 ```
 
 ### 5.5 配置示例（llm_config.toml）
@@ -757,29 +857,44 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 - **环境分离**：为开发/测试/生产准备不同的 `llm_config.toml`
 - **密钥管理**：使用环境变量或密钥管理服务，可通过数据库等方式载入 llm_config
 - **版本控制**：将 `app_prompt.toml` 纳入 Git，记录提示词迭代历史
+- **模板复用**：使用全局模板减少重复提示词，提升维护效率
 
 ### 6.2 错误处理
 ```python
+import logging
+import aitoolman
+
 try:
     result = await app.module_name(**params)
+    result.raise_for_status()  # 自动处理异常
 
-    if result.status == aitoolman.FinishReason.error:
-        print(f"LLM 调用错误: {result.error_text}")
-    elif result.status == aitoolman.FinishReason.tool_calls:
-        # 处理工具调用
-        handle_tool_calls(result.tool_calls)
-    elif result.status == aitoolman.FinishReason.stop:
-        # 正常完成
-        print(result.text)
+    if result.status == aitoolman.FinishReason.tool_calls:
+        # 执行工具调用
+        tool_results = result.call({
+            "add_task": add_task_function,
+            "query_task": query_task_function
+        })
+        print(f"工具调用结果: {tool_results}")
+    else:
+        print(f"处理结果: {result.data if result.data else result.text}")
+except aitoolman.LLMLengthLimitError:
+    print("响应超出长度限制，请优化提示词或调整max_tokens")
+except aitoolman.LLMContentFilterError:
+    print("内容触发过滤器，请检查输入")
+except aitoolman.LLMResponseFormatError as e:
+    print(f"响应格式错误: {e}")
 except Exception as e:
-    print(f"框架错误: {e}")
-    # 检查网络、配置格式等
+    print(f"系统错误: {e}")
+    # 记录详细日志
+    logging.exception("处理任务失败")
 ```
 
 ### 6.3 性能优化
 - **连接复用**：多个 `LLMApplication` 共享同一个 `LLMClient`
-- **资源限制**：根据提供商合理设置 `parallel` 参数（通常 1-3）
-- **流式输出**：使用自定义 Channel 输出工作流状态；长文本使用 `stream=true` 提升用户体验
+- **资源限制**：根据提供商配额合理设置 `parallel` 参数（通常 1-3）
+- **流式输出**：使用自定义 Channel 输出工作流状态；长文本使用 `stream=true` 实时输出内容，提升用户体验
+- **批量处理**：使用 `asyncio.TaskGroup` 并行处理多个任务，提升吞吐量
+- **缓存策略**：对重复请求结果进行缓存，减少不必要的 LLM 调用
 
 ## 7. 总结
 
@@ -787,7 +902,7 @@ aitoolman 框架通过清晰的架构设计和灵活的配置系统，让开发�
 
 1. **快速构建**：通过 TOML 配置定义 LLM 应用，无需编写复杂代码
 2. **精细控制**：完全掌控数据流，实现透明可调试的 AI 应用
-3. **轻松扩展**：支持自定义处理器、通道和格式策略
+3. **轻松扩展**：支持自定义处理器、通道和格式策略，适配不同业务需求
 4. **灵活部署**：支持本地调用和微服务架构，适应不同场景需求
 
 通过理解 `LLMApplication`、`LLMModule`、`LLMClient` 和 `TextChannel` 的协作关系，开发者可以高效构建稳定、可维护的 LLM 应用。

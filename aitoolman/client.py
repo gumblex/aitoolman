@@ -1,10 +1,10 @@
 import abc
 import logging
-from typing import Optional, List, Dict, Any, AsyncGenerator
+from typing import Optional, List, Dict, Any, Callable
 
 from . import util
 from .channel import TextChannel
-from .model import LLMRequest, ToolCall, Message
+from .model import LLMRequest, Message
 from .provider import LLMProviderManager
 
 logger = logging.getLogger(__name__)
@@ -17,10 +17,14 @@ class LLMClient(abc.ABC):
         self.client_id = util.get_host_id()
 
     async def __aenter__(self):
+        await self.initialize()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
+
+    async def initialize(self):
+        pass
 
     async def close(self):
         pass
@@ -92,12 +96,8 @@ class LLMLocalClient(LLMClient):
     async def cancel(self, request_id: str):
         await self.provider_manager.cancel_request(request_id)
 
-    async def __aenter__(self):
-        await super().__aenter__()
+    async def initialize(self):
         await self.provider_manager.initialize()
-        return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def close(self):
         await self.provider_manager.cleanup()
-        await super().__aexit__(exc_type, exc_val, exc_tb)
-

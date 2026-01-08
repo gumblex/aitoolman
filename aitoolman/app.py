@@ -1,3 +1,4 @@
+import functools
 import logging
 from typing import Any, Dict, Optional, Callable
 
@@ -20,6 +21,7 @@ class LLMApplication:
         self,
         client: _client.LLMClient,
         config_dict: Optional[Dict[str, Any]] = None,
+        processors: Optional[Dict[str, Callable[[str], Any]]] = None,
         channels: Optional[Dict[str, _channel.TextChannel]] = None,
         context_id: Optional[str] = None
     ):
@@ -27,7 +29,7 @@ class LLMApplication:
         self.context_id: str = context_id or util.get_id()
         self.vars: Dict[str, Any] = {}
         self.channels: Dict[str, _channel.TextChannel] = {}
-        self.processors: Dict[str, Callable] = postprocess.DEFAULT_PROCESSORS.copy()
+        self.processors: Dict[str, Callable[[str], Any]] = postprocess.DEFAULT_PROCESSORS.copy()
         self.modules: Dict[str, LLMModule] = {}
         self.templates: Dict[str, jinja2.Template] = {}
 
@@ -43,6 +45,9 @@ class LLMApplication:
         # 加载配置
         self.config = config_dict
         self.config.setdefault('module', {})
+
+        if processors:
+            self.processors.update(processors)
 
         if channels:
             self.channels.update(channels)
@@ -84,7 +89,6 @@ class LLMApplication:
         )
         module = DefaultLLMModule(self, config)
         self.modules[module_name] = module
-        logger.debug("Loaded module: %s", module_name)
         return module
 
     def __getattr__(self, name: str) -> LLMModule:
@@ -111,3 +115,20 @@ class LLMApplication:
     def add_channel(self, name: str, channel: _channel.TextChannel):
         """添加自定义通道"""
         self.channels[name] = channel
+
+    @classmethod
+    def factory(
+            cls,
+            client: _client.LLMClient,
+            config_dict: Optional[Dict[str, Any]] = None,
+            processors: Optional[Dict[str, Callable[[str], Any]]] = None,
+            channels: Optional[Dict[str, _channel.TextChannel]] = None,
+    ) -> Callable[..., 'LLMApplication']:
+        """创建应用工厂函数"""
+        return functools.partial(
+            cls,
+            client=client,
+            config_dict=config_dict,
+            processors=processors,
+            channels=channels
+        )

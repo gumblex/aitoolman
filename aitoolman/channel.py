@@ -67,7 +67,6 @@ class TextChannel(Channel):
         return await self._message_queue.get()
 
     async def write_message(self, message: Optional[str]):
-        logger.info("write_message: %s", message)
         if self.closed:
             raise IOError("Channel is closed")
 

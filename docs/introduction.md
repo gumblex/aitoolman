@@ -21,7 +21,7 @@ aitoolman是一个面向开发者的LLM应用框架，核心思想是"AI作为�
 **使用场景**：
 - 一个用户进程通常启动一个`LLMClient`实例
 - 所有`LLMApplication`共享同一个客户端实例
-- 支持异步上下文管理器（`async with`）
+- 支持异步上下文管理器（`async with`），或手动开启关闭（`initialize`/`close`）
 
 #### 1.2.2 LLMApplication（应用上下文）
 **作用**：管理一套完整的LLM应用逻辑，包括模块、模板、变量和通道
@@ -32,6 +32,7 @@ aitoolman是一个面向开发者的LLM应用框架，核心思想是"AI作为�
 - 维护Jinja2模板引擎，支持变量渲染
 - 管理`TextChannel`通道，实现数据流控制
 - 支持后处理器（post-processor）扩展
+- 支持`factory`生成工厂函数，用于并行处理（互不干扰）
 
 #### 1.2.3 LLMModule（模块）
 **作用**：封装"输入→模板→LLM→输出"的完整流程
@@ -251,18 +252,18 @@ async def simple_chat():
     # 1. 加载配置
     api_config = aitoolman.load_config('llm_config_simple.toml')
     app_config = aitoolman.load_config('app_simple.toml')
-    
+
     # 2. 创建客户端（自动管理资源）
     async with aitoolman.LLMLocalClient(api_config) as client:
         # 3. 创建应用上下文
         app = aitoolman.LLMApplication(client, app_config)
-        
+
         # 4. 调用模块
         while True:
             user_input = input("你: ")
             if user_input.lower() == 'exit':
                 break
-                
+
             # 调用chat模块，传入message参数
             result = await app.chat(message=user_input)
             print(f"助手: {result.text}")
@@ -280,26 +281,26 @@ from typing import Dict, Any
 
 async def document_processor(app: aitoolman.LLMApplication, document: Dict[str, Any]):
     """文档处理工作流：总结→分析→生成报告"""
-    
+
     # 1. 总结文档
     summary = await app.summerize(
         title=document["title"],
         content=document["content"]
     )
-    
+
     # 2. 分析关键点
     analysis = await app.analyze(
         text=summary.text,
         aspects=["技术要点", "商业价值", "实施风险"]
     )
-    
+
     # 3. 生成执行摘要
     report = await app.generate_report(
         summary=summary.text,
         analysis=analysis.data,  # 后处理器解析后的结构化数据
         format="markdown"
     )
-    
+
     return {
         "summary": summary.text,
         "analysis": analysis.data,
@@ -310,86 +311,21 @@ async def main():
     # 加载配置
     api_config = aitoolman.load_config('llm_config.toml')
     app_config = aitoolman.load_config('app_prompt.toml')
-    
+
     async with aitoolman.LLMLocalClient(api_config) as client:
         app = aitoolman.LLMApplication(client, app_config)
-        
+
         # 处理文档
         document = {
             "title": "人工智能发展趋势",
             "content": "人工智能正在从感知智能向认知智能发展..."
         }
-        
+
         result = await document_processor(app, document)
         print("处理完成:", result)
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
-
-### 3.4 流式输出示例
-
-```python
-import asyncio
-import aitoolman
-from aitoolman.channel import collect_text_channels, ChannelEvent
-
-async def stream_chat(app: aitoolman.LLMApplication, question: str):
-    """流式对话，实时显示思考和回复"""
-    
-    # 配置流式输出模块
-    app.config['module']['stream_chat'] = {
-        'model': 'gpt-4',
-        'stream': True,
-        'output_channel': 'stdout',
-        'reasoning_channel': 'reasoning',
-        'template': {
-            'user': '{{question}}'
-        }
-    }
-    
-    # 重新初始化模块
-    app.init_module_from_config('stream_chat', app.config['module']['stream_chat'])
-    
-    # 收集通道输出
-    channels = {
-        'response': app.channels['stdout'],
-        'reasoning': app.channels['reasoning']
-    }
-    
-    # 启动输出任务
-    output_task = asyncio.create_task(
-        print_stream_output(channels)
-    )
-    
-    # 调用LLM
-    result = await app.stream_chat(question=question)
-    
-    # 等待输出完成
-    await output_task
-    
-    return result
-
-async def print_stream_output(channels: Dict[str, aitoolman.TextChannel]):
-    """实时打印流式输出"""
-    reasoning_started = False
-    
-    async for event in collect_text_channels(channels, read_fragments=True):
-        if not event.message:
-            continue
-            
-        if event.channel == 'reasoning':
-            if not reasoning_started:
-                print("\n[思考中]", end="", flush=True)
-                reasoning_started = True
-            print(event.message, end="", flush=True)
-        elif event.channel == 'response':
-            if reasoning_started:
-                print("\n[回复]", end="", flush=True)
-                reasoning_started = False
-            print(event.message, end="", flush=True)
-    
-    print("\n")  # 最终换行
 ```
 
 ## 4. 配置文件详解
@@ -404,6 +340,7 @@ async def print_stream_output(channels: Dict[str, aitoolman.TextChannel]):
 | `reasoning_channel` | string  | 可选       | 推理过程输出通道                      |
 | `save_context`      | boolean | false    | 是否保存对话上下文                     |
 | `post_processor`    | string  | 可选       | 后处理器名称（如"builtin.parse_json"） |
+| `options`           | string  | 可选       | 请求选项                          |
 | `template.system`   | string  | 可选       | 系统提示词模板                       |
 | `template.user`     | string  | 必填       | 用户提示词模板                       |
 | `tools.*`           | object  | 可选       | 工具定义（function calling）        |
@@ -460,67 +397,32 @@ result = await app.greeting(
 
 ### 5.3 错误处理
 ```python
+import logging
+import aitoolman
+
 try:
-    result = await app.some_module(**params)
-    if result.status == FinishReason.error:
-        print(f"LLM调用错误: {result.error_text}")
-    elif result.status == FinishReason.tool_calls:
-        # 处理工具调用
-        handle_tool_calls(result.tool_calls)
+    result = await app.module_name(**params)
+    result.raise_for_status()  # 自动处理异常
+
+    if result.status == aitoolman.FinishReason.tool_calls:
+        # 执行工具调用
+        tool_results = result.call({
+            "add_task": add_task_function,
+            "query_task": query_task_function
+        })
+        print(f"工具调用结果: {tool_results}")
+    else:
+        print(f"处理结果: {result.data if result.data else result.text}")
+except aitoolman.LLMLengthLimitError:
+    print("响应超出长度限制，请优化提示词或调整max_tokens")
+except aitoolman.LLMContentFilterError:
+    print("内容触发过滤器，请检查输入")
+except aitoolman.LLMResponseFormatError as e:
+    print(f"响应格式错误: {e}")
 except Exception as e:
-    print(f"框架错误: {e}")
-    # 检查网络连接、配置格式等
-```
-
-## 6. 扩展开发
-
-### 6.1 自定义后处理器
-```python
-from aitoolman.app import LLMApplication
-
-def custom_json_extractor(text: str) -> Dict:
-    """从LLM回复中提取JSON结构"""
-    import re
-    import json
-    
-    # 查找JSON代码块
-    match = re.search(r'```json\n(.*?)\n```', text, re.DOTALL)
-    if match:
-        return json.loads(match.group(1))
-    return {"raw": text}
-
-# 注册到应用
-app = LLMApplication(client, config)
-app.add_processor("extract_json", custom_json_extractor)
-
-# 在模块配置中使用
-# post_processor = "extract_json"
-```
-
-### 6.2 自定义通道
-```python
-from aitoolman.channel import TextChannel
-
-class DatabaseChannel(TextChannel):
-    """将输出写入数据库的通道"""
-    
-    def __init__(self, db_connection, table_name: str):
-        super().__init__(read_fragments=True)
-        self.db = db_connection
-        self.table = table_name
-    
-    async def write_message(self, message: Optional[str]):
-        await super().write_message(message)
-        if message:
-            # 写入数据库
-            await self.db.execute(
-                f"INSERT INTO {self.table} (content) VALUES (?)",
-                [message]
-            )
-
-# 使用自定义通道
-db_channel = DatabaseChannel(db, "llm_outputs")
-app.add_channel("database", db_channel)
+    print(f"系统错误: {e}")
+    # 记录详细日志
+    logging.exception("处理任务失败")
 ```
 
 ## 总结

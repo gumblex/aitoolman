@@ -27,13 +27,6 @@ class LLMZmqClient(LLMClient):
         self.listener_task: Optional[asyncio.Task] = None
         self.connected = False
 
-    async def __aenter__(self):
-        await self.connect()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
-
     async def connect(self):
         """连接服务器并启动监听"""
         if self.connected:
@@ -42,6 +35,9 @@ class LLMZmqClient(LLMClient):
         self.listener_task = asyncio.create_task(self.listen_responses())
         self.connected = True
         logger.info(f"Connected to {self.router_endpoint}")
+
+    async def initialize(self):
+        await self.connect()
 
     async def close(self):
         """关闭客户端"""

@@ -3,9 +3,48 @@ import typing
 import base64
 import asyncio
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Union, Callable
 
 from .channel import TextChannel
+
+
+class LLMError(RuntimeError):
+    pass
+
+
+class LLMLengthLimitError(LLMError):
+    """Error when response reaches length limit"""
+    pass
+
+
+class LLMContentFilterError(LLMError):
+    """Error when content is filtered"""
+    pass
+
+
+class LLMApiRequestError(LLMError):
+    """Error with the request"""
+    pass
+
+
+class LLMResponseFormatError(LLMError):
+    """Error with response format"""
+    pass
+
+
+class LLMCancelledError(LLMError):
+    """Error when request is cancelled"""
+    pass
+
+
+class LLMUnknownError(LLMError):
+    """Error for unknown finish reasons"""
+    pass
+
+
+class GenericError(LLMError):
+    """Generic error"""
+    pass
 
 
 @dataclass
@@ -160,6 +199,9 @@ class LLMResponse:
     # 完整请求/响应数据
     response_message: Optional[Dict[str, Any]] = None
 
+    def raise_for_status(self):
+        FinishReason.raise_for_status(self.finish_reason, self.error_text)
+
 
 @dataclass
 class LLMRequest:
@@ -206,6 +248,39 @@ class FinishReason(enum.Enum):
     # 未知：不应该出现
     unknown = "unknown"
 
+    @staticmethod
+    def raise_for_status(finish_reason: str, error_text: str = ""):
+        """Raise appropriate error if the response indicates failure"""
+        if not finish_reason:
+            return
+
+        # Get the enum value for comparison
+        try:
+            finish_reason_enum = FinishReason(finish_reason)
+        except ValueError:
+            raise LLMUnknownError(f"Unrecognized finish reason: {finish_reason}")
+
+        if finish_reason_enum == FinishReason.stop:
+            return
+        elif finish_reason_enum == FinishReason.tool_calls:
+            return
+        elif finish_reason_enum == FinishReason.length:
+            raise LLMLengthLimitError(error_text or "Response reached length limit")
+        elif finish_reason_enum == FinishReason.content_filter:
+            raise LLMContentFilterError(error_text or "Content filtered")
+        elif finish_reason_enum == FinishReason.error_request:
+            raise LLMApiRequestError(error_text or "Request error")
+        elif finish_reason_enum == FinishReason.error_format:
+            raise LLMResponseFormatError(error_text or "Format error")
+        elif finish_reason_enum == FinishReason.cancelled:
+            raise LLMCancelledError(error_text or "Request cancelled")
+        elif finish_reason_enum == FinishReason.unknown:
+            raise LLMUnknownError(error_text or "Unknown error")
+        elif finish_reason_enum == FinishReason.error:
+            raise GenericError(error_text or "Generic error")
+        else:
+            raise LLMUnknownError(f"Unrecognized finish reason: {finish_reason}")
+
 
 @dataclass
 class LLMModuleResult:
@@ -245,3 +320,40 @@ class LLMModuleResult:
             # 原始响应消息直接映射
             response_message=response.response_message
         )
+
+    def raise_for_status(self):
+        FinishReason.raise_for_status(self.status.value, self.error_text)
+
+    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+        """Execute tool calls using the provided function map.
+
+        Args:
+            fn_map: Dictionary mapping tool names to callable functions
+
+        Returns:
+            Dictionary with tool call IDs as keys and function results as values
+
+        Raises:
+            LLMError: raise_for_status()
+            LLMResponseFormatError: tool not found
+        """
+        self.raise_for_status()
+        if not self.tool_calls:
+            return {}
+
+        results = {}
+        for tool_call in self.tool_calls.values():
+            tool_name = tool_call.name
+            if tool_name not in fn_map:
+                raise LLMResponseFormatError(f"Tool '{tool_name}' not found in function map.")
+
+            func = fn_map[tool_name]
+            # Call function with arguments if present
+            if tool_call.arguments:
+                result = func(**tool_call.arguments)
+            else:
+                result = func()
+            results[tool_call.id] = result
+
+        return results
+

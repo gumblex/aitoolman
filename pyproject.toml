@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aitoolman"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
   { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
 ]
@@ -27,6 +27,11 @@ dependencies = [
   "xmltodict",
 ]
 [project.optional-dependencies]
+all = [
+    "uuid-utils",
+    "pyzmq",
+    "websockets"
+]
 uuid = [
     "uuid-utils",
 ]

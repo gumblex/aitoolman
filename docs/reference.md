@@ -10,12 +10,14 @@
 - **下游**: 管理多个LLMModule实例，协调它们之间的数据流
 
 **主要方法**:
-- `__init__(client, config_dict, context_id)`: 初始化应用上下文
+- `__init__(client: _client.LLMClient, config_dict: Optional[Dict[str, Any]] = None, processors: Optional[Dict[str, Callable[[str], Any]]] = None, channels: Optional[Dict[str, _channel.TextChannel]] = None, context_id: Optional[str] = None)`: 初始化应用上下文，支持传入自定义后处理器和通道
 - `init_all_modules()`: 从配置加载所有模块
+- `init_module_from_config(module_name, module_config)`: 从配置初始化单个模块
 - `__getattr__(name)`: 通过属性访问模块（延迟加载）
 - `add_processor(name, processor)`: 添加后处理器
 - `render_template(template_name, **kwargs)`: 渲染命名模板
 - `add_channel(name, channel)`: 添加自定义通道
+- `factory(client, config_dict=None, processors=None, channels=None)`: 创建应用工厂函数，用于批量创建应用实例
 
 ### LLMModule / DefaultLLMModule - LLM模块
 **说明**: 封装LLM调用的逻辑单元，每个模块有独立的配置、模板和上下文。
@@ -25,9 +27,9 @@
 - **下游**: 调用LLMClient发送请求，处理响应
 
 **主要方法**:
-- `__call__(_media=None, **kwargs)`: 执行模块调用
-- `render_messages(kwargs, media_content)`: 渲染消息列表
-- `render_template(template_name, **kwargs)`: 渲染模块模板
+- `__call__(_media=None, **kwargs)`: 执行模块调用，支持多媒体输入
+- `render_messages(kwargs, media_content)`: 渲染包含上下文的消息列表
+- `render_template(template_name, **kwargs)`: 渲染模块专属模板
 
 ### LLMClient / LLMLocalClient / LLMZmqClient - LLM客户端
 **说明**: 抽象LLM提供商调用，支持本地和远程（ZeroMQ）两种模式。
@@ -37,28 +39,33 @@
 - **下游**: LLMProviderManager处理实际API调用
 
 **主要方法**:
-- `request(model_name, messages, tools, options, stream, context_id, response_channel, reasoning_channel)`: 发送请求
-- `cancel(request_id)`: 取消请求
-- `make_request(...)`: 创建请求对象
+- `request(model_name, messages, tools, options, stream, context_id, response_channel, reasoning_channel)`: 发送LLM请求，支持流式输出和通道回调
+- `cancel(request_id)`: 取消指定请求
+- `initialize()`: 初始化客户端（用 async with 可以替代 initialize/close）
+- `close()`: 关闭客户端
 
 ### LLMProviderManager - 提供商管理器
-**说明**: 管理多个LLM提供商，处理API调用、资源管理、重试和错误处理。
+**说明**: 管理多个LLM提供商，处理API调用、资源管理、重试和错误处理，支持OpenAI和Anthropic格式兼容。
 
 **上下游关系**:
 - **上游**: LLMClient转发请求
-- **下游**: 调用具体LLM提供商API（HTTP/SSE）
+- **下游**: 调用具体LLM提供商API（HTTP/SSE流式传输）
 
 **主要方法**:
-- `process_request(request, callback)`: 处理请求
+- `process_request(request, callback)`: 处理LLM请求，返回异步任务
 - `cancel_request(request_id)`: 取消指定请求
-- `cancel_all_requests(client_id, context_id)`: 取消所有请求
+- `cancel_all_requests(client_id, context_id)`: 取消指定客户端或上下文的所有请求
+- `initialize()`: 初始化HTTP客户端和资源
+- `cleanup()`: 清理所有活跃请求和资源
 
 ### LLMFormatStrategy - 格式策略
-**说明**: 抽象不同LLM提供商的消息格式转换，支持OpenAI和Anthropic格式。
+**说明**: 抽象不同LLM提供商的消息格式转换，提供以下具体实现：
+- `OpenAICompatibleFormat`: 兼容OpenAI及类OpenAI风格API（如GPT系列、Qwen、Llama等）
+- `AnthropicFormat`: 适配Anthropic Claude系列API格式
 
 **上下游关系**:
 - **上游**: LLMProviderManager调用格式转换
-- **下游**: 生成特定提供商的HTTP请求体
+- **下游**: 生成特定提供商的HTTP请求体，解析响应内容
 
 **主要方法**:
 - `serialize_tool_description(tools_configs)`: 转换工具配置
@@ -102,6 +109,8 @@
 - `acquire(key, task_name)`: 获取资源锁
 - `cancel_request(key, task_name)`: 取消资源请求
 - `get_stats(key)`: 获取资源统计
+- `get_queue_length(key)`: 获取指定模型的当前等待队列长度
+- `add_resource(key, capacity)`: 动态添加新的模型资源配置
 
 ### ModuleConfig - 模块配置
 **说明**: 数据类，存储模块的配置参数。
@@ -116,4 +125,4 @@
 - `reasoning_channel`: 推理通道
 - `post_processor`: 后处理器函数
 - `save_context`: 是否保存上下文
-- `options`: 其他选项
+- `options`: 额外模型参数（如temperature、max_tokens等）
