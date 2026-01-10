@@ -128,7 +128,7 @@ async with asyncio.TaskGroup() as tg:
 @dataclass
 class ModuleConfig:
     name: str                               # 模块名称
-    model: str                              # 使用的模型名称
+    model: str                              # 使用的模型名称或别名
     templates: Dict[str, str]              # 模板字典（必须包含 user，可选 system）
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # 工具配置
     stream: bool = False                    # 是否流式输出
@@ -161,7 +161,7 @@ class LLMClient(abc.ABC):
 ```python
 # 发送请求（由模块自动调用，通常不直接使用）
 request: LLMRequest = await client.request(
-    model_name: str,                        # 模型名称
+    model_name: str,                        # 模型名称或别名
     messages: List[Message],               # 消息列表
     tools: Dict[str, Dict[str, Any]] = None,  # 工具配置
     options: Optional[Dict[str, Any]] = None,  # 请求选项
@@ -308,7 +308,7 @@ class LLMRequest:
     client_id: str                            # 客户端 ID
     context_id: Optional[str]                 # 上下文 ID
     request_id: str                          # 请求 ID
-    model_name: str                          # 模型名称
+    model_name: str                          # 模型名称或别名
     messages: List[Message]                  # 消息列表
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # 工具配置
     options: Dict[str, Any] = field(default_factory=dict)  # 请求选项
@@ -443,7 +443,7 @@ app.add_processor("custom.parse_classification", custom_xml_processor)
 ```toml
 # 模块默认配置（所有模块继承）
 [module_default]
-model = "Doubao-Seed-1.6"    # 默认模型（必须在 llm_config.toml 中定义）
+model = "Doubao-Seed-1.6"    # 默认模型（可以是模型名称或别名，需在llm_config.toml中定义）
 stream = false                # 默认非流式输出
 output_channel = "stdout"     # 默认输出通道
 reasoning_channel = "reasoning"  # 默认推理通道
@@ -457,7 +457,7 @@ options = { temperature = 0.7, max_tokens = 4000 }  # 默认请求选项
 
 # 模块定义（可定义多个）
 [module."模块名称"]
-model = "Doubao-Seed-1.6"    # 覆盖默认模型
+model = "Creative-Model"    # 使用模型别名，对应llm_config.toml中的model_alias映射
 stream = true                 # 覆盖默认流式设置
 template.user = "用户模板 {{input}}"
 template.system = "系统指令"
@@ -519,7 +519,7 @@ tools."工具名称".param."参数名".required = true   # 是否必需
 **完整示例**：
 ```toml
 [module.task_planner]
-model = "Doubao-Seed-1.6"
+model = "Fast-Model"  # 使用快速推理模型别名
 stream = true
 save_context = true
 template.user = """
@@ -549,7 +549,7 @@ tools.add_task.param.content.required = true
 ```toml
 # 模块默认配置
 [module_default]
-model = "Doubao-Seed-1.6"
+model = "Fast-Model"         # 默认使用快速推理模型
 stream = false
 output_channel = "stdout"
 reasoning_channel = "reasoning"
@@ -566,7 +566,7 @@ template.user = "{{content}}"
 
 # 文章总结模块
 [module.summerize]
-model = "Doubao-Seed-1.6"
+model = "Creative-Model"     # 使用创意模型
 template.user = """
 文章标题：{{title}}
 文章内容：<article>{{content}}</article>
@@ -589,7 +589,7 @@ post_processor = "builtin.parse_json"
 
 # 日程规划模块（支持工具调用）
 [module.task_planner]
-model = "Doubao-Seed-1.6"
+model = "Fast-Model"         # 使用快速推理模型
 stream = true
 save_context = true
 template.user = """
@@ -613,7 +613,7 @@ tools.add_task.param.content.required = true
 
 # JSON 提取模块
 [module.json_extractor]
-model = "Doubao-Seed-1.6"
+model = "Precise-Model"      # 使用高精度模型
 template.user = """
 从以下文本中提取结构化信息：
 {{text}}
@@ -837,6 +837,15 @@ max_retries = 3
 parallel = 1
 api_type = "openai"
 
+# 模型别名映射
+# 业务配置中使用别名，无需关心底层模型具体信息
+[model_alias]
+"Creative-Model" = "DeepSeek-v3.2-251201"
+"Precise-Model" = "GPT-4o"
+"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
+"Cheap-Model" = "Doubao-Mini-1.5"
+"Code-Model" = "CodeLlama-70B-Instruct"
+
 # API 配置
 [api."Doubao-Seed-1.6"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -858,6 +867,8 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 - **密钥管理**：使用环境变量或密钥管理服务，可通过数据库等方式载入 llm_config
 - **版本控制**：将 `app_prompt.toml` 纳入 Git，记录提示词迭代历史
 - **模板复用**：使用全局模板减少重复提示词，提升维护效率
+- **模型别名**：通过`model_alias`统一管理模型映射，方便最终用户切换模型，切换模型时只需修改llm_config.toml
+- **分层配置**：在module_default中设置通用模型，特定模块按需使用别名覆盖
 
 ### 6.2 错误处理
 ```python
@@ -895,6 +906,7 @@ except Exception as e:
 - **流式输出**：使用自定义 Channel 输出工作流状态；长文本使用 `stream=true` 实时输出内容，提升用户体验
 - **批量处理**：使用 `asyncio.TaskGroup` 并行处理多个任务，提升吞吐量
 - **缓存策略**：对重复请求结果进行缓存，减少不必要的 LLM 调用
+- **模型选型**：根据任务类型定义并选择合适的模型别名，再给别名配置合适的具体模型
 
 ## 7. 总结
 

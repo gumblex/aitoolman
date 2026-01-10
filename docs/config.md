@@ -38,6 +38,13 @@
 | `timeout`         | 整数  | 继承自 `[default].timeout`  | 该模型特定的超时时间                             |
 | `body_options` | 字典  | 继承自 `[default].body_options`  | 该模型默认的请求选项，如 max_tokens, temperature 等 |
 
+### 1.4 [model_alias] 部分
+模型别名配置，用于简化模型名称的使用，方便在应用配置中使用更友好的名称。
+
+| 参数               | 类型  | 默认值      | 说明                                  |
+|------------------|-----|----------|-------------------------------------|
+| `别名`        | 字符串  | 无      | 映射到实际的模型名称（必须在[api]部分有对应配置） |
+
 ### 配置示例
 ```toml
 [server]
@@ -51,6 +58,13 @@ parallel = 1
 retry_duration = 0.5
 retry_factor = 1.5
 api_type = "openai"
+
+[model_alias]
+"Creative-Model" = "DeepSeek-v3.2-251201"
+"Precise-Model" = "GPT-4o-mini-251119"
+"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
+"Cheap-Model" = "Llama-3.1-8B-Instruct"
+"Code-Model" = "CodeLlama-70B-Instruct"
 
 [api."Doubao-Seed-1.6"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -73,7 +87,7 @@ headers = {Authorization = "Bearer xxx"}
 
 | 参数                  | 类型  | 默认值         | 说明                                        |
 |---------------------|-----|-------------|-------------------------------------------|
-| `model`             | 字符串 | 无（建议配置）     | 默认使用的模型名称，需在 llm_config.toml 的 [api] 部分定义 |
+| `model`             | 字符串 | 无（建议配置）     | 默认使用的模型名称或别名，需在 llm_config.toml 的 [api] 部分定义或通过[model_alias]映射 |
 | `stream`            | 布尔值 | false       | 是否使用流式输出                                  |
 | `output_channel`    | 字符串 | "stdout"    | 默认输出通道名称                                  |
 | `reasoning_channel` | 字符串 | "reasoning" | 默认推理通道名称                                  |
@@ -86,7 +100,7 @@ headers = {Authorization = "Bearer xxx"}
 
 | 参数                  | 类型  | 默认值                                      | 说明                                   |
 |---------------------|-----|------------------------------------------|--------------------------------------|
-| `model`             | 字符串 | 继承自 `[module_default].model`             | 该模块使用的模型名称                           |
+| `model`             | 字符串 | 继承自 `[module_default].model`             | 该模块使用的模型名称或别名                           |
 | `stream`            | 布尔值 | 继承自 `[module_default].stream`            | 该模块是否使用流式输出                          |
 | `output_channel`    | 字符串 | 继承自 `[module_default].output_channel`    | 该模块的输出通道                             |
 | `reasoning_channel` | 字符串 | 继承自 `[module_default].reasoning_channel` | 该模块的推理通道                             |
@@ -133,7 +147,7 @@ tools."工具名称".param."参数名".required = true   # 是否必需
 ### 配置示例
 ```toml
 [module_default]
-model = "Doubao-Seed-1.6"
+model = "Fast-Model"  # 使用模型别名
 stream = false
 output_channel = "stdout"
 save_context = false
@@ -142,7 +156,7 @@ save_context = false
 template.user = """{{content}}"""
 
 [module.summerize]
-model = "Doubao-Seed-1.6"
+model = "Precise-Model"  # 使用模型别名
 template.user = """文章标题：{{title}}
 文章内容：<article>{{content}}</article>
 请根据文章内容：
@@ -150,8 +164,17 @@ template.user = """文章标题：{{title}}
 2. 列出文中的案例及说明的问题
 3. 总结这篇文章"""
 
+[module.creative_writing]
+model = "Creative-Model"  # 使用模型别名
+template.user = """请以{{style}}风格创作一篇关于{{topic}}的文章，字数要求{{word_count}}字左右"""
+options = {temperature = 0.8, max_tokens = 2000}
+
+[module.code_generator]
+model = "Code-Model"  # 使用模型别名
+template.user = """请使用{{language}}语言编写一个{{functionality}}的代码示例，并添加详细注释"""
+
 [module.task_adder]
-model = "Doubao-Seed-1.6"
+model = "Fast-Model"  # 使用模型别名
 stream = true
 save_context = true
 template.user = "你作为一个日程助手，可以帮用户添加待办事项。分析用户指令，如果有具体的待办事项则调用工具，没有则面向用户，让用户详细说明代表事项。用户说：{{user_input}}"
@@ -205,7 +228,7 @@ result = await app.task_adder(
 ```python
 # 动态添加模块配置
 app.config['module']['new_module'] = {
-    'model': 'Doubao-Seed-1.6',
+    'model': 'Cheap-Model',  # 使用模型别名
     'template': {
         'user': '{{query}}'
     }
@@ -217,7 +240,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. 注意事项
 
-1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 必须在 `llm_config.toml` 的 `[api]` 部分有对应配置。
+1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_config.toml` 的 `[api]` 部分的模型名称，也可以是 `[model_alias]` 部分定义的别名。
 
 2. **通道管理**：默认提供三个通道：
    - `stdin`：标准输入（非片段模式）
@@ -231,3 +254,5 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 5. **上下文保存**：当 `save_context=true` 时，模块会自动保存对话历史，用于后续调用。
 
 6. **工具调用**：工具配置必须包含完整的参数定义，否则可能无法正确解析。
+
+7. **模型别名映射**：`[model_alias]` 中的别名必须映射到 `[api]` 部分已定义的模型名称。建议在 app_prompt.toml 中指定别名，以方便最终用户替换模型。

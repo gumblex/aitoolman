@@ -670,6 +670,10 @@ class LLMProviderManager:
 
         self.default_config = config['default']
         self.api_config = config['api']
+        self.model_alias = config.get('model_alias', {})
+        for key in self.api_config.keys():
+            if key not in self.model_alias:
+                self.model_alias[key] = key
 
         self.timeout = self.default_config['timeout']
         self.max_retries = self.default_config['max_retries']
@@ -872,14 +876,17 @@ class LLMProviderManager:
         """核心API调用入口，返回完整的LLM响应对象"""
 
         # 校验模型配置
-        model_config = self.api_config.get(request.model_name, {}).copy()
-        if not model_config:
+        real_model_name = self.model_alias.get(request.model_name)
+        model_config = self.api_config.get(real_model_name, {}).copy()
+        if not real_model_name or not model_config:
             await self._end_request_with_error(
                 request, response,
                 f"Model not found: {request.model_name}",
                 FinishReason.error_request
             )
             return
+        request.model_name = real_model_name
+        response.model_name = real_model_name
 
         api_type = model_config.get("api_type", self.default_config.get('api_type', 'openai'))
         if api_type not in self.format_strategies:
