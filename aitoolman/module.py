@@ -24,7 +24,7 @@ class ModuleConfig:
     stream: bool = False
     output_channel: Optional[_channel.TextFragmentOutput] = None
     reasoning_channel: Optional[_channel.TextFragmentOutput] = None
-    post_processor: Optional[Callable[[str], Any]] = None
+    post_processor: Optional[str] = None
     save_context: bool = False
     options: Dict[str, Any] = field(default_factory=dict)
 
