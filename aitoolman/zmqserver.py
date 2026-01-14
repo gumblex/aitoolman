@@ -1,4 +1,5 @@
 import json
+import time
 import asyncio
 import logging
 import dataclasses
@@ -81,6 +82,8 @@ class LLMZmqServer:
             await self.handle_cancel(client_id, request_id)
         elif msg_type == 'cancel_all':
             await self.handle_cancel_all(client_id, json_data.get('context_id'))
+        elif msg_type == 'audit_event':
+            await self.handle_audit_event(client_id, json_data)
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
@@ -150,7 +153,7 @@ class LLMZmqServer:
         await self.router_socket.send_multipart([
             client_id.encode('utf-8'),
             b'',
-            json.dumps(message).encode('utf-8')
+            util.encode_message(message)
         ])
 
     async def send_response(self, client_id: str, request_id: str, response: LLMResponse):
@@ -183,7 +186,7 @@ class LLMZmqServer:
         await self.router_socket.send_multipart([
             client_id.encode('utf-8'),
             b'',
-            json.dumps(message).encode('utf-8')
+            util.encode_message(message)
         ])
 
     async def publish_audit_log(self, request: LLMRequest):
@@ -215,8 +218,8 @@ class LLMZmqServer:
             'response_message': response.response_message
         }
         await self.pub_socket.send_multipart([
-            b'audit',
-            json.dumps(audit_log).encode('utf-8')
+            b'llm_request',
+            util.encode_message(audit_log)
         ])
 
     async def handle_cancel(self, client_id: str, request_id: str):
@@ -242,7 +245,21 @@ class LLMZmqServer:
         await self.router_socket.send_multipart([
             client_id.encode('utf-8'),
             b'',
-            json.dumps(message).encode('utf-8')
+            util.encode_message(message)
+        ])
+
+    async def handle_audit_event(self, client_id: str, json_data: Dict[str, Any]):
+        """处理审计事件消息并发布到PUB接口"""
+        event_data = {
+            'client_id': client_id,
+            'context_id': json_data.get('context_id'),
+            'event_type': json_data.get('event_type'),
+            'data': json_data.get('data', {}),
+            'timestamp': json_data.get('timestamp')
+        }
+        await self.pub_socket.send_multipart([
+            b'audit_event',
+            util.encode_message(event_data)
         ])
 
     async def cleanup(self):

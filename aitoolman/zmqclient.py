@@ -1,8 +1,8 @@
 import json
+import time
 import asyncio
 import logging
 import sqlite3
-import time
 from typing import Optional, List, Dict, Any
 
 import zmq
@@ -182,7 +182,7 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
-            json.dumps(request_msg).encode('utf-8')
+            util.encode_message(request_msg)
         ])
         return request
 
@@ -204,7 +204,7 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
-            json.dumps(cancel_msg).encode('utf-8')
+            util.encode_message(cancel_msg)
         ])
 
     async def cancel_all(self, context_id: Optional[str] = None):
@@ -219,7 +219,24 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
-            json.dumps(cancel_msg).encode('utf-8')
+            util.encode_message(cancel_msg)
+        ])
+
+    async def audit_event(self, context_id: str, event_type: str, **kwargs):
+        if not self.connected:
+            raise RuntimeError("Client not connected")
+
+        audit_msg = {
+            'type': 'audit_event',
+            'client_id': self.client_id,
+            'context_id': context_id,
+            'event_type': event_type,
+            'data': kwargs,
+            'timestamp': time.time()
+        }
+        await self.socket.send_multipart([
+            b'',
+            util.encode_message(audit_msg)
         ])
 
 
@@ -228,32 +245,36 @@ class LLMMonitor:
         self.pub_endpoint = pub_endpoint
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.SUB)
-        self.socket.setsockopt_string(zmq.SUBSCRIBE, "audit")
         self.running = False
 
     def start(self):
         """开始监听审计消息"""
         self.socket.connect(self.pub_endpoint)
+        self.socket.setsockopt_string(zmq.SUBSCRIBE, "llm_request")
+        self.socket.setsockopt_string(zmq.SUBSCRIBE, "audit_event")
         self.running = True
         while self.running:
             try:
                 message = self.socket.recv_multipart()
                 if len(message) >= 2:
                     topic = message[0].decode('utf-8')
-                    if topic == "audit":
+                    if topic == "llm_request":
                         data = json.loads(message[1].decode('utf-8'))
-                        self.on_audit_message(data)
+                        self.on_llm_request(data)
+                    elif topic == "audit_event":
+                        data = json.loads(message[1].decode('utf-8'))
+                        self.on_audit_event(data)
             except zmq.ZMQError as e:
                 if self.running:
                     logger.info(f"Monitor ZMQ error: {e}")
             except Exception as e:
                 logger.info(f"Monitor error: {e}")
 
-    def on_audit_message(self, data: Dict[str, Any]):
+    def on_llm_request(self, data: Dict[str, Any]):
         """处理审计消息（子类可重写）"""
         # 使用新的字段名
         logger.info(
-            "[AUDIT: %s/%s] model: %s, queue: %.1f s, first_token: %.1f s, total: %.1f s, tokens: %s/%s, reason: %s",
+            "[AUDIT LLM: %s/%s] model: %s, queue: %.1f s, first_token: %.1f s, total: %.1f s, tokens: %s/%s, reason: %s",
             data['client_id'],
             data['request_id'],
             data['model_name'],
@@ -263,6 +284,14 @@ class LLMMonitor:
             data.get('prompt_tokens', 0),
             data.get('completion_tokens', 0),
             data.get('finish_reason', 'unknown')
+        )
+
+    def on_audit_event(self, data: Dict[str, Any]):
+        """处理审计事件消息（子类可重写）"""
+        logger.info(
+            "[AUDIT EVENT: %s/%s] event: %s, %s",
+            data['client_id'], data['context_id'],
+            data['event_type'], data['kwargs']
         )
 
     def stop(self):
@@ -283,7 +312,7 @@ class DBLLMMonitor(LLMMonitor):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS audit_logs (
+            CREATE TABLE IF NOT EXISTS llm_requests (
                 id INTEGER PRIMARY KEY,
                 client_id TEXT,
                 context_id TEXT,
@@ -309,23 +338,40 @@ class DBLLMMonitor(LLMMonitor):
                 created_at INTEGER
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY,
+                client_id TEXT,
+                context_id TEXT,
+                event_type TEXT,
+                data TEXT,
+                timestamp REAL
+            )
+        ''')
         conn.commit()
         conn.close()
 
-    def on_audit_message(self, data: Dict[str, Any]):
+    def on_llm_request(self, data: Dict[str, Any]):
         """将审计消息存入数据库，使用新的字段结构"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-
-        # 准备数据库插入数据
         db_data = data.copy()
         db_data['created_at'] = int(time.time())
-
         keys, qs, values = util.make_insert_auto(db_data)
-        cursor.execute('INSERT OR REPLACE INTO audit_logs ({}) VALUES ({})'.format(keys, qs), values)
+        cursor.execute('INSERT OR REPLACE INTO llm_requests ({}) VALUES ({})'.format(keys, qs), values)
         conn.commit()
         conn.close()
 
-        # 调用父类的日志记录
-        super().on_audit_message(data)
+        super().on_llm_request(data)
 
+    def on_audit_event(self, data: Dict[str, Any]):
+        """将审计事件存入数据库"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        db_data = data.copy()
+        keys, qs, values = util.make_insert_auto(db_data)
+        cursor.execute('INSERT INTO audit_events ({}) VALUES ({})'.format(keys, qs), values)
+        conn.commit()
+        conn.close()
+
+        super().on_audit_event(data)

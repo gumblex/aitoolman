@@ -67,6 +67,11 @@ class LLMClient(abc.ABC):
     async def cancel(self, request_id: str):
         pass
 
+    @abc.abstractmethod
+    async def audit_event(self, context_id: str, event_type: str, **kwargs):
+        """记录用户自定义审计事件"""
+        pass
+
 
 class LLMLocalClient(LLMClient):
     """本地客户端，直接调用LLMProviderManager"""
@@ -101,3 +106,9 @@ class LLMLocalClient(LLMClient):
 
     async def close(self):
         await self.provider_manager.cleanup()
+
+    async def audit_event(self, context_id: str, event_type: str, **kwargs):
+        logger.info(
+            "[AUDIT: context %s] event: %s, %s",
+            context_id, event_type, kwargs
+        )

@@ -180,6 +180,10 @@ class LLMApplication:
         """添加自定义通道"""
         self.channels[name] = channel
 
+    async def audit_event(self, event_type: str, **kwargs):
+        """触发用户自定义审计事件"""
+        await self.client.audit_event(self.context_id, event_type, **kwargs)
+
     @classmethod
     def factory(
             cls,

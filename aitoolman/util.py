@@ -66,3 +66,7 @@ def generate_data_url(data, content_type):
 def get_mime_type(filename):
     return mimetypes.guess_type(filename)[0]
 
+
+def encode_message(obj):
+    return json.dumps(obj, ensure_ascii=False).encode('utf-8')
+
