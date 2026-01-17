@@ -1,6 +1,6 @@
 # aitoolman - A Controllable, Transparent LLM Application Framework
 
-* [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](./docs/quick_start.en.md) （所有文档以中文为准）
+* [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](./docs/quick_start.md) （所有文档以中文为准）
 * [One-page Quick Start (for human and AI)](./docs/quick_start.en.md)
 
 ## Project Introduction
