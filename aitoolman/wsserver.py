@@ -654,6 +654,7 @@ async def run_demo_server():
     # 启动服务器
     await server.start()
 
+
 if __name__ == "__main__":
     # 运行示例服务器
     asyncio.run(run_demo_server())

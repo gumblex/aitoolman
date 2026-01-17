@@ -1,4 +1,3 @@
-
 # 配置文件文档
 
 ## 1. 服务器配置 (llm_config.toml)
@@ -28,22 +27,22 @@
 ### 1.3 [api."模型名称"] 部分
 每个模型的具体配置，模型名称可以自定义。
 
-| 参数                | 类型  | 默认值                      | 说明                                     |
-|-------------------|-----|--------------------------|----------------------------------------|
-| `url`             | 字符串 | 无（必须配置）                  | API 端点 URL                             |
-| `type`            | 字符串 | 继承自 `[default].api_type` | API 类型，可选值："openai"、"anthropic"        |
-| `model`           | 字符串 | 无（必须配置）                  | 提供商侧的模型标识符                             |
-| `parallel`        | 整数  | 继承自 `[default].parallel` | 该模型的并行处理能力                             |
-| `headers`         | 字典  | 继承自 `[default].headers`  | 该模型特定的 HTTP 请求头                        |
-| `timeout`         | 整数  | 继承自 `[default].timeout`  | 该模型特定的超时时间                             |
-| `body_options` | 字典  | 继承自 `[default].body_options`  | 该模型默认的请求选项，如 max_tokens, temperature 等 |
+| 参数             | 类型  | 默认值                          | 说明                                     |
+|----------------|-----|------------------------------|----------------------------------------|
+| `url`          | 字符串 | 无（必须配置）                      | API 端点 URL                             |
+| `type`         | 字符串 | 继承自 `[default].api_type`     | API 类型，可选值："openai"、"anthropic"        |
+| `model`        | 字符串 | 无（必须配置）                      | 提供商侧的模型标识符                             |
+| `parallel`     | 整数  | 继承自 `[default].parallel`     | 该模型的并行处理能力                             |
+| `headers`      | 字典  | 继承自 `[default].headers`      | 该模型特定的 HTTP 请求头                        |
+| `timeout`      | 整数  | 继承自 `[default].timeout`      | 该模型特定的超时时间                             |
+| `body_options` | 字典  | 继承自 `[default].body_options` | 该模型默认的请求选项，如 max_tokens, temperature 等 |
 
 ### 1.4 [model_alias] 部分
 模型别名配置，用于简化模型名称的使用，方便在应用配置中使用更友好的名称。
 
-| 参数               | 类型  | 默认值      | 说明                                  |
-|------------------|-----|----------|-------------------------------------|
-| `别名`        | 字符串  | 无      | 映射到实际的模型名称（必须在[api]部分有对应配置） |
+| 参数   | 类型  | 默认值 | 说明                          |
+|------|-----|-----|-----------------------------|
+| `别名` | 字符串 | 无   | 映射到实际的模型名称（必须在[api]部分有对应配置） |
 
 ### 配置示例
 ```toml
@@ -85,22 +84,22 @@ headers = {Authorization = "Bearer xxx"}
 ### 2.1 [module_default] 部分
 默认模块配置，会被所有模块继承。
 
-| 参数                  | 类型  | 默认值         | 说明                                        |
-|---------------------|-----|-------------|-------------------------------------------|
-| `model`             | 字符串 | 无（建议配置）     | 默认使用的模型名称或别名，需在 llm_config.toml 的 [api] 部分定义或通过[model_alias]映射 |
-| `stream`            | 布尔值 | false       | 是否使用流式输出                                  |
-| `output_channel`    | 字符串 | "stdout"    | 默认输出通道名称                                  |
-| `reasoning_channel` | 字符串 | "reasoning" | 默认推理通道名称                                  |
-| `save_context`      | 布尔值 | false       | 是否保存对话上下文                                 |
-| `post_processor`    | 字符串 | 无           | 后处理器名称，需在应用中注册                            |
-| `options`           | 字典  | `{}`        | 默认请求选项，如 temperature、max_tokens 等         |
+| 参数                  | 类型  | 默认值         | 说明                                |
+|---------------------|-----|-------------|-----------------------------------|
+| `model`             | 字符串 | 无（建议配置）     | 默认使用的模型名称或别名                      |
+| `stream`            | 布尔值 | false       | 是否使用流式输出                          |
+| `output_channel`    | 字符串 | "stdout"    | 默认输出通道名称                          |
+| `reasoning_channel` | 字符串 | "reasoning" | 默认推理通道名称                          |
+| `save_context`      | 布尔值 | false       | 是否保存对话上下文                         |
+| `post_processor`    | 字符串 | 无           | 后处理器名称，需在应用中注册                    |
+| `options`           | 字典  | `{}`        | 默认请求选项，如 temperature、max_tokens 等 |
 
 ### 2.2 [module."模块名称"] 部分
 每个模块的具体配置，模块名称可以自定义。
 
 | 参数                  | 类型  | 默认值                                      | 说明                                   |
 |---------------------|-----|------------------------------------------|--------------------------------------|
-| `model`             | 字符串 | 继承自 `[module_default].model`             | 该模块使用的模型名称或别名                           |
+| `model`             | 字符串 | 继承自 `[module_default].model`             | 该模块使用的模型名称或别名                        |
 | `stream`            | 布尔值 | 继承自 `[module_default].stream`            | 该模块是否使用流式输出                          |
 | `output_channel`    | 字符串 | 继承自 `[module_default].output_channel`    | 该模块的输出通道                             |
 | `reasoning_channel` | 字符串 | 继承自 `[module_default].reasoning_channel` | 该模块的推理通道                             |

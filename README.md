@@ -1,66 +1,66 @@
-# aitoolman - 可控、透明的LLM应用框架
+# aitoolman - A Controllable, Transparent LLM Application Framework
 
+* [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](./docs/quick_start.en.md) （所有文档以中文为准）
+* [One-page Quick Start (for human and AI)](./docs/quick_start.en.md)
 
-## 项目介绍
-aitoolman 是一个面向开发者的LLM（大语言模型）应用框架，旨在解决现有框架的**供应商锁定、流程不清晰、调试困难**等痛点。框架将AI定位为“工具人”，强调**用户直接控制所有提示词、数据流、控制流**，帮助开发者快速构建稳定、可调试的LLM应用。
+## Project Introduction
+aitoolman is a developer-oriented LLM (Large Language Model) application framework designed to address common problems in existing frameworks such as **vendor lock-in, unclear workflows, and difficult debugging**. The framework positions AI as a "Toolman", emphasizing that **users directly control all prompts, data flows, and control flows** to help developers quickly build stable, debuggable LLM applications.
 
+### Design Philosophy
+1. **AI is not an Agent, but a tool**: AI should act like a "top university intern" that executes clear instructions rather than making independent decisions.
+2. **Controllable Workflows**: All program logic is dominated by user code, **with no unexpected operations, no hidden prompts**, and no autonomy granted to the LLM.
+3. **Transparent Data Flows**: Users can customize all data sent to the LLM, fully leveraging the unique features of each provider.
+4. **Template-Driven Prompts**: Encapsulate prompts as reusable templates in fixed locations, preventing prompts from being scattered across the codebase.
 
-### 设计理念
-1. **AI是工具人**：AI应像“985实习生”一样，执行明确指令，而非自主决策。
-2. **流程可控**：所有程序逻辑由用户代码主导，**无意外操作、无隐藏提示词**，LLM也无自主权。
-3. **数据流透明**：用户可自定义所有发往LLM的数据，充分利用各提供商特色功能。
-4. **提示词模板化**：将提示词在固定的地方封装为可复用模板，避免提示词散落各处。
+### Core Advantages
+- **Vendor-Agnostic**: Directly pass in HTTP headers and custom options, abstract request/response formats, and easily switch between providers.
+- **Modular Design**: Components have single responsibilities, making them easy to test and replace.
+- **Streaming Support**: Implement real-time data transmission (e.g., thinking processes, response fragments) via `Channel`.
+- **Tool Calling**: Support LLM tool invocation as a workflow control mechanism (e.g., calling Tool A represents following Workflow A; or pausing to wait for user confirmation when tool invocation is needed).
+- **Microservice Support**: The LLM scheduler can be deployed as an independent service for unified resource management and audit logging.
 
+## Project Structure Design
+### Data Flow Sequence
 
-### 核心优势
-- **供应商无关**：直接带入HTTP头和自定义选项，可抽象请求/响应格式，轻松切换供应商。
-- **模块化设计**：组件职责单一，易于测试和替换。
-- **流式支持**：通过`Channel`实现实时数据传输（如思考过程、响应片段）。
-- **工具调用**：支持LLM工具调用，作为流程控制机制（如用调用A工具代表走A流程；或在需要调用工具时暂停，等待用户确认）。
-- **微服务支持**：可将LLM调度器作为独立服务，统一资源管理和审计日志。
+User Input → LLMApplication → LLMModule → LLMClient → LLMProviderManager → 
+LLMFormatStrategy → HTTP API → Response Parsing → Post-Processing → Channel Output → User Reception
 
-## 项目结构设计
-### 数据流顺序
-
-用户输入 → LLMApplication → LLMModule → LLMClient → LLMProviderManager → 
-LLMFormatStrategy → HTTP API → 响应解析 → 后处理 → 通道输出 → 用户接收
-
-### 类调用关系图
+### Class Call Relationship Diagram
 
 ```mermaid
 graph TB
-    subgraph "用户代码"
-        User[用户应用]
+    subgraph "User Code"
+        User[User Application]
     end
     
-    subgraph "应用层"
+    subgraph "Application Layer"
         App[LLMApplication]
         Module[LLMModule]
     end
     
-    subgraph "客户端层"
+    subgraph "Client Layer"
         Client[LLMClient]
         LocalClient[LLMLocalClient]
         ZmqClient[LLMZmqClient]
     end
     
-    subgraph "微服务"
+    subgraph "Microservices"
         ZmqServer[LLMZmqServer]
     end
     
-    subgraph "服务层"
+    subgraph "Service Layer"
         ProviderManager[LLMProviderManager]
         ResourceMgr[ResourceManager]
         FormatStrategy[LLMFormatStrategy]
         OpenAIFormat[OpenAICompatibleFormat]
     end
     
-    subgraph "通道层"
+    subgraph "Channel Layer"
         Channel[Channel]
         TextChannel[TextChannel]
     end
     
-    subgraph "数据模型"
+    subgraph "Data Models"
         Request[LLMRequest]
         Response[LLMResponse]
         Message[Message]
@@ -90,98 +90,97 @@ graph TB
     Channel --> TextChannel
 ```
 
-### 数据流图
+### Data Flow Diagram
 ```mermaid
 flowchart TD
-    subgraph "输入处理"
-        USER[用户输入] --> TEMPLATE[模板渲染]
-        TEMPLATE --> MESSAGES[Message列表]
+    subgraph "Input Processing"
+        USER[User Input] --> TEMPLATE[Template Rendering]
+        TEMPLATE --> MESSAGES[Message List]
     end
     
-    subgraph "请求构建"
+    subgraph "Request Construction"
         MESSAGES --> REQUEST[LLMRequest]
-        REQUEST --> FORMAT[格式策略]
-        FORMAT --> REQ_BODY[请求体]
+        REQUEST --> FORMAT[Format Strategy]
+        FORMAT --> REQ_BODY[Request Body]
     end
     
-    subgraph "API调用"
+    subgraph "API Call"
         REQ_BODY --> PROVIDER[ProviderManager]
-        PROVIDER --> RESOURCE[资源管理]
-        RESOURCE --> HTTP[HTTP请求]
-        HTTP --> STREAM{流式?}
+        PROVIDER --> RESOURCE[Resource Management]
+        RESOURCE --> HTTP[HTTP Request]
+        HTTP --> STREAM{Streaming?}
         
-        STREAM -->|是| SSE[SSE流式解析]
-        STREAM -->|否| BATCH[批量响应解析]
+        STREAM -->|Yes| SSE[SSE Streaming Parsing]
+        STREAM -->|No| BATCH[Batch Response Parsing]
     end
     
-    subgraph "响应处理"
-        SSE --> FRAGMENT[片段写入]
-        BATCH --> FULL[完整写入]
+    subgraph "Response Processing"
+        SSE --> FRAGMENT[Write Fragment]
+        BATCH --> FULL[Write Full Response]
         
         FRAGMENT --> CHANNEL[TextChannel]
         FULL --> CHANNEL
         
-        CHANNEL --> MULTI_CHANNEL[多通道分发]
+        CHANNEL --> MULTI_CHANNEL[Multi-Channel Distribution]
         
-        MULTI_CHANNEL --> REASONING[推理通道]
-        MULTI_CHANNEL --> RESPONSE[响应通道]
+        MULTI_CHANNEL --> REASONING[Reasoning Channel]
+        MULTI_CHANNEL --> RESPONSE[Response Channel]
     end
     
-    subgraph "后处理"
-        RESPONSE --> POSTPROCESS[后处理器]
+    subgraph "Post-Processing"
+        RESPONSE --> POSTPROCESS[Post-Processor]
     end
     
-    subgraph "输出"
+    subgraph "Output"
         POSTPROCESS --> RESULT[LLMModuleResult]
-        RESULT --> CONTEXT[上下文更新]
-        CONTEXT --> NEXT[下一步决策]
+        RESULT --> CONTEXT[Context Update]
+        CONTEXT --> NEXT[Next Step Decision]
     end
 ```
 
-### 数据流时序图
+### Data Flow Sequence Diagram
 ```mermaid
 sequenceDiagram
-    participant User as 用户应用
+    participant User as User Application
     participant App as LLMApplication
     participant Module as LLMModule
     participant Client as LLMClient
     participant Provider as ProviderManager
     participant Resource as ResourceManager
-    participant API as 外部API
+    participant API as External API
     participant Channel as TextChannel
     
-    User->>App: 创建应用上下文
-    App->>Module: 初始化模块
-    App->>Client: 配置客户端
+    User->>App: Create application context
+    App->>Module: Initialize module
+    App->>Client: Configure client
     
-    User->>Module: 调用模块(参数)
+    User->>Module: Invoke module (parameters)
     
-    Module->>Module: 渲染模板
-    Module->>Module: 构建Message列表
+    Module->>Module: Render template
+    Module->>Module: Build message list
     Module->>Client: request(model, messages, tools)
     
     Client->>Provider: process_request(LLMRequest)
     
-    Provider->>Resource: acquire(模型资源)
-    Resource-->>Provider: 资源许可
+    Provider->>Resource: acquire(model resource)
+    Resource-->>Provider: Resource granted
     
-    Provider->>Provider: 构建请求体(格式策略)
-    Provider->>API: HTTP POST请求
+    Provider->>Provider: Build request body (format strategy)
+    Provider->>API: HTTP POST request
     
-    alt 流式响应
-        API-->>Provider: SSE流式数据
-        Provider->>Channel: write_fragment(片段)
-        Channel-->>User: 实时输出片段
-    else 批量响应
-        API-->>Provider: 完整响应
-        Provider->>Channel: write_message(完整)
-        Channel-->>User: 完整输出
+    alt Streaming Response
+        API-->>Provider: SSE streaming data
+        Provider->>Channel: write_fragment(fragment)
+        Channel-->>User: Real-time fragment output
+    else Batch Response
+        API-->>Provider: Full response
+        Provider->>Channel: write_message(full response)
+        Channel-->>User: Full output
     end
     
-    Provider->>Resource: release(资源)
+    Provider->>Resource: release(resource)
     
     Provider-->>Client: LLMResponse
     Client-->>Module: LLMModuleResult
-    Module-->>User: 处理结果
+    Module-->>User: Processing result
 ```
-

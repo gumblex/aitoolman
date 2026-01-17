@@ -18,6 +18,7 @@
 - `render_template(template_name, **kwargs)`: 渲染命名模板
 - `add_channel(name, channel)`: 添加自定义通道
 - `factory(client, config_dict=None, processors=None, channels=None)`: 创建应用工厂函数，用于批量创建应用实例
+- `audit_event(event_type: str, **kwargs)`: 发送自定义审计事件
 
 ### LLMModule / DefaultLLMModule - LLM模块
 **说明**: 封装LLM调用的逻辑单元，每个模块有独立的配置、模板和上下文。
@@ -43,6 +44,7 @@
 - `cancel(request_id)`: 取消指定请求
 - `initialize()`: 初始化客户端（用 async with 可以替代 initialize/close）
 - `close()`: 关闭客户端
+- `audit_event(context_id: str, event_type: str, **kwargs)`: 记录自定义审计事件
 
 ### LLMProviderManager - 提供商管理器
 **说明**: 管理多个LLM提供商，处理API调用、资源管理、重试和错误处理，支持OpenAI和Anthropic格式兼容。

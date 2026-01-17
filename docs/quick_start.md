@@ -90,6 +90,9 @@ app_factory = LLMApplication.factory(
     processors={"custom.parser": custom_parser}
 )
 app = app_factory()
+
+# 给LLMClient/LLMZmqServer发送自定义的审计事件
+await app.audit_event(event_type, **kwargs)
 ```
 
 ### 2.2 LLMModule / DefaultLLMModule - LLM 模块
