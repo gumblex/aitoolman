@@ -1,5 +1,5 @@
 import unittest
-from aitoolman.postprocess import parse_xml
+from aitoolman.postprocess import parse_xml, get_xml_tag_content
 
 class TestParseXML(unittest.TestCase):
     """测试parse_xml函数的单元测试类"""
@@ -92,8 +92,7 @@ class TestParseXML(unittest.TestCase):
 
         result = parse_xml(test_xml, "root")
 
-        # 验证结果为None
-        self.assertIsNone(result)
+        self.assertEqual(result, {'root': {'child': '没有闭合标签'}})
 
     def test_xml_with_comments(self):
         """测试带注释的XML"""
@@ -199,6 +198,77 @@ class TestParseXML(unittest.TestCase):
         self.assertIn("root-tag", result)
         self.assertEqual(result["root-tag"]["@special"], "true")
         self.assertEqual(result["root-tag"]["sub-tag"], "内容")
+
+
+class TestGetXmlTagContent(unittest.TestCase):
+    """测试get_xml_tag_content函数的单元测试类"""
+
+    def test_simple_extraction(self):
+        """测试正常提取根标签内容"""
+        text = "前置文本<root>核心内容</root>后置文本"
+        result = get_xml_tag_content(text, "root")
+        self.assertEqual(result, "核心内容")
+
+    def test_incomplete_start_tag(self):
+        """测试缺少有效开始标签的情况"""
+        text = "没有有效的<roo>开始标签</root>"
+        result = get_xml_tag_content(text, "root")
+        self.assertIsNone(result)
+
+    def test_incomplete_end_tag(self):
+        """测试缺少结束标签的情况"""
+        text = "有开始标签<root>但没有结束标签"
+        result = get_xml_tag_content(text, "root")
+        self.assertEqual(result, "但没有结束标签")
+
+    def test_multiple_same_tags(self):
+        """测试存在多个相同根标签的情况"""
+        text = "第一个<root>内容1</root>中间文本<root>内容2</root>最后"
+        result = get_xml_tag_content(text, "root")
+        # 函数会提取从第一个开始标签到最后一个结束标签的完整范围
+        self.assertEqual(result, "内容1</root>中间文本<root>内容2")
+
+    def test_tag_with_special_characters(self):
+        """测试包含特殊字符的标签名提取"""
+        text = "前缀<my-root-tag attr='test'>内部内容</my-root-tag>后缀"
+        result = get_xml_tag_content(text, "my-root-tag")
+        self.assertEqual(result, "内部内容")
+
+    def test_start_tag_with_attributes(self):
+        """测试带属性的开始标签提取"""
+        text = "前置<user id='123' name='Alice' enabled='true'>用户信息</user>后置"
+        result = get_xml_tag_content(text, "user", with_tag=True)
+        self.assertEqual(result, "<user id='123' name='Alice' enabled='true'>用户信息</user>")
+
+    def test_no_target_tag(self):
+        """测试文本中没有目标标签的情况"""
+        text = "整个文本只有<other>其他标签</other>，没有目标标签"
+        result = get_xml_tag_content(text, "root")
+        self.assertIsNone(result)
+
+    def test_end_tag_before_start_tag(self):
+        """测试结束标签在开始标签之前的异常情况"""
+        text = "</root>结束标签在前面<root>开始标签在后面"
+        result = get_xml_tag_content(text, "root")
+        self.assertEqual(result, "开始标签在后面")
+
+    def test_empty_tag(self):
+        """测试结束标签在开始标签之前的异常情况"""
+        text = "aaaa<root></root>bbbb"
+        self.assertEqual(get_xml_tag_content(text, "root"), '')
+        self.assertEqual(get_xml_tag_content(text, "root", with_tag=True), '<root></root>')
+
+    def test_nested_tags_inside_root(self):
+        """测试根标签内部包含嵌套标签的情况"""
+        text = "前<root><child1>子内容1</child1><child2>子内容2</child2></root>后"
+        result = get_xml_tag_content(text, "root")
+        self.assertEqual(result, "<child1>子内容1</child1><child2>子内容2</child2>")
+
+    def test_tag_with_whitespace_in_attributes(self):
+        """测试属性中包含空格的开始标签提取"""
+        text = "前置<item class='product featured' price='99.99'>商品</item>后置"
+        result = get_xml_tag_content(text, "item", with_tag=True)
+        self.assertEqual(result, "<item class='product featured' price='99.99'>商品</item>")
 
 
 if __name__ == "__main__":

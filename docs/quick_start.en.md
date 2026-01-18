@@ -406,18 +406,21 @@ class LLMModuleResult:
         pass
 ```
 
-### 2.8 postprocess.py - Post-processing Tools
+### 2.8 postprocess - Post-processing Tools
 
 **Built-in Utility Functions**:
 ```python
-# Extract XML root tag content (no parsing, only raw content extraction)
-xml_content = postprocess.get_xml_tag_content(xml_string, root="result")
+import aitoolman.postprocess
+# Extract XML root tag content (no parsing, only raw content extraction, without tag)
+xml_content = aitoolman.postprocess.get_xml_tag_content(xml_string, "result")
+# with tag
+xml_document = aitoolman.postprocess.get_xml_tag_content(xml_string, "result", with_tag=True)
 
 # JSON parsing (auto-fixes format errors)
-data = postprocess.parse_json(json_string)
+data = aitoolman.postprocess.parse_json(json_string)
 
 # XML parsing (extracts specified root tag and parses into dictionary)
-xml_dict = postprocess.parse_xml(xml_string, root="root_tag")
+xml_dict = aitoolman.postprocess.parse_xml(xml_string, "root_tag")
 ```
 
 **Default Processor Dictionary**:
@@ -431,7 +434,7 @@ DEFAULT_PROCESSORS = {
 ```python
 def custom_xml_processor(text: str) -> Tuple[str, str]:
     """Custom XML parsing processor"""
-    content = postprocess.get_xml_tag_content(text, root="classification")
+    content = aitoolman.postprocess.get_xml_tag_content(text, root="classification")
     main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
     sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
     return (main_category, sub_category)

@@ -406,18 +406,21 @@ class LLMModuleResult:
         pass
 ```
 
-### 2.8 postprocess.py - 后处理工具
+### 2.8 postprocess - 后处理工具
 
 **内置工具函数**：
 ```python
-# 提取XML根标签内容（不解析，仅提取原始内容）
-xml_content = postprocess.get_xml_tag_content(xml_string, root="result")
+import aitoolman.postprocess
+# 提取XML根标签内容（不解析，仅提取原始内容，不含标签）
+xml_content = aitoolman.postprocess.get_xml_tag_content(xml_string, "result")
+# 含标签
+xml_document = aitoolman.postprocess.get_xml_tag_content(xml_string, "result", with_tag=True)
 
 # JSON 解析（自动修复格式错误）
-data = postprocess.parse_json(json_string)
+data = aitoolman.postprocess.parse_json(json_string)
 
 # XML 解析（提取指定根标签并解析为字典）
-xml_dict = postprocess.parse_xml(xml_string, root="root_tag")
+xml_dict = aitoolman.postprocess.parse_xml(xml_string, "root_tag")
 ```
 
 **默认处理器字典**：
@@ -431,7 +434,7 @@ DEFAULT_PROCESSORS = {
 ```python
 def custom_xml_processor(text: str) -> Tuple[str, str]:
     """自定义XML解析处理器"""
-    content = postprocess.get_xml_tag_content(text, root="classification")
+    content = aitoolman.postprocess.get_xml_tag_content(text, root="classification")
     main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
     sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
     return (main_category, sub_category)
