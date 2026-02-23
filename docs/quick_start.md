@@ -18,14 +18,14 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **"AI �
 **关键流转节点**：
 1. **模板渲染**：Jinja2 模板 + 变量替换 → 最终提示词
 2. **消息构建**：渲染后的提示词 → Message 对象列表
-3. **请求发送**：Message 列表 → LLMRequest → HTTP API
-4. **响应处理**：API 响应 → TextChannel 流 → 后处理 → 最终结果
+3. **请求发送**：Message 列表 → LLMProviderRequest → HTTP API
+4. **响应处理**：API 响应 → TextFragmentChannel 流 → 后处理 → 最终结果
 
 ### 1.3 核心组件
 - **LLMApplication**：应用上下文，管理模块、模板、变量、通道和后处理器
 - **LLMModule**：封装"输入→模板→LLM→输出"的完整流程
 - **LLMClient**：抽象 LLM 提供商调用，支持本地和远程（ZeroMQ）模式
-- **TextChannel**：异步消息通道，支持流式片段传输
+- **TextFragmentChannel**：异步消息通道，支持流式片段传输
 - **FormatStrategy**：抽象不同 LLM 提供商的消息格式转换
 
 ## 2. 核心 API 参考
@@ -41,23 +41,22 @@ class LLMApplication:
         client: LLMClient,                      # LLM 客户端实例
         config_dict: Optional[Dict[str, Any]] = None,  # 配置字典（从 TOML 加载）
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # 自定义后处理器
-        channels: Optional[Dict[str, TextChannel]] = None,  # 自定义通道
+        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # 自定义通道
         context_id: Optional[str] = None      # 上下文 ID
     ) -> None
 ```
 
 **关键属性**：
 - `client: LLMClient` - LLM 客户端实例
-- `channels: Dict[str, TextChannel]` - 通道字典（默认包含 stdin/stdout/reasoning）
+- `channels: Dict[str, TextFragmentChannel]` - 通道字典（默认包含 stdin/stdout/reasoning）
 - `vars: Dict[str, Any]` - 全局变量，可在所有模板中访问
-- `modules: Dict[str, LLMModule]` - 已加载的模块实例
 - `processors: Dict[str, Callable[[str], Any]]` - 后处理器字典
 - `global_tools: Dict[str, Any]` - 全局工具集合，所有模块可引用
 
 **关键方法**：
 ```python
 # 动态访问模块（延迟加载）
-module = app.module_name  # 自动从配置初始化模块
+module = app['module_name']  # 自动从配置初始化模块
 
 # 添加后处理器
 app.add_processor("custom.parse_xml", parse_xml_function)
@@ -69,7 +68,7 @@ processor = app.get_processor("builtin.parse_json")
 text = app.render_template("template_name", **variables)
 
 # 添加自定义通道
-app.add_channel("custom", TextChannel(read_fragments=True))
+app.add_channel("custom", TextFragmentChannel(read_fragments=True))
 
 # 创建应用工厂（批量创建应用实例）
 @classmethod
@@ -78,7 +77,7 @@ def factory(
     client: LLMClient,
     config_dict: Optional[Dict[str, Any]] = None,
     processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-    channels: Optional[Dict[str, TextChannel]] = None,
+    channels: Optional[Dict[str, TextFragmentChannel]] = None,
 ) -> Callable[..., 'LLMApplication']:
     """创建可复用的应用工厂函数"""
     pass
@@ -93,6 +92,28 @@ app = app_factory()
 
 # 给LLMClient/LLMZmqServer发送自定义的审计事件
 await app.audit_event(event_type, **kwargs)
+
+# 执行工具调用（替换原 LLMModuleResult.call() 和 LLMProviderResponse.call() 方法）
+@staticmethod
+async def run_tool_calls(
+    module_result: LLMModuleResult, 
+    fn_map: Dict[str, Callable]
+) -> List[Message]:
+    """
+    执行模块返回的工具调用，并生成后续请求的上下文消息
+
+    Args:
+        module_result: 模块调用结果对象
+        fn_map: 工具名称到函数的映射
+
+    Returns:
+        包含工具调用结果的上下文消息列表，可用于后续LLM请求
+
+    Raises:
+        LLMError: 若模块调用失败
+        LLMResponseFormatError: 若工具未找到
+    """
+    pass
 ```
 
 ### 2.2 LLMModule / DefaultLLMModule - LLM 模块
@@ -108,7 +129,7 @@ class DefaultLLMModule(LLMModule):
 ```python
 async def process_task(app: aitoolman.LLMApplication, task_data: Dict[str, Any]) -> Dict[str, Any]:
     """单个任务处理函数"""
-    result: LLMModuleResult = await app.module_name(
+    result: LLMModuleResult = await app['module_name'](
         _media=MediaContent(...),  # 可选：多媒体内容
         **task_data                # 模板变量
     )
@@ -131,6 +152,7 @@ async with asyncio.TaskGroup() as tg:
 @dataclass
 class ModuleConfig:
     name: str                               # 模块名称
+    description: str = ""                   # 模块描述文本
     model: str                              # 使用的模型名称或别名
     templates: Dict[str, str]              # 模板字典（必须包含 user，可选 system）
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # 工具配置
@@ -138,7 +160,6 @@ class ModuleConfig:
     output_channel: Optional[TextFragmentOutput] = None  # 输出通道
     reasoning_channel: Optional[TextFragmentOutput] = None  # 推理通道
     post_processor: Optional[str] = None    # 后处理器名称（对应app.processors中的键）
-    save_context: bool = False              # 是否保存对话上下文
     options: Dict[str, Any] = field(default_factory=dict)  # 请求选项（temperature 等）
 ```
 
@@ -167,15 +188,15 @@ class LLMClient(abc.ABC):
 **关键方法**：
 ```python
 # 发送请求（由模块自动调用，通常不直接使用）
-request: LLMRequest = await client.request(
+request: LLMProviderRequest = await client.request(
     model_name: str,                        # 模型名称或别名
     messages: List[Message],               # 消息列表
     tools: Dict[str, Dict[str, Any]] = None,  # 工具配置
     options: Optional[Dict[str, Any]] = None,  # 请求选项
     stream: bool = False,                   # 是否流式
     context_id: Optional[str] = None,      # 上下文 ID
-    response_channel: Optional[TextChannel] = None,  # 响应通道
-    reasoning_channel: Optional[TextChannel] = None   # 推理通道
+    output_channel: Optional[TextFragmentChannel] = None,  # 响应通道
+    reasoning_channel: Optional[TextFragmentChannel] = None   # 推理通道
 )
 
 # 取消请求
@@ -195,22 +216,23 @@ await client.close()
 # 作为异步上下文管理器（推荐）
 async with LLMLocalClient(api_config) as client:
     app = LLMApplication(client, app_config)
-    result = await app.module_name(...)
+    result = await app['module_name'](...)
 ```
 
-### 2.4 Channel / TextChannel - 通道系统
+### 2.4 Channel / TextFragmentChannel - 通道系统
 
 **作用**：异步消息传递通道，支持完整消息和片段传输
 
 ```python
-class TextChannel(Channel):
+class TextFragmentChannel(Channel):
     def __init__(self, read_fragments: bool = False) -> None
 ```
 
 **关键方法**：
+
 ```python
 # 写入完整消息
-await channel.write_message("完整消息内容")
+await channel.write("完整消息内容")
 
 # 写入消息片段（流式）
 await channel.write_fragment("片段1", end=False)
@@ -218,7 +240,7 @@ await channel.write_fragment("片段2", end=False)
 await channel.write_fragment("片段3", end=True)  # 标记结束
 
 # 读取完整消息（非流式模式）
-message: Optional[str] = await channel.read_message()
+message: Optional[str] = await channel.read()
 
 # 读取消息片段（流式模式）
 fragment: Optional[str] = await channel.read_fragment()  # None 表示结束
@@ -237,20 +259,20 @@ fragment: Optional[str] = await channel.read_fragment()  # None 表示结束
 class XmlTagToChannelFilter(BaseXmlTagFilter):
     def __init__(
         self,
-        default_channel: TextChannel,           # 默认通道（未匹配标签）
-        channel_map: Dict[str, TextChannel]    # 标签到通道的映射
+        default_channel: TextFragmentChannel,           # 默认通道（未匹配标签）
+        channel_map: Dict[str, TextFragmentChannel]    # 标签到通道的映射
     ) -> None
 ```
 
 **使用示例**：
 ```python
 # 创建通道
-response_channel = TextChannel(read_fragments=True)
-reasoning_channel = TextChannel(read_fragments=True)
+output_channel = TextFragmentChannel(read_fragments=True)
+reasoning_channel = TextFragmentChannel(read_fragments=True)
 
 # 创建过滤器
 filter = XmlTagToChannelFilter(
-    default_channel=response_channel,
+    default_channel=output_channel,
     channel_map={"reasoning": reasoning_channel}
 )
 
@@ -261,11 +283,11 @@ await filter.write_fragment("<response>最终答案</response>", end=True)
 
 ### 2.6 collect_text_channels - 多通道收集器
 
-**作用**：同时监听多个 TextChannel，生成统一的事件流
+**作用**：同时监听多个 TextFragmentChannel，生成统一的事件流
 
 ```python
 async def collect_text_channels(
-    channels: Dict[str, TextChannel],           # 通道字典（名称→通道）
+    channels: Dict[str, TextFragmentChannel],           # 通道字典（名称→通道）
     read_fragments: bool = True,               # 是否以片段模式读取
     timeout: Optional[float] = None            # 超时时间（秒）
 ) -> AsyncGenerator[ChannelEvent, None]
@@ -298,8 +320,7 @@ async for event in collect_text_channels(channels, read_fragments=True):
 
 **Message - 消息对象**：
 ```python
-@dataclass
-class Message:
+class Message(typing.NamedTuple):
     role: Optional[str] = None                # 角色：system/user/assistant/tool
     content: Optional[str] = None            # 文本内容
     media_content: Optional[MediaContent] = None  # 多媒体内容
@@ -308,10 +329,21 @@ class Message:
     raw_value: Optional[Dict] = None         # 原始值（直接传递给提供商）
 ```
 
-**LLMRequest - 请求对象**：
+```python
+message = Message.from_content("Hello", role="user")  # 替换原 Message("Hello", role="user")
+message_with_media = Message.from_content(
+    content="图片内容描述", 
+    role="user", 
+    media_content=MediaContent(...)
+)
+message_raw = Message.from_content({"role": "user", "content": "Raw message"})  # 直接传入原始格式字典
+```
+
+
+**LLMProviderRequest - 原始请求对象**：
 ```python
 @dataclass
-class LLMRequest:
+class LLMProviderRequest:
     client_id: str                            # 客户端 ID
     context_id: Optional[str]                 # 上下文 ID
     request_id: str                          # 请求 ID
@@ -320,16 +352,16 @@ class LLMRequest:
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # 工具配置
     options: Dict[str, Any] = field(default_factory=dict)  # 请求选项
     stream: bool = False                     # 是否流式
-    response_channel: Optional[TextChannel] = None  # 响应通道
-    reasoning_channel: Optional[TextChannel] = None  # 推理通道
+    output_channel: Optional[TextFragmentChannel] = None  # 响应通道
+    reasoning_channel: Optional[TextFragmentChannel] = None  # 推理通道
     is_cancelled: bool = False               # 是否已取消
-    response: asyncio.Future[LLMResponse] = field(default_factory=asyncio.Future)
+    response: asyncio.Future[LLMProviderResponse] = field(default_factory=asyncio.Future)
 ```
 
-**LLMResponse - 响应对象**：
+**LLMProviderResponse - 原始响应对象**：
 ```python
 @dataclass
-class LLMResponse:
+class LLMProviderResponse:
     client_id: str
     context_id: str
     request_id: str
@@ -356,28 +388,37 @@ class LLMResponse:
     def raise_for_status(self) -> None:
         """根据finish_reason抛出对应的异常"""
         pass
-
-    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
-        """
-        执行工具调用
-
-        Args:
-            fn_map: 工具名称到函数的映射
-
-        Returns:
-            工具调用ID到结果的字典
-
-        Raises:
-            LLMError: 若调用失败
-            LLMResponseFormatError: 若工具未找到
-        """
-        pass
 ```
 
-**LLMModuleResult - 模块结果**：
+**LLMDirectRequest - 直接请求参数**（app.send_request）：
+```python
+class LLMDirectRequest(typing.NamedTuple):
+    """LLMApplication 直接请求参数"""
+    model_name: str
+    messages: List[Message]
+    tools: Optional[Dict[str, Dict[str, Any]]] = None
+    options: Optional[Dict[str, Any]] = None
+    stream: bool = False,
+    output_channel: Union[str, TextFragmentChannel, None] = None
+    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+```
+
+**LLMModuleResult - 模板请求参数**：
+```python
+class LLMModuleRequest(typing.NamedTuple):
+    """LLMApplication 模板请求参数（模块配置）"""
+    module_name: str
+    template_params: Dict[str, Any]
+    model_name: Optional[str] = None
+    context_messages: List[Message] = []
+    media_content: Optional[MediaContent] = None
+```
+
+**LLMModuleResult - 模板请求响应**：
 ```python
 @dataclass
 class LLMModuleResult:
+    module_name: str = ""                   # 所属模块名称
     response_text: str = ""                   # 原始响应文本
     response_reasoning: str = ""            # 原始推理内容
     text: str = ""                           # 处理后文本（后处理前的原始文本）
@@ -391,18 +432,6 @@ class LLMModuleResult:
 
     def raise_for_status(self) -> None:
         """根据status抛出对应的异常"""
-        pass
-
-    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
-        """
-        执行工具调用
-
-        Args:
-            fn_map: 工具名称到函数的映射
-
-        Returns:
-            工具调用ID到结果的字典
-        """
         pass
 ```
 
@@ -446,6 +475,170 @@ app.add_processor("custom.parse_classification", custom_xml_processor)
 # post_processor = "custom.parse_classification"
 ```
 
+### 2.9 LLMWorkflow - 工作流引擎
+
+#### 2.9.1 核心概念
+LLMWorkflow 是基于 LLMApplication 扩展的工作流引擎，支持动态任务调度，可实现多任务依赖管理、并行执行和错误传播。
+
+用户可以用两种方式用 LLMTask 构建工作流：
+* 设置 LLMTask.next_task，通过 run，串行执行；run 只会有一个实例
+* 用 add_task/wait_tasks 添加依赖任务；可以在 LLMTask.pre/post_process 中动态生成并等待任务
+
+
+#### 2.9.2 核心 API 参考
+
+**LLMTask - 工作流任务节点**：
+```python
+@dataclasses.dataclass
+class LLMTask:
+    app: LLMApplication
+    task_name: str
+    input_data: Any
+    module_name: str = ''
+    task_id: str = dataclasses.field(default_factory=get_id)
+    description: str = ''
+    module_result: Optional[LLMModuleResult] = None
+    output_data: Any = None
+    next_task: Optional['LLMTask'] = None  # 链式任务下一个节点
+    status: LLMTaskStatus = LLMTaskStatus.INIT
+    status_event: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    error: Optional[Exception] = None
+
+    async def pre_process(self) -> Union[LLMModuleRequest, LLMDirectRequest, None]:
+        """
+        任务前处理钩子（可重写）
+        默认使用 input_data 作为模块参数，可用于动态生成输入、等待依赖任务、添加上下文
+        """
+        pass
+
+    async def post_process(self):
+        """
+        任务后处理钩子（可重写）
+        默认将 module_result.data 赋值给 output_data，可用于解析结果、生成下一个任务
+        """
+        pass
+```
+
+**LLMWorkflow - 工作流调度器**：
+```python
+class LLMWorkflow(LLMApplication):
+    def __init__(
+        self,
+        client: Any,
+        config_dict: Optional[Dict[str, Any]] = None,
+        processors: Optional[Dict[str, Callable[[str], Any]]] = None,
+        channels: Optional[Dict[str, Any]] = None,
+        context_id: Optional[str] = None,
+        max_parallel_tasks: int = 5  # 最大并行任务数
+    ) -> None:
+        super().__init__(...)
+        self.max_parallel_tasks = max_parallel_tasks
+
+    def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
+        """
+        添加任务依赖
+        - current_task: 当前任务（依赖方），为None时仅添加任务不设置依赖
+        - dependent_task: 被依赖的任务（需先执行）
+        """
+        pass
+
+    async def wait_tasks(self, *tasks: LLMTask, timeout: Optional[float] = None):
+        """等待指定任务完成，自动处理依赖调度"""
+        pass
+
+    async def run(self, start_task: LLMTask) -> LLMTask:
+        """运行工作流，从起始任务开始，支持链式任务（通过 next_task 串联）"""
+        pass
+```
+
+**LLMTaskStatus - 任务状态枚举**：
+```python
+class LLMTaskStatus(enum.Enum):
+    INIT = 0    # 初始化
+    WAITING = 1    # 待执行
+    RUNNING = 2    # 执行中
+    COMPLETED = 3  # 已完成
+    FAILED = 4     # 已失败
+    DEPENDENCY_FAILED = 5  # 依赖任务失败导致当前任务终止
+```
+
+#### 2.9.3 使用示例
+
+**链式任务示例**：
+
+```python
+import aitoolman
+from aitoolman import LLMWorkflow, LLMTask
+
+
+async def main():
+  # 初始化工作流
+  api_config = aitoolman.load_config("config/llm_config.toml")
+  app_config = aitoolman.load_config("config/app_prompt.toml")
+
+  async with aitoolman.LLMLocalClient(api_config) as client:
+    workflow = LLMWorkflow(client, app_config)
+
+    # 创建任务链
+    task1 = LLMTask(
+      workflow=workflow,
+      task_name="分类任务",
+      input_data={"content": "用户输入内容"},
+      module_name="classify_ticket"
+    )
+
+    task2 = LLMTask(
+      workflow=workflow,
+      task_name="摘要任务",
+      input_data={"text": "{{output_data}}"},  # 可引用前任务的 output_data
+      module_name="summerize"
+    )
+    task1.next_task = task2
+
+    # 运行工作流
+    final_task = await workflow.run(task1)
+    print(f"最终结果: {final_task.output_data}")
+```
+
+**并行依赖任务示例**：
+```python
+async def main():
+    # 初始化工作流
+    # ...（省略初始化代码）
+    
+    # 创建并行任务
+    task_a = LLMTask(
+        app=workflow,
+        task_name="情感分析",
+        input_data={"text": "文本内容"},
+        module_name="sentiment_analysis"
+    )
+    
+    task_b = LLMTask(
+        app=workflow,
+        task_name="实体提取",
+        input_data={"text": "文本内容"},
+        module_name="entity_extraction"
+    )
+    
+    # 创建合并任务，依赖 task_a 和 task_b 完成
+    task_merge = LLMTask(
+        app=workflow,
+        task_name="结果合并",
+        input_data={"sentiment": "{{task_a.output_data}}", "entities": "{{task_b.output_data}}"},
+        module_name="merge_results"
+    )
+    
+    # 设置依赖关系
+    workflow.add_task(task_merge, task_a)
+    workflow.add_task(task_merge, task_b)
+    
+    # 等待合并任务完成
+    await workflow.wait_tasks(task_merge)
+    print(f"合并结果: {task_merge.output_data}")
+```
+
+
 ## 3. 提示词配置文件格式（app_prompt.toml）
 
 ### 3.1 文件结构
@@ -457,7 +650,6 @@ model = "Doubao-Seed-1.6"    # 默认模型（可以是模型名称或别名，�
 stream = false                # 默认非流式输出
 output_channel = "stdout"     # 默认输出通道
 reasoning_channel = "reasoning"  # 默认推理通道
-save_context = false          # 默认不保存上下文
 options = { temperature = 0.7, max_tokens = 4000 }  # 默认请求选项
 
 # 全局模板（可用 LLMApplication.render_template 渲染）
@@ -476,7 +668,6 @@ template.user = "用户模板 {{input}}"
 template.system = "系统指令"
 tools = { }                   # 工具配置（见下文）
 post_processor = "builtin.parse_json"  # 后处理器名称（对应app.processors中的键）
-save_context = true           # 覆盖默认上下文设置
 options = { temperature = 0.5 }  # 覆盖默认选项
 ```
 
@@ -572,7 +763,6 @@ tools."add_task" = {}
 [module.task_planner]
 model = "Fast-Model"  # 使用快速推理模型别名
 stream = true
-save_context = true
 template.user = """
 你作为日程助手，分析用户指令：
 - 如果有具体待办事项，调用 add_task 工具
@@ -604,7 +794,6 @@ model = "Fast-Model"         # 默认使用快速推理模型
 stream = false
 output_channel = "stdout"
 reasoning_channel = "reasoning"
-save_context = false
 options = { temperature = 0.7, max_tokens = 4000 }
 
 # 全局模板
@@ -642,7 +831,6 @@ post_processor = "builtin.parse_json"
 [module.task_planner]
 model = "Fast-Model"         # 使用快速推理模型
 stream = true
-save_context = true
 template.user = """
 你作为日程助手，分析用户指令：
 - 如果有具体待办事项，调用 add_task 工具
@@ -683,7 +871,6 @@ post_processor = "builtin.parse_json"
 [module.chat]
 model = "Doubao-Seed-1.6"
 stream = true
-save_context = true
 template.user = "{{message}}"
 ```
 
@@ -722,7 +909,7 @@ def parse_classification(text: str) -> Tuple[str, str]:
 # 单个任务处理函数
 async def process_ticket(app: aitoolman.LLMApplication, ticket: Dict[str, Any]) -> Dict[str, Any]:
     """处理工单分类"""
-    result = await app.classify_ticket(**ticket)
+    result = await app['classify_ticket'](**ticket)
     result.raise_for_status()  # 自动处理异常
     return {
         "ticket_id": ticket["工单ID"],
@@ -880,6 +1067,7 @@ async def run_pipeline():
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # 接口认证令牌（可选）
 
 # 默认配置
 [default]
@@ -928,7 +1116,7 @@ import logging
 import aitoolman
 
 try:
-    result = await app.module_name(**params)
+    result = await app['module_name'](**params)
     result.raise_for_status()  # 自动处理异常
 
     if result.status == aitoolman.FinishReason.tool_calls:
@@ -959,6 +1147,13 @@ except Exception as e:
 - **批量处理**：使用 `asyncio.TaskGroup` 并行处理多个任务，提升吞吐量
 - **缓存策略**：对重复请求结果进行缓存，减少不必要的 LLM 调用
 - **模型选型**：根据任务类型定义并选择合适的模型别名，再给别名配置合适的具体模型
+- **工作流并行控制**：通过 `LLMWorkflow` 的 `max_parallel_tasks` 参数限制并行任务数，避免资源拥挤
+- **任务依赖**：使用工作流引擎自动处理任务依赖，减少手动编写异步等待逻辑的复杂度
+
+### 6.4 安全策略
+- **Token**：为ZeroMQ接口配置`zmq_auth_token`，确保客户端和服务端使用相同的令牌
+- **网络隔离**：在生产环境中，通过网络策略限制对ZMQ端口的访问
+- **密钥管理**：妥善管理配置文件，避免未授权的访问
 
 ## 7. 总结
 
@@ -969,4 +1164,4 @@ aitoolman 框架通过清晰的架构设计和灵活的配置系统，让开发�
 3. **轻松扩展**：支持自定义处理器、通道和格式策略，适配不同业务需求
 4. **灵活部署**：支持本地调用和微服务架构，适应不同场景需求
 
-通过理解 `LLMApplication`、`LLMModule`、`LLMClient` 和 `TextChannel` 的协作关系，开发者可以高效构建稳定、可维护的 LLM 应用。
+通过理解 `LLMApplication`、`LLMModule`、`LLMClient` 和 `TextFragmentChannel` 的协作关系，开发者可以高效构建稳定、可维护的 LLM 应用。

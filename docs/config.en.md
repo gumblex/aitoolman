@@ -6,10 +6,11 @@
 ### 1.1 [server] Section
 Configure network ports for the ZeroMQ server.
 
-| Parameter         | Type    | Default Value       | Description                                                                 |
-|-------------------|---------|---------------------|-----------------------------------------------------------------------------|
-| `zmq_router_rpc`  | String  | None (Required)     | Bind address for the ZeroMQ ROUTER socket, used to handle client requests. Format: `tcp://*:port` or `tcp://IP:port` |
-| `zmq_pub_event`   | String  | None (Required)     | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above |
+| Parameter         | Type   | Default Value   | Description                                                                                                          |
+|-------------------|--------|-----------------|----------------------------------------------------------------------------------------------------------------------|
+| `zmq_router_rpc`  | String | None (Required) | Bind address for the ZeroMQ ROUTER socket, used to handle client requests. Format: `tcp://*:port` or `tcp://IP:port` |
+| `zmq_pub_event`   | String | None (Required) | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above                             |
+| `zmq_auth_token`  | String | None (Optional) | Any string for authentication                                                                                        |
 
 ### 1.2 [default] Section
 Default configuration inherited by all model configurations.
@@ -50,6 +51,7 @@ Model alias configuration to simplify model name usage and enable friendly names
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
 
 [default]
 timeout = 600
@@ -91,24 +93,23 @@ Default module configuration inherited by all modules.
 | `stream`            | Boolean | false               | Whether to use streaming output                                             |
 | `output_channel`    | String  | "stdout"            | Default output channel name                                                 |
 | `reasoning_channel` | String  | "reasoning"         | Default reasoning channel name                                              |
-| `save_context`      | Boolean | false               | Whether to save conversation context                                        |
 | `post_processor`    | String  | None                | Post-processor name, must be registered in the application                  |
 | `options`           | Dict    | `{}`                | Default request options such as temperature, max_tokens, etc.               |
 
 ### 2.2 [module."Module Name"] Section
 Specific configuration for each module, module names can be customized.
 
-| Parameter           | Type    | Default Value                                      | Description                                                                 |
-|---------------------|---------|----------------------------------------------------|-----------------------------------------------------------------------------|
-| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module                                      |
-| `stream`            | Boolean | Inherited from `[module_default].stream`            | Whether this module uses streaming output                                     |
-| `output_channel`    | String  | Inherited from `[module_default].output_channel`    | Output channel for this module                                                |
-| `reasoning_channel` | String  | Inherited from `[module_default].reasoning_channel` | Reasoning channel for this module                                             |
-| `save_context`      | Boolean | Inherited from `[module_default].save_context`      | Whether this module saves conversation context                               |
-| `post_processor`    | String  | Inherited from `[module_default].post_processor`    | Post-processor for this module                                                |
-| `options`           | Dict    | Inherited from `[module_default].options`           | Request options for this module                                              |
-| `template`          | Dict    | `{}`                                               | Template configuration, must include a `user` template, optionally a `system` template |
-| `tools`             | Dict    | `{}`                                               | Tool call configuration, see format details below                            |
+| Parameter           | Type    | Default Value                                       | Description                                                                            |
+|---------------------|---------|-----------------------------------------------------|----------------------------------------------------------------------------------------|
+| `description`       | String  | `''`                                                | Description text for this module                                                       |
+| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module                                                |
+| `stream`            | Boolean | Inherited from `[module_default].stream`            | Whether this module uses streaming output                                              |
+| `output_channel`    | String  | Inherited from `[module_default].output_channel`    | Output channel for this module                                                         |
+| `reasoning_channel` | String  | Inherited from `[module_default].reasoning_channel` | Reasoning channel for this module                                                      |
+| `post_processor`    | String  | Inherited from `[module_default].post_processor`    | Post-processor for this module                                                         |
+| `options`           | Dict    | Inherited from `[module_default].options`           | Request options for this module                                                        |
+| `template`          | Dict    | `{}`                                                | Template configuration, must include a `user` template, optionally a `system` template |
+| `tools`             | Dict    | `{}`                                                | Tool call configuration, see format details below                                      |
 
 ### 2.3 [template] Section
 Global templates, can be rendered using `LLMApplication.render_template`.
@@ -150,7 +151,6 @@ tools."Tool Name".param."Parameter Name".required = true   # Whether the paramet
 model = "Fast-Model"  # Using model alias
 stream = false
 output_channel = "stdout"
-save_context = false
 
 [module.raw]
 template.user = """{{content}}"""
@@ -176,7 +176,6 @@ template.user = """Please write a code example for {{functionality}} using {{lan
 [module.task_adder]
 model = "Fast-Model"  # Using model alias
 stream = true
-save_context = true
 template.user = "As a schedule assistant, you can help users add to-do items. Analyze the user's instruction: if there are specific to-do items, call the tool; if not, ask the user to provide detailed information about the task. User says: {{user_input}}"
 
 tools."add_task".type = "function"
@@ -213,13 +212,13 @@ app = aitoolman.LLMApplication(client, app_config)
 ### 3.2 Calling Modules
 ```python
 # Call the summerize module
-result = await app.summerize(
+result = await app['summerize'](
     title="Development of Artificial Intelligence",
     content="Artificial intelligence has made breakthrough progress in recent years..."
 )
 
 # Call the task_adder module (supports tool calls)
-result = await app.task_adder(
+result = await app['task_adder'](
     user_input="Meeting at 3 PM tomorrow"
 )
 ```
@@ -251,8 +250,6 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Streaming Output**: When `stream=true`, output will be sent in fragments via the channel's `write_fragment` method.
 
-5. **Context Saving**: When `save_context=true`, the module will automatically save conversation history for subsequent calls.
+5. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-6. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
-
-7. **Model Alias Mapping**: Aliases in `[model_alias]` must map to model names already defined in the `[api]` section. It is recommended to use aliases in app_prompt.toml to facilitate model replacement by end users.
+6. **Model Alias Mapping**: Aliases in `[model_alias]` must map to model names already defined in the `[api]` section. It is recommended to use aliases in app_prompt.toml to facilitate model replacement by end users.

@@ -57,12 +57,12 @@ graph TB
     
     subgraph "Channel Layer"
         Channel[Channel]
-        TextChannel[TextChannel]
+        TextFragmentChannel[TextFragmentChannel]
     end
     
     subgraph "Data Models"
-        Request[LLMRequest]
-        Response[LLMResponse]
+        Request[LLMProviderRequest]
+        Response[LLMProviderResponse]
         Message[Message]
         LLMModuleResult[LLMModuleResult]
     end
@@ -87,7 +87,7 @@ graph TB
     Request --> Message
     Response --> LLMModuleResult
     
-    Channel --> TextChannel
+    Channel --> TextFragmentChannel
 ```
 
 ### Data Flow Diagram
@@ -99,7 +99,7 @@ flowchart TD
     end
     
     subgraph "Request Construction"
-        MESSAGES --> REQUEST[LLMRequest]
+        MESSAGES --> REQUEST[LLMProviderRequest]
         REQUEST --> FORMAT[Format Strategy]
         FORMAT --> REQ_BODY[Request Body]
     end
@@ -118,7 +118,7 @@ flowchart TD
         SSE --> FRAGMENT[Write Fragment]
         BATCH --> FULL[Write Full Response]
         
-        FRAGMENT --> CHANNEL[TextChannel]
+        FRAGMENT --> CHANNEL[TextFragmentChannel]
         FULL --> CHANNEL
         
         CHANNEL --> MULTI_CHANNEL[Multi-Channel Distribution]
@@ -148,7 +148,7 @@ sequenceDiagram
     participant Provider as ProviderManager
     participant Resource as ResourceManager
     participant API as External API
-    participant Channel as TextChannel
+    participant Channel as TextFragmentChannel
     
     User->>App: Create application context
     App->>Module: Initialize module
@@ -160,7 +160,7 @@ sequenceDiagram
     Module->>Module: Build message list
     Module->>Client: request(model, messages, tools)
     
-    Client->>Provider: process_request(LLMRequest)
+    Client->>Provider: process_request(LLMProviderRequest)
     
     Provider->>Resource: acquire(model resource)
     Resource-->>Provider: Resource granted
@@ -180,7 +180,7 @@ sequenceDiagram
     
     Provider->>Resource: release(resource)
     
-    Provider-->>Client: LLMResponse
+    Provider-->>Client: LLMProviderResponse
     Client-->>Module: LLMModuleResult
     Module-->>User: Processing result
 ```

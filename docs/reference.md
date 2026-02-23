@@ -10,9 +10,7 @@
 - **下游**: 管理多个LLMModule实例，协调它们之间的数据流
 
 **主要方法**:
-- `__init__(client: _client.LLMClient, config_dict: Optional[Dict[str, Any]] = None, processors: Optional[Dict[str, Callable[[str], Any]]] = None, channels: Optional[Dict[str, _channel.TextChannel]] = None, context_id: Optional[str] = None)`: 初始化应用上下文，支持传入自定义后处理器和通道
-- `init_all_modules()`: 从配置加载所有模块
-- `init_module_from_config(module_name, module_config)`: 从配置初始化单个模块
+- `__init__(client: _client.LLMClient, config_dict: Optional[Dict[str, Any]] = None, processors: Optional[Dict[str, Callable[[str], Any]]] = None, channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None, context_id: Optional[str] = None)`: 初始化应用上下文，支持传入自定义后处理器和通道
 - `__getattr__(name)`: 通过属性访问模块（延迟加载）
 - `add_processor(name, processor)`: 添加后处理器
 - `render_template(template_name, **kwargs)`: 渲染命名模板
@@ -40,7 +38,7 @@
 - **下游**: LLMProviderManager处理实际API调用
 
 **主要方法**:
-- `request(model_name, messages, tools, options, stream, context_id, response_channel, reasoning_channel)`: 发送LLM请求，支持流式输出和通道回调
+- `request(model_name, messages, tools, options, stream, context_id, output_channel, reasoning_channel)`: 发送LLM请求，支持流式输出和通道回调
 - `cancel(request_id)`: 取消指定请求
 - `initialize()`: 初始化客户端（用 async with 可以替代 initialize/close）
 - `close()`: 关闭客户端
@@ -76,7 +74,7 @@
 - `parse_batch_response(response, response_data)`: 解析批量响应
 - `parse_stream_event(response, event)`: 解析流式事件
 
-### Channel / TextChannel - 通道系统
+### Channel / TextFragmentChannel - 通道系统
 **说明**: 异步消息传递通道，支持完整消息和片段传输。
 
 **上下游关系**:
@@ -126,5 +124,4 @@
 - `output_channel`: 输出通道
 - `reasoning_channel`: 推理通道
 - `post_processor`: 后处理器函数
-- `save_context`: 是否保存上下文
 - `options`: 额外模型参数（如temperature、max_tokens等）

@@ -57,12 +57,12 @@ graph TB
     
     subgraph "通道层"
         Channel[Channel]
-        TextChannel[TextChannel]
+        TextFragmentChannel[TextFragmentChannel]
     end
     
     subgraph "数据模型"
-        Request[LLMRequest]
-        Response[LLMResponse]
+        Request[LLMProviderRequest]
+        Response[LLMProviderResponse]
         Message[Message]
         LLMModuleResult[LLMModuleResult]
     end
@@ -87,7 +87,7 @@ graph TB
     Request --> Message
     Response --> LLMModuleResult
     
-    Channel --> TextChannel
+    Channel --> TextFragmentChannel
 ```
 
 ### 数据流图
@@ -99,7 +99,7 @@ flowchart TD
     end
     
     subgraph "请求构建"
-        MESSAGES --> REQUEST[LLMRequest]
+        MESSAGES --> REQUEST[LLMProviderRequest]
         REQUEST --> FORMAT[格式策略]
         FORMAT --> REQ_BODY[请求体]
     end
@@ -118,7 +118,7 @@ flowchart TD
         SSE --> FRAGMENT[片段写入]
         BATCH --> FULL[完整写入]
         
-        FRAGMENT --> CHANNEL[TextChannel]
+        FRAGMENT --> CHANNEL[TextFragmentChannel]
         FULL --> CHANNEL
         
         CHANNEL --> MULTI_CHANNEL[多通道分发]
@@ -148,7 +148,7 @@ sequenceDiagram
     participant Provider as ProviderManager
     participant Resource as ResourceManager
     participant API as 外部API
-    participant Channel as TextChannel
+    participant Channel as TextFragmentChannel
     
     User->>App: 创建应用上下文
     App->>Module: 初始化模块
@@ -160,7 +160,7 @@ sequenceDiagram
     Module->>Module: 构建Message列表
     Module->>Client: request(model, messages, tools)
     
-    Client->>Provider: process_request(LLMRequest)
+    Client->>Provider: process_request(LLMProviderRequest)
     
     Provider->>Resource: acquire(模型资源)
     Resource-->>Provider: 资源许可
@@ -180,7 +180,7 @@ sequenceDiagram
     
     Provider->>Resource: release(资源)
     
-    Provider-->>Client: LLMResponse
+    Provider-->>Client: LLMProviderResponse
     Client-->>Module: LLMModuleResult
     Module-->>User: 处理结果
 ```

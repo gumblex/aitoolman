@@ -9,23 +9,25 @@ import zmq
 import zmq.asyncio
 
 from . import util
-from .model import LLMRequest, LLMResponse, FinishReason, ToolCall, Message
-from .channel import TextChannel
+from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, ToolCall, Message
+from .channel import TextFragmentChannel
 from .client import LLMClient
 
 logger = logging.getLogger(__name__)
 
 
 class LLMZmqClient(LLMClient):
-    def __init__(self, router_endpoint: str):
+    def __init__(self, router_endpoint: str, auth_token: Optional[str] = None):
         super().__init__()
         self.router_endpoint = router_endpoint
+        self.auth_token = auth_token
         self.ctx = zmq.asyncio.Context()
         self.socket = self.ctx.socket(zmq.DEALER)
         self.socket.setsockopt_string(zmq.IDENTITY, self.client_id)
-        self.active_requests: Dict[str, LLMRequest] = {}  # request_id -> LLMRequest
+        self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
         self.listener_task: Optional[asyncio.Task] = None
         self.connected = False
+        self.auth_future: Optional[asyncio.Future] = None  # 认证等待Future
 
     async def connect(self):
         """连接服务器并启动监听"""
@@ -34,6 +36,9 @@ class LLMZmqClient(LLMClient):
         self.socket.connect(self.router_endpoint)
         self.listener_task = asyncio.create_task(self.listen_responses())
         self.connected = True
+
+        if self.auth_token:
+            await self.authenticate()
         logger.info(f"Connected to {self.router_endpoint}")
 
     async def initialize(self):
@@ -57,7 +62,7 @@ class LLMZmqClient(LLMClient):
         self.socket.close()
         self.ctx.term()
         self.connected = False
-        logger.info("Client closed")
+        logger.debug("Client closed")
 
     async def listen_responses(self):
         """监听服务器响应"""
@@ -71,6 +76,13 @@ class LLMZmqClient(LLMClient):
                 json_data = json.loads(message[1].decode('utf-8'))
                 msg_type = json_data.get('type')
                 request_id = json_data.get('request_id')
+
+                if msg_type == 'auth_response':
+                    await self.handle_auth_response(request_id, json_data.get('success', False))
+                    continue
+                elif msg_type == 'error':
+                    logger.error(f"Server error: {json_data.get('error')}")
+                    continue
 
                 request = self.active_requests.get(request_id)
                 if not request:
@@ -90,16 +102,45 @@ class LLMZmqClient(LLMClient):
             except Exception as e:
                 logger.exception("Error in listener task")
 
-    async def handle_channel_write(self, request: LLMRequest, json_data: Dict[str, Any]):
+    async def authenticate(self):
+        """发送认证消息并等待响应"""
+        request_id = util.get_id()
+        self.auth_future = asyncio.Future()
+
+        auth_msg = {
+            'type': 'auth',
+            'request_id': request_id,
+            'token': self.auth_token
+        }
+        await self.socket.send_multipart([
+            b'',
+            util.encode_message(auth_msg)
+        ])
+
+        # 等待认证响应（超时1秒）
+        try:
+            await asyncio.wait_for(self.auth_future, timeout=1)
+            if self.auth_future.result():
+                logger.info("Authentication successful")
+            else:
+                raise RuntimeError("Authentication failed")
+        except asyncio.TimeoutError:
+            raise RuntimeError("Authentication timeout")
+
+    async def handle_auth_response(self, request_id: str, success: bool):
+        """处理认证响应"""
+        if self.auth_future and not self.auth_future.done():
+            self.auth_future.set_result(success)
+
+    async def handle_channel_write(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理channel写入消息"""
         channel_type = json_data['channel']
-        mode = json_data['mode']
+        # mode = json_data['mode']
         text = json_data['text']
-        end = json_data['end']
 
         channel = None
         if channel_type == 'response':
-            channel = request.response_channel
+            channel = request.output_channel
         elif channel_type == 'reasoning':
             channel = request.reasoning_channel
 
@@ -107,17 +148,19 @@ class LLMZmqClient(LLMClient):
             logger.debug(f"Request {request.request_id} has no {channel_type} channel")
             return
 
-        if mode == 'fragment':
-            await channel.write_fragment(text, end)
-        elif mode == 'message':
-            await channel.write_message(text)
+        await channel.write(text)
 
-    async def handle_response(self, request: LLMRequest, json_data: Dict[str, Any]):
+    async def handle_response(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理完整响应"""
         response_data = json_data['response']
         # 构造LLMResponse
         finish_reason = FinishReason(response_data['finish_reason']) if response_data['finish_reason'] in FinishReason.__members__ else response_data['finish_reason']
-        response = LLMResponse(
+        if not response_data['response_text'] and not response_data['response_reasoning']:
+            if request.reasoning_channel:
+                await request.reasoning_channel.write(None)
+            if request.output_channel:
+                await request.output_channel.write(None)
+        response = LLMProviderResponse(
             client_id=response_data['client_id'],
             context_id=response_data['context_id'],
             request_id=response_data['request_id'],
@@ -140,7 +183,7 @@ class LLMZmqClient(LLMClient):
         request.response.set_result(response)
         del self.active_requests[request.request_id]
 
-    async def handle_cancel_ack(self, request: LLMRequest):
+    async def handle_cancel_ack(self, request: LLMProviderRequest):
         """处理取消确认"""
         request.is_cancelled = True
         del self.active_requests[request.request_id]
@@ -154,17 +197,17 @@ class LLMZmqClient(LLMClient):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            response_channel: Optional[TextChannel] = None,
-            reasoning_channel: Optional[TextChannel] = None
-    ) -> LLMRequest:
+            output_channel: Optional[TextFragmentChannel] = None,
+            reasoning_channel: Optional[TextFragmentChannel] = None
+    ) -> LLMProviderRequest:
         """发送LLM请求（实现LLMClient抽象方法）"""
         if not self.connected:
             raise RuntimeError("Client not connected")
 
         # 构造LLMRequest
-        request = self._make_request(
+        request = self.make_request(
             model_name, messages, tools, options, stream,
-            context_id, response_channel, reasoning_channel
+            context_id, output_channel, reasoning_channel
         )
         self.active_requests[request.request_id] = request
 

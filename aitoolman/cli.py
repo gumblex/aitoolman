@@ -11,39 +11,11 @@ from . import channel as _channel
 logger = logging.getLogger(__name__)
 
 
-async def print_channel_text(
-        response_channel: _channel.TextChannel,
-        reasoning_channel: _channel.TextChannel
-):
-    channels = {
-        'response': response_channel,
-        'reasoning': reasoning_channel,
-    }
-    reasoning_started = False
-    response_started = False
-    async for event in _channel.collect_text_channels(
-            channels, read_fragments=True
-    ):
-        if event.channel == 'reasoning' and not reasoning_started:
-            print("\n[Thinking]", flush=True)
-            reasoning_started = True
-        elif (
-            ((event.channel == 'reasoning' and event.is_end) or event.channel == 'response') and
-            not response_started
-        ):
-            print("\n[Response]", flush=True)
-            response_started = True
-        if event.message:
-            print(event.message, end="", flush=True)
-    print("\n")
-
-
 DEMO_CLIENT_CONFIG = '''
 [module.user_input]
 stream = true
 output_channel = "stdout"
 reasoning_channel = "reasoning"
-save_context = true
 
 [module.user_input.template]
 user = "{{user_input}}"
@@ -69,12 +41,16 @@ async def demo_stream_client(client: _client.LLMClient, model_name: str):
             lines.append(line.rstrip("\n"))  # 保留用户输入的换行
         user_input = "\n".join(lines)
 
-        output_task = asyncio.create_task(print_channel_text(
-            app.channels['stdout'], app.channels['reasoning']
-        ))
-        response = await app.user_input(user_input=user_input)
-        await output_task
-        logger.info("Response: %s", response)
+
+        channel_collector = _channel.DefaultTextChannelCollector({
+            'Thinking': app.channels['reasoning'],
+            'Response': app.channels['stdout']
+        })
+        output_task = asyncio.create_task(channel_collector.start_listening())
+        response = await app['user_input'](user_input=user_input)
+        response.raise_for_status()
+        output_task.cancel()
+        logger.debug("Response: %s", response)
 
 
 def run_zmqserver(config_file):
@@ -84,9 +60,9 @@ def run_zmqserver(config_file):
     asyncio.run(service.run())
 
 
-def run_zmqclient(router_endpoint, model_name):
+def run_zmqclient(router_endpoint, auth_token, model_name):
     from . import zmqclient
-    client = zmqclient.LLMZmqClient(router_endpoint)
+    client = zmqclient.LLMZmqClient(router_endpoint, auth_token)
     asyncio.run(demo_stream_client(client, model_name))
 
 
@@ -123,8 +99,10 @@ def main():
     )
     parser_client = subparsers.add_parser('client')
     parser_client.add_argument(
-        '--router-endpoint', default='tcp://localhost:5555',
+        '-r', '--router-endpoint', default='tcp://localhost:5555',
         help='ZeroMQ ROUTER endpoint (e.g., tcp://localhost:5555)')
+    parser_client.add_argument(
+        '-a', '--auth-token', help='ZeroMQ ROUTER auth token')
     parser_client.add_argument('-m', '--model-name', required=True, help='Model name to use')
     parser_client.add_argument(
         "-v", "--verbose", action='store_true',
@@ -159,7 +137,7 @@ def main():
     if args.subparser_name == 'server':
         run_zmqserver(args.config)
     elif args.subparser_name == 'client':
-        run_zmqclient(args.router_endpoint, args.model_name)
+        run_zmqclient(args.router_endpoint, args.auth_token, args.model_name)
     elif args.subparser_name == 'local':
         run_localclient(args.router_endpoint, args.model_name)
     elif args.subparser_name == 'monitor':

@@ -3,8 +3,8 @@ import logging
 from typing import Optional, List, Dict, Any, Callable
 
 from . import util
-from .channel import TextChannel
-from .model import LLMRequest, Message
+from .channel import TextFragmentChannel
+from .model import LLMProviderRequest, Message
 from .provider import LLMProviderManager
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class LLMClient(abc.ABC):
     async def close(self):
         pass
 
-    def _make_request(
+    def make_request(
             self,
             model_name: str,
             messages: List[Message],
@@ -37,15 +37,15 @@ class LLMClient(abc.ABC):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            response_channel: Optional[TextChannel] = None,
-            reasoning_channel: Optional[TextChannel] = None
-    ) -> LLMRequest:
-        """新建 LLMRequest 对象"""
-        return LLMRequest(
+            output_channel: Optional[TextFragmentChannel] = None,
+            reasoning_channel: Optional[TextFragmentChannel] = None
+    ) -> LLMProviderRequest:
+        """新建 LLMProviderRequest 对象"""
+        return LLMProviderRequest(
             self.client_id, context_id,
             util.get_id(),
             model_name, messages, tools or [], options or {},
-            stream, response_channel, reasoning_channel
+            stream, output_channel, reasoning_channel
         )
 
     @abc.abstractmethod
@@ -57,9 +57,9 @@ class LLMClient(abc.ABC):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            response_channel: Optional[TextChannel] = None,
-            reasoning_channel: Optional[TextChannel] = None
-    ) -> LLMRequest:
+            output_channel: Optional[TextFragmentChannel] = None,
+            reasoning_channel: Optional[TextFragmentChannel] = None
+    ) -> LLMProviderRequest:
         """实际调用 LLM"""
         pass
 
@@ -69,7 +69,7 @@ class LLMClient(abc.ABC):
 
     @abc.abstractmethod
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
-        """记录用户自定义审计事件"""
+        """记录用户自定义审计事件，kwargs 应能序列化为 JSON"""
         pass
 
 
@@ -88,12 +88,12 @@ class LLMLocalClient(LLMClient):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            response_channel: Optional[TextChannel] = None,
-            reasoning_channel: Optional[TextChannel] = None
-    ) -> LLMRequest:
-        request = self._make_request(
+            output_channel: Optional[TextFragmentChannel] = None,
+            reasoning_channel: Optional[TextFragmentChannel] = None
+    ) -> LLMProviderRequest:
+        request = self.make_request(
             model_name, messages, tools, options, stream,
-            context_id, response_channel, reasoning_channel
+            context_id, output_channel, reasoning_channel
         )
         self.provider_manager.process_request(request)
         return request

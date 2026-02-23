@@ -6,7 +6,7 @@ import unittest
 from httpx_sse import ServerSentEvent
 
 from aitoolman.provider import OpenAICompatibleFormat
-from aitoolman.model import LLMRequest, LLMResponse, Message
+from aitoolman.model import LLMProviderRequest, LLMProviderResponse, Message
 
 
 # OK
@@ -20,12 +20,12 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.format_strategy = OpenAICompatibleFormat(self.model_config)
 
     def test_make_request_body_basic(self):
-        request = LLMRequest(
+        request = LLMProviderRequest(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",
             model_name="gpt-3.5-turbo",
-            messages=[Message("Hello", role="user")],
+            messages=[Message.from_content("Hello", role="user")],
             stream=False
         )
 
@@ -38,12 +38,12 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["temperature"], 0.7)
 
     def test_make_request_body_with_tools(self):
-        request = LLMRequest(
+        request = LLMProviderRequest(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",
             model_name="gpt-3.5-turbo",
-            messages=[Message("Hello", role="user")],
+            messages=[Message.from_content("Hello", role="user")],
             tools={"test": {"description": "test", "param": {}}},
             stream=False
         )
@@ -52,7 +52,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tools", body)
 
     def test_parse_batch_response_success(self):
-        response = LLMResponse(
+        response = LLMProviderResponse(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",
@@ -81,7 +81,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.completion_tokens, 5)
 
     def test_parse_batch_response_no_choices(self):
-        response = LLMResponse(
+        response = LLMProviderResponse(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",
@@ -95,7 +95,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
             self.format_strategy.parse_batch_response(response, response_data)
 
     def test_parse_stream_chunk_data_done(self):
-        response = LLMResponse(
+        response = LLMProviderResponse(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",
@@ -108,7 +108,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.is_end)
 
     def test_parse_stream_chunk_valid_data(self):
-        response = LLMResponse(
+        response = LLMProviderResponse(
             client_id="test_client",
             context_id="test_context",
             request_id="test_request",

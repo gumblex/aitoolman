@@ -11,9 +11,7 @@
 - **Downstream**: Manages multiple LLMModule instances and coordinates data flow between them
 
 **Key Methods**:
-- `__init__(client: _client.LLMClient, config_dict: Optional[Dict[str, Any]] = None, processors: Optional[Dict[str, Callable[[str], Any]]] = None, channels: Optional[Dict[str, _channel.TextChannel]] = None, context_id: Optional[str] = None)`: Initialize the application context, supports passing custom post-processors and channels
-- `init_all_modules()`: Loads all modules from configuration
-- `init_module_from_config(module_name, module_config)`: Initializes a single module from configuration
+- `__init__(client: _client.LLMClient, config_dict: Optional[Dict[str, Any]] = None, processors: Optional[Dict[str, Callable[[str], Any]]] = None, channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None, context_id: Optional[str] = None)`: Initialize the application context, supports passing custom post-processors and channels
 - `__getattr__(name)`: Access modules via properties (lazy loading)
 - `add_processor(name, processor)`: Adds a post-processor
 - `render_template(template_name, **kwargs)`: Renders a named template
@@ -41,7 +39,7 @@
 - **Downstream**: LLMProviderManager handles actual API calls
 
 **Key Methods**:
-- `request(model_name, messages, tools, options, stream, context_id, response_channel, reasoning_channel)`: Sends LLM requests, supports streaming output and channel callbacks
+- `request(model_name, messages, tools, options, stream, context_id, output_channel, reasoning_channel)`: Sends LLM requests, supports streaming output and channel callbacks
 - `cancel(request_id)`: Cancels a specified request
 - `initialize()`: Initializes the client (can be replaced with async for initialize/close)
 - `close()`: Closes the client
@@ -77,7 +75,7 @@
 - `parse_batch_response(response, response_data)`: Parses batch responses
 - `parse_stream_event(response, event)`: Parses streaming events
 
-### Channel / TextChannel - Channel System
+### Channel / TextFragmentChannel - Channel System
 **Description**: Asynchronous message passing channel, supports full message and fragment transmission.
 
 **Upstream/Downstream Relationships**:
@@ -127,6 +125,5 @@
 - `output_channel`: Output channel
 - `reasoning_channel`: Reasoning channel
 - `post_processor`: Post-processor function
-- `save_context`: Whether to save context
 - `options`: Additional model parameters (e.g., temperature, max_tokens, etc.)
 

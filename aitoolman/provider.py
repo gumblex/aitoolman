@@ -7,7 +7,7 @@ import typing
 from typing import Optional, Dict, Any, List, Callable
 
 from . import postprocess, util
-from .model import LLMRequest, LLMResponse, FinishReason, Message, ToolCall
+from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall
 from .resmanager import ResourceManager
 
 import httpx
@@ -38,7 +38,7 @@ class StreamEvent(typing.NamedTuple):
 
 
 class RequestTask(typing.NamedTuple):
-    request: LLMRequest
+    request: LLMProviderRequest
     task: asyncio.Task
 
 
@@ -75,17 +75,17 @@ class LLMFormatStrategy(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def make_request_body(self, request: LLMRequest) -> Dict[str, Any]:
+    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
         """构建符合Provider要求的请求体"""
         pass
 
     @abc.abstractmethod
-    def parse_batch_response(self, response: LLMResponse, response_data: Dict[str, Any]) -> None:
+    def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
         """解析非流式响应，填充LLMResponse"""
         pass
 
     @abc.abstractmethod
-    def parse_stream_event(self, response: LLMResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
         """
         解析流式响应的单个chunk
         返回值：(是否结束, 内容片段, 推理片段, 工具调用列表)
@@ -96,7 +96,7 @@ class LLMFormatStrategy(abc.ABC):
 class OpenAICompatibleFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
         self.logger.setLevel(logging.INFO)
 
         self.stream_content_buffer = ''
@@ -162,7 +162,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         if message.raw_value is not None:
             return message.raw_value
 
-        result = {"role": message.role}
+        result: Dict[str, Any] = {"role": message.role}
 
         if message.media_content is not None:
             # 多媒体内容
@@ -219,7 +219,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             result["tool_call_id"] = message.tool_call_id
         return result
 
-    def make_request_body(self, request: LLMRequest) -> Dict[str, Any]:
+    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
         """构建OpenAI风格的请求体（model/messages/stream/tools等）"""
         body = {
             "model": self.model_config["model"],
@@ -237,7 +237,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
-    def parse_batch_response(self, response: LLMResponse, response_data: Dict[str, Any]) -> None:
+    def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
         """解析OpenAI非流式响应（含工具调用转换）"""
         choices = response_data.get("choices", [])
         if not choices:
@@ -257,7 +257,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         response.completion_tokens = usage.get("completion_tokens")
         response.response_message = message
 
-    def parse_stream_event(self, response: LLMResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
         """解析OpenAI流式响应（含工具调用增量累积）"""
         # 1. 处理空行
         line = event.data.strip()
@@ -348,7 +348,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 class AnthropicFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
         self.logger.setLevel(logging.INFO)
 
         self.stream_content_buffer = ''
@@ -416,7 +416,7 @@ class AnthropicFormat(LLMFormatStrategy):
                 }]
             }
 
-        result = {"role": message.role}
+        result: Dict[str, Any] = {"role": message.role}
         content_blocks = []
 
         # Add text content
@@ -460,7 +460,7 @@ class AnthropicFormat(LLMFormatStrategy):
 
         return result
 
-    def make_request_body(self, request: LLMRequest) -> Dict[str, Any]:
+    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
         """Build Anthropic API request body"""
         body = {
             "model": self.model_config["model"],
@@ -511,7 +511,7 @@ class AnthropicFormat(LLMFormatStrategy):
         self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
-    def parse_batch_response(self, response: LLMResponse,
+    def parse_batch_response(self, response: LLMProviderResponse,
                              response_data: Dict[str, Any]) -> None:
         """Parse non-streaming response"""
         response.response_message = response_data
@@ -550,7 +550,7 @@ class AnthropicFormat(LLMFormatStrategy):
         response.prompt_tokens = usage.get("input_tokens")
         response.completion_tokens = usage.get("output_tokens")
 
-    def parse_stream_event(self, response: LLMResponse,
+    def parse_stream_event(self, response: LLMProviderResponse,
                            event: httpx_sse.ServerSentEvent) -> StreamEvent:
         """Parse streaming response chunk"""
         self.logger.debug('[%s] stream event: %s', response.request_id, event)
@@ -666,7 +666,7 @@ class LLMProviderManager:
     }
 
     def __init__(self, config: Dict[str, Any]):
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
 
         self.default_config = config['default']
         self.api_config = config['api']
@@ -704,23 +704,16 @@ class LLMProviderManager:
         await self.http_client.__aenter__()
 
     async def _end_request_with_error(
-        self, request: LLMRequest, response: LLMResponse, error_text: str, finish_reason: FinishReason
+        self, request: LLMProviderRequest, response: LLMProviderResponse, error_text: str, finish_reason: FinishReason
     ):
         response.error_text = error_text
         response.finish_reason = finish_reason.value
-        is_fragment = request.stream
-        if is_fragment:
-            if request.reasoning_channel:
-                await request.reasoning_channel.write_fragment("", end=True)
-            if request.response_channel:
-                await request.response_channel.write_fragment("", end=True)
-        else:
-            if request.reasoning_channel:
-                await request.reasoning_channel.write_message(None)
-            if request.response_channel:
-                await request.response_channel.write_message(None)
+        if request.reasoning_channel:
+            await request.reasoning_channel.write(None)
+        if request.output_channel:
+            await request.output_channel.write(None)
 
-    async def _async_post_with_retry(self, request: LLMRequest, url: str, **kwargs) -> Dict:
+    async def _async_post_with_retry(self, request: LLMProviderRequest, url: str, **kwargs) -> Dict:
         """带重试的HTTP POST请求（处理限流、超时等异常）"""
         retries = 0
         while True:
@@ -757,12 +750,13 @@ class LLMProviderManager:
             retries += 1
 
     async def _handle_batch_request(
-            self, request: LLMRequest, response: LLMResponse,
+            self, request: LLMProviderRequest, response: LLMProviderResponse,
             model_config: Dict, request_body: Dict,
             format_strategy: LLMFormatStrategy
     ):
         """处理非流式请求（完整响应）"""
         start_time = time.monotonic()
+        self.logger.debug("Batch POST: %s, %s", model_config['url'], request_body)
         try:
             # 发送带重试的HTTP请求
             response_data = await self._async_post_with_retry(
@@ -795,12 +789,12 @@ class LLMProviderManager:
 
         # 发送完整响应到Channel
         if request.reasoning_channel and response.response_reasoning:
-            await request.reasoning_channel.write_message(response.response_reasoning)
-        if request.response_channel:
-            await request.response_channel.write_message(response.response_text)
+            await request.reasoning_channel.write(response.response_reasoning)
+        if request.output_channel:
+            await request.output_channel.write(response.response_text)
 
     async def _handle_stream_request(
-            self, request: LLMRequest, response: LLMResponse,
+            self, request: LLMProviderRequest, response: LLMProviderResponse,
             model_config: Dict, request_body: Dict,
             format_strategy: LLMFormatStrategy
     ):
@@ -811,6 +805,8 @@ class LLMProviderManager:
 
         try:
             # 发送流式HTTP请求
+            self.logger.debug("Stream POST: %s, %s", model_config['url'],
+                              request_body)
             async with self.http_client.stream(
                 method="POST",
                 url=model_config["url"],
@@ -843,16 +839,16 @@ class LLMProviderManager:
 
                     # 发送分块内容到Channel
                     if request.reasoning_channel and event.reasoning:
-                        await request.reasoning_channel.write_fragment(event.reasoning)
+                        await request.reasoning_channel.write(event.reasoning)
                     if not thinking_end and event.content:
                         if request.reasoning_channel:
-                            await request.reasoning_channel.write_fragment("", end=True)
+                            await request.reasoning_channel.write(None)
                         thinking_end = True
                     elif thinking_end and event.reasoning:
                         # reasoning after content
                         thinking_end = False
-                    if request.response_channel and event.content:
-                        await request.response_channel.write_fragment(event.content)
+                    if request.output_channel and event.content:
+                        await request.output_channel.write(event.content)
                     if event.is_end:
                         break
 
@@ -861,9 +857,9 @@ class LLMProviderManager:
 
             # 发送结束标记到Channel
             if request.reasoning_channel and not thinking_end:
-                await request.reasoning_channel.write_fragment("", end=True)
-            if request.response_channel:
-                await request.response_channel.write_fragment("", end=True)
+                await request.reasoning_channel.write(None)
+            if request.output_channel:
+                await request.output_channel.write(None)
 
         except Exception as e:
             await self._end_request_with_error(
@@ -872,7 +868,7 @@ class LLMProviderManager:
                 FinishReason.error_request
             )
 
-    async def _call_llm_api(self, request: LLMRequest, response: LLMResponse):
+    async def _call_llm_api(self, request: LLMProviderRequest, response: LLMProviderResponse):
         """核心API调用入口，返回完整的LLM响应对象"""
 
         # 校验模型配置
@@ -947,9 +943,9 @@ class LLMProviderManager:
                     response.total_response_time or 0
                 )
 
-    async def _request_wrapper(self, request: LLMRequest, callback=None) -> LLMResponse:
+    async def _request_wrapper(self, request: LLMProviderRequest, callback=None) -> LLMProviderResponse:
         # 初始化响应对象
-        response = LLMResponse(
+        response = LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id or "",
             request_id=request.request_id,
@@ -972,7 +968,7 @@ class LLMProviderManager:
             await self._end_request_with_error(
                 request, response,
                 f"API call error: {type(e).__name__} - {str(e)}",
-                FinishReason.error
+                FinishReason.error_request
             )
         finally:
             try:
@@ -985,8 +981,8 @@ class LLMProviderManager:
         return response
 
     def process_request(
-            self, request: LLMRequest,
-            callback: Optional[Callable[[LLMRequest], typing.Coroutine]] = None
+            self, request: LLMProviderRequest,
+            callback: Optional[Callable[[LLMProviderRequest], typing.Coroutine]] = None
     ) -> RequestTask:
         """处理请求"""
         task = asyncio.create_task(self._request_wrapper(request, callback))

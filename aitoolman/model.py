@@ -2,10 +2,11 @@ import enum
 import typing
 import base64
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union, Callable
 
-from .channel import TextChannel
+from .channel import TextFragmentChannel
 
 
 class LLMError(RuntimeError):
@@ -32,6 +33,11 @@ class LLMResponseFormatError(LLMError):
     pass
 
 
+class LLMApplicationError(LLMError):
+    """Application code error"""
+    pass
+
+
 class LLMCancelledError(LLMError):
     """Error when request is cancelled"""
     pass
@@ -47,8 +53,7 @@ class GenericError(LLMError):
     pass
 
 
-@dataclass
-class MediaContent:
+class MediaContent(typing.NamedTuple):
     """多媒体内容"""
     # image/video
     media_type: str
@@ -63,6 +68,20 @@ class MediaContent:
     # 4. url
     url: Optional[str] = None
     options: Optional[Dict] = None
+
+    def __repr__(self):
+        result = 'MediaContent(%r' % self.media_type
+        if self.raw_value:
+            result += ', raw_value=...)'
+        elif self.mime_type:
+            result += ', mime_type=%r)' % self.mime_type
+        elif self.filename:
+            result += ', filename=%r)' % self.filename
+        elif self.url:
+            result += ', url=%r)' % self.url
+        else:
+            result += ')'
+        return result
 
     def to_dict(self) -> Dict[str, Any]:
         """将MediaContent对象序列化为字典"""
@@ -97,8 +116,7 @@ class MediaContent:
         )
 
 
-@dataclass
-class Message:
+class Message(typing.NamedTuple):
     """给LLM发送的消息"""
     role: Optional[str] = None
     content: Optional[str] = None
@@ -108,25 +126,27 @@ class Message:
     # 跟提供商有关的原始值，忽略所有上述字段
     raw_value: Optional[Dict] = None
 
-    def __init__(
-            self,
+    @classmethod
+    def from_content(
+            cls,
             content: Union[str, Dict],
             role: Optional[str] = "user",
             media_content: Optional[MediaContent] = None
     ):
         if isinstance(content, dict):
-            self.raw_value = content
+            return cls(raw_value=content)
         else:
-            self.role = role
-            self.content = content
-            self.media_content = media_content
+            return cls(
+                role=role, content=content,
+                media_content=media_content
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         """将Message对象序列化为字典"""
         # 如果存在raw_value，直接返回其副本
         if self.raw_value is not None:
             return {"raw_value": self.raw_value}
-        d = {
+        d: Dict[str, Any] = {
             "role": self.role,
             "content": self.content,
             "reasoning_content": self.reasoning_content,
@@ -141,25 +161,22 @@ class Message:
         """从字典反序列化为Message对象"""
         if "raw_value" in data:
             # 如果有显式的raw_value字段，直接使用
-            return cls(content=data["raw_value"], role=None)
+            return cls(content=data["raw_value"])
 
-        message = cls.__new__(cls)
-        message.role = data.get("role")
-        message.content = data.get("content")
-        message.reasoning_content = data.get("reasoning_content")
-        message.tool_call_id = data.get("tool_call_id")
-        message.raw_value = None
-        if "media_content" in data:
-            message.media_content = MediaContent.from_dict(
-                data["media_content"])
-        else:
-            message.media_content = None
-
-        return message
+        return cls(
+            role=data.get("role"),
+            content=data.get("content"),
+            reasoning_content=data.get("reasoning_content"),
+            tool_call_id=data.get("tool_call_id"),
+            raw_value=None,
+            media_content=(
+                MediaContent.from_dict(data["media_content"])
+                if "media_content" in data else None
+            )
+        )
 
 
-@dataclass
-class ToolCall:
+class ToolCall(typing.NamedTuple):
     """LLM回复的工具调用请求"""
     name: str
     arguments_text: str
@@ -167,9 +184,16 @@ class ToolCall:
     id: Optional[str] = None
     type: str = 'function'
 
+    def __str__(self):
+        return '%s(%s)' % (
+            self.name,
+            ', '.join('%s=%r' % (k, v) for k, v in self.arguments.items()) if self.arguments else self.arguments_text
+        )
+
 
 @dataclass
-class LLMResponse:
+class LLMProviderResponse:
+    """LLM网络层返回类，用于包装模型提供商的应答"""
     client_id: str
     context_id: str
     request_id: str
@@ -204,8 +228,8 @@ class LLMResponse:
 
 
 @dataclass
-class LLMRequest:
-    """LLM请求类"""
+class LLMProviderRequest:
+    """LLM网络层请求类，用于包装向模型提供商发送的请求"""
     client_id: str
     context_id: Optional[str]
     request_id: str
@@ -214,14 +238,10 @@ class LLMRequest:
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     options: Dict[str, Any] = field(default_factory=dict)
     stream: bool = False
-    response_channel: Optional[TextChannel] = None
-    reasoning_channel: Optional[TextChannel] = None
+    output_channel: Optional[TextFragmentChannel] = field(default_factory=TextFragmentChannel)
+    reasoning_channel: Optional[TextFragmentChannel] = None
     is_cancelled: bool = False
-    response: asyncio.Future[LLMResponse] = field(default_factory=asyncio.Future)
-
-    def __post_init__(self):
-        if self.response_channel is None:
-            self.response_channel = TextChannel(read_fragments=self.stream)
+    response: asyncio.Future[LLMProviderResponse] = field(default_factory=asyncio.Future)
 
 
 class FinishReason(enum.Enum):
@@ -242,6 +262,8 @@ class FinishReason(enum.Enum):
     error_request = "error: request"
     # 返回格式错误
     error_format = "error: format"
+    # 应用程序代码错误
+    error_app = "error: application"
     # 取消
     cancelled = "cancelled"
 
@@ -272,6 +294,8 @@ class FinishReason(enum.Enum):
             raise LLMApiRequestError(error_text or "Request error")
         elif finish_reason_enum == FinishReason.error_format:
             raise LLMResponseFormatError(error_text or "Format error")
+        elif finish_reason_enum == FinishReason.error_app:
+            raise LLMApplicationError(error_text or "Application error")
         elif finish_reason_enum == FinishReason.cancelled:
             raise LLMCancelledError(error_text or "Request cancelled")
         elif finish_reason_enum == FinishReason.unknown:
@@ -282,67 +306,106 @@ class FinishReason(enum.Enum):
             raise LLMUnknownError(f"Unrecognized finish reason: {finish_reason}")
 
 
+class LLMDirectRequest(typing.NamedTuple):
+    """应用层实际请求参数"""
+    model_name: str
+    messages: List[Message]
+    tools: Optional[Dict[str, Dict[str, Any]]] = None
+    options: Optional[Dict[str, Any]] = None
+    stream: bool = False
+    output_channel: Union[str, TextFragmentChannel, None] = None
+    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+
+
+class LLMModuleRequest(typing.NamedTuple):
+    """应用层模板请求参数（模块配置）"""
+    module_name: str
+    template_params: Dict[str, Any]
+    model_name: Optional[str] = None
+    context_messages: List[Message] = []
+    media_content: Optional[MediaContent] = None
+
+    # 覆盖原始配置
+    tools: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
+    options: Optional[Dict[str, Any]] = None
+    stream: Optional[bool] = None
+    output_channel: Union[str, TextFragmentChannel, None] = None
+    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+
+
 @dataclass
 class LLMModuleResult:
+    """应用层（模板）请求响应"""
+    module_name: str
+    # 原始请求参数
+    request: LLMDirectRequest = None
     # 原始响应
     response_text: str = ""
     response_reasoning: str = ""
     # 处理后的结果
     text: str = ""
-    # name -> ToolCall
-    tool_calls: Dict[str, ToolCall] = field(default_factory=dict)
+    tool_calls: List[ToolCall] = field(default_factory=list)
     # 状态信息
     status: FinishReason = FinishReason.stop
     error_text: Optional[str] = None
     # 原始请求参数
     request_params: Dict[str, Any] = field(default_factory=dict)
-    # 原始请求和响应（用于拼接上下文）
-    request_messages: List[Message] = field(default_factory=list)
-    response_message: Optional[Dict[str, Any]] = None
+    # 原始响应（用于拼接上下文）
+    response_message: Optional[Message] = None
     # 后处理结果
     data: Any = None
 
     @classmethod
-    def from_response(cls, response: LLMResponse) -> "LLMModuleResult":
-        """从 LLMResponse 转换为 LLMModuleResult"""
+    def from_response(cls, request: LLMDirectRequest, response: LLMProviderResponse) -> "LLMModuleResult":
+        """从 LLMProviderResponse 转换为 LLMModuleResult"""
         return cls(
+            module_name='',
+            request=request,
             # 原始响应字段直接映射
             response_text=response.response_text,
             response_reasoning=response.response_reasoning,
             # 初始处理后的文本暂等同于原始响应（后续可按需重写）
             text=response.response_text,
             # 将工具调用列表转换为 工具名→ToolCall 的字典
-            tool_calls={call.name: call for call in response.response_tool_calls},
+            tool_calls=response.response_tool_calls,
             # 转换 finish_reason 为 FinishReason 枚举（None 时使用默认值 stop）
-            status=FinishReason(response.finish_reason) if response.finish_reason is not None else FinishReason.stop,
+            status=(
+                FinishReason(response.finish_reason)
+                if response.finish_reason is not None else FinishReason.stop
+            ),
             # 错误信息直接映射
             error_text=response.error_text,
             # 原始响应消息直接映射
-            response_message=response.response_message
+            response_message=(
+                Message.from_content(response.response_message)
+                if response.response_message else None
+            )
         )
 
     def raise_for_status(self):
         FinishReason.raise_for_status(self.status.value, self.error_text)
 
-    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> List[Message]:
         """Execute tool calls using the provided function map.
 
         Args:
+            self: LLMModuleResult object
             fn_map: Dictionary mapping tool names to callable functions
 
         Returns:
-            Dictionary with tool call IDs as keys and function results as values
+            Context messages for next request.
 
         Raises:
             LLMError: raise_for_status()
             LLMResponseFormatError: tool not found
         """
         self.raise_for_status()
+        context = list(self.request.messages)
+        context.append(self.response_message)
         if not self.tool_calls:
-            return {}
+            return context
 
-        results = {}
-        for tool_call in self.tool_calls.values():
+        for tool_call in self.tool_calls:
             tool_name = tool_call.name
             if tool_name not in fn_map:
                 raise LLMResponseFormatError(f"Tool '{tool_name}' not found in function map.")
@@ -353,7 +416,7 @@ class LLMModuleResult:
                 result = func(**tool_call.arguments)
             else:
                 result = func()
-            results[tool_call.id] = result
-
-        return results
-
+            if inspect.isawaitable(result):
+                result = await result
+            context.append(Message.from_content(content=str(result), role='tool'))
+        return context

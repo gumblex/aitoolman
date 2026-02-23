@@ -18,14 +18,14 @@ User Code → LLMApplication → LLMModule → LLMClient → ProviderManager →
 **Key Flow Nodes**:
 1. **Template Rendering**: Jinja2 template + variable substitution → final prompt
 2. **Message Construction**: Rendered prompt → list of Message objects
-3. **Request Sending**: Message list → LLMRequest → HTTP API
-4. **Response Handling**: API response → TextChannel stream → post-processing → final result
+3. **Request Sending**: Message list → LLMProviderRequest → HTTP API
+4. **Response Handling**: API response → TextFragmentChannel stream → post-processing → final result
 
 ### 1.3 Core Components
 - **LLMApplication**: Application context that manages modules, templates, variables, channels, and post-processors
 - **LLMModule**: Encapsulates the complete flow of "input → template → LLM → output"
 - **LLMClient**: Abstracts LLM provider calls, supporting local and remote (ZeroMQ) modes
-- **TextChannel**: Asynchronous message channel that supports streaming fragment transmission
+- **TextFragmentChannel**: Asynchronous message channel that supports streaming fragment transmission
 - **FormatStrategy**: Abstracts message format conversion for different LLM providers
 
 ## 2. Core API Reference
@@ -41,14 +41,14 @@ class LLMApplication:
         client: LLMClient,                      # LLM client instance
         config_dict: Optional[Dict[str, Any]] = None,  # Configuration dictionary (loaded from TOML)
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # Custom post-processors
-        channels: Optional[Dict[str, TextChannel]] = None,  # Custom channels
+        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # Custom channels
         context_id: Optional[str] = None      # Context ID
     ) -> None
 ```
 
 **Key Attributes**:
 - `client: LLMClient` - LLM client instance
-- `channels: Dict[str, TextChannel]` - Channel dictionary (includes stdin/stdout/reasoning by default)
+- `channels: Dict[str, TextFragmentChannel]` - Channel dictionary (includes stdin/stdout/reasoning by default)
 - `vars: Dict[str, Any]` - Global variables accessible in all templates
 - `modules: Dict[str, LLMModule]` - Loaded module instances
 - `processors: Dict[str, Callable[[str], Any]]` - Post-processor dictionary
@@ -69,7 +69,7 @@ processor = app.get_processor("builtin.parse_json")
 text = app.render_template("template_name", **variables)
 
 # Add custom channel
-app.add_channel("custom", TextChannel(read_fragments=True))
+app.add_channel("custom", TextFragmentChannel(read_fragments=True))
 
 # Create application factory (batch create application instances)
 @classmethod
@@ -78,7 +78,7 @@ def factory(
     client: LLMClient,
     config_dict: Optional[Dict[str, Any]] = None,
     processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-    channels: Optional[Dict[str, TextChannel]] = None,
+    channels: Optional[Dict[str, TextFragmentChannel]] = None,
 ) -> Callable[..., 'LLMApplication']:
     """Create reusable application factory function"""
     pass
@@ -108,7 +108,7 @@ class DefaultLLMModule(LLMModule):
 ```python
 async def process_task(app: aitoolman.LLMApplication, task_data: Dict[str, Any]) -> Dict[str, Any]:
     """Single task processing function"""
-    result: LLMModuleResult = await app.module_name(
+    result: LLMModuleResult = await app['module_name'](
         _media=MediaContent(...),  # Optional: Multimedia content
         **task_data                # Template variables
     )
@@ -138,7 +138,6 @@ class ModuleConfig:
     output_channel: Optional[TextFragmentOutput] = None  # Output channel
     reasoning_channel: Optional[TextFragmentOutput] = None  # Reasoning channel
     post_processor: Optional[str] = None    # Post-processor name (corresponds to key in app.processors)
-    save_context: bool = False              # Whether to save conversation context
     options: Dict[str, Any] = field(default_factory=dict)  # Request options (temperature, etc.)
 ```
 
@@ -167,15 +166,15 @@ class LLMClient(abc.ABC):
 **Key Methods**:
 ```python
 # Send request (automatically called by modules, not typically used directly)
-request: LLMRequest = await client.request(
+request: LLMProviderRequest = await client.request(
     model_name: str,                        # Model name or alias
     messages: List[Message],               # List of messages
     tools: Dict[str, Dict[str, Any]] = None,  # Tool configuration
     options: Optional[Dict[str, Any]] = None,  # Request options
     stream: bool = False,                   # Whether to use streaming
     context_id: Optional[str] = None,      # Context ID
-    response_channel: Optional[TextChannel] = None,  # Response channel
-    reasoning_channel: Optional[TextChannel] = None   # Reasoning channel
+    output_channel: Optional[TextFragmentChannel] = None,  # Response channel
+    reasoning_channel: Optional[TextFragmentChannel] = None   # Reasoning channel
 )
 
 # Cancel request
@@ -195,22 +194,23 @@ await client.close()
 # As asynchronous context manager (recommended)
 async with LLMLocalClient(api_config) as client:
     app = LLMApplication(client, app_config)
-    result = await app.module_name(...)
+    result = await app['module_name'](...)
 ```
 
-### 2.4 Channel / TextChannel - Channel System
+### 2.4 Channel / TextFragmentChannel - Channel System
 
 **Purpose**: Asynchronous message passing channel that supports complete messages and fragment transmission
 
 ```python
-class TextChannel(Channel):
+class TextFragmentChannel(Channel):
     def __init__(self, read_fragments: bool = False) -> None
 ```
 
 **Key Methods**:
+
 ```python
 # Write complete message
-await channel.write_message("Complete message content")
+await channel.write("Complete message content")
 
 # Write message fragments (streaming)
 await channel.write_fragment("Fragment 1", end=False)
@@ -218,7 +218,7 @@ await channel.write_fragment("Fragment 2", end=False)
 await channel.write_fragment("Fragment 3", end=True)  # Mark as end
 
 # Read complete message (non-streaming mode)
-message: Optional[str] = await channel.read_message()
+message: Optional[str] = await channel.read()
 
 # Read message fragments (streaming mode)
 fragment: Optional[str] = await channel.read_fragment()  # None indicates end
@@ -237,20 +237,20 @@ fragment: Optional[str] = await channel.read_fragment()  # None indicates end
 class XmlTagToChannelFilter(BaseXmlTagFilter):
     def __init__(
         self,
-        default_channel: TextChannel,           # Default channel (for unmatched tags)
-        channel_map: Dict[str, TextChannel]    # Mapping of tags to channels
+        default_channel: TextFragmentChannel,           # Default channel (for unmatched tags)
+        channel_map: Dict[str, TextFragmentChannel]    # Mapping of tags to channels
     ) -> None
 ```
 
 **Usage Example**:
 ```python
 # Create channels
-response_channel = TextChannel(read_fragments=True)
-reasoning_channel = TextChannel(read_fragments=True)
+output_channel = TextFragmentChannel(read_fragments=True)
+reasoning_channel = TextFragmentChannel(read_fragments=True)
 
 # Create filter
 filter = XmlTagToChannelFilter(
-    default_channel=response_channel,
+    default_channel=output_channel,
     channel_map={"reasoning": reasoning_channel}
 )
 
@@ -265,7 +265,7 @@ await filter.write_fragment("<response>Final answer</response>", end=True)
 
 ```python
 async def collect_text_channels(
-    channels: Dict[str, TextChannel],           # Channel dictionary (name → channel)
+    channels: Dict[str, TextFragmentChannel],           # Channel dictionary (name → channel)
     read_fragments: bool = True,               # Whether to read in fragment mode
     timeout: Optional[float] = None            # Timeout in seconds
 ) -> AsyncGenerator[ChannelEvent, None]
@@ -308,10 +308,10 @@ class Message:
     raw_value: Optional[Dict] = None         # Raw value (directly passed to provider)
 ```
 
-**LLMRequest - Request Object**:
+**LLMProviderRequest - Request Object**:
 ```python
 @dataclass
-class LLMRequest:
+class LLMProviderRequest:
     client_id: str                            # Client ID
     context_id: Optional[str]                 # Context ID
     request_id: str                          # Request ID
@@ -320,16 +320,16 @@ class LLMRequest:
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Tool configuration
     options: Dict[str, Any] = field(default_factory=dict)  # Request options
     stream: bool = False                     # Whether to use streaming
-    response_channel: Optional[TextChannel] = None  # Response channel
-    reasoning_channel: Optional[TextChannel] = None  # Reasoning channel
+    output_channel: Optional[TextFragmentChannel] = None  # Response channel
+    reasoning_channel: Optional[TextFragmentChannel] = None  # Reasoning channel
     is_cancelled: bool = False               # Whether request is cancelled
-    response: asyncio.Future[LLMResponse] = field(default_factory=asyncio.Future)
+    response: asyncio.Future[LLMProviderResponse] = field(default_factory=asyncio.Future)
 ```
 
-**LLMResponse - Response Object**:
+**LLMProviderResponse - Response Object**:
 ```python
 @dataclass
-class LLMResponse:
+class LLMProviderResponse:
     client_id: str
     context_id: str
     request_id: str
@@ -457,7 +457,6 @@ model = "Doubao-Seed-1.6"    # Default model (can be model name or alias, define
 stream = false                # Default non-streaming output
 output_channel = "stdout"     # Default output channel
 reasoning_channel = "reasoning"  # Default reasoning channel
-save_context = false          # Default context saving disabled
 options = { temperature = 0.7, max_tokens = 4000 }  # Default request options
 
 # Global Templates (renderable with LLMApplication.render_template)
@@ -476,7 +475,6 @@ template.user = "User template {{input}}"
 template.system = "System instruction"
 tools = { }                   # Tool configuration (see below)
 post_processor = "builtin.parse_json"  # Post-processor name (corresponds to key in app.processors)
-save_context = true           # Override default context setting
 options = { temperature = 0.5 }  # Override default options
 ```
 
@@ -572,7 +570,6 @@ tools."add_task" = {}
 [module.task_planner]
 model = "Fast-Model"  # Use fast inference model alias
 stream = true
-save_context = true
 template.user = """
 As a schedule assistant, analyze the user's instruction:
 - If there are specific to-do items, call the add_task tool
@@ -604,7 +601,6 @@ model = "Fast-Model"         # Default to fast inference model
 stream = false
 output_channel = "stdout"
 reasoning_channel = "reasoning"
-save_context = false
 options = { temperature = 0.7, max_tokens = 4000 }
 
 # Global Templates
@@ -642,7 +638,6 @@ post_processor = "builtin.parse_json"
 [module.task_planner]
 model = "Fast-Model"         # Use fast inference model
 stream = true
-save_context = true
 template.user = """
 As a schedule assistant, analyze the user's instruction:
 - If there are specific to-do items, call the add_task tool
@@ -683,7 +678,6 @@ post_processor = "builtin.parse_json"
 [module.chat]
 model = "Doubao-Seed-1.6"
 stream = true
-save_context = true
 template.user = "{{message}}"
 ```
 
@@ -722,7 +716,7 @@ def parse_classification(text: str) -> Tuple[str, str]:
 # Single Task Processing Function
 async def process_ticket(app: aitoolman.LLMApplication, ticket: Dict[str, Any]) -> Dict[str, Any]:
     """Process ticket classification"""
-    result = await app.classify_ticket(**ticket)
+    result = await app['classify_ticket'](**ticket)
     result.raise_for_status()  # Auto-handle exceptions
     return {
         "ticket_id": ticket["ticket_id"],
@@ -880,6 +874,7 @@ async def run_pipeline():
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
 
 # Default Configuration
 [default]
@@ -928,7 +923,7 @@ import logging
 import aitoolman
 
 try:
-    result = await app.module_name(**params)
+    result = await app['module_name'](**params)
     result.raise_for_status()  # Auto-handle exceptions
 
     if result.status == aitoolman.FinishReason.tool_calls:
@@ -960,6 +955,11 @@ except Exception as e:
 - **Caching Strategy**: Cache results of repeated requests to reduce unnecessary LLM calls
 - **Model Selection**: Define and select appropriate model aliases based on task type, then configure suitable specific models for each alias
 
+### 6.4 Security Policies
+- **Token Authentication**: Configure `zmq_auth_token` for ZeroMQ interfaces to ensure both clients and servers use the same token.
+- **Network Isolation**: In production environments, restrict access to ZMQ ports through network policies.
+- **Key Management**: Properly manage configuration files to prevent unauthorized access.
+
 ## 7. Summary
 
 The aitoolman framework, through clear architecture design and flexible configuration system, enables developers to:
@@ -969,4 +969,4 @@ The aitoolman framework, through clear architecture design and flexible configur
 3. **Easy Extension**: Support custom processors, channels, and format strategies to adapt to different business needs
 4. **Flexible Deployment**: Support local invocation and microservice architecture to adapt to different scenario requirements
 
-By understanding the collaborative relationship between `LLMApplication`, `LLMModule`, `LLMClient`, and `TextChannel`, developers can efficiently build stable and maintainable LLM applications.
+By understanding the collaborative relationship between `LLMApplication`, `LLMModule`, `LLMClient`, and `TextFragmentChannel`, developers can efficiently build stable and maintainable LLM applications.
