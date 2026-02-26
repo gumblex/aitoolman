@@ -30,8 +30,7 @@ def extract_code_block(text: str) -> str:
     从LLM输出中提取 <output></output> 包围的代码块
     如果没有找到，返回原始文本（可能LLM直接输出了代码）
     """
-    pattern = r'<output>(.*)</output>'
-    match = re.search(pattern, text, re.DOTALL)
+    match = re.search(r'<output><!\[CDATA\[(.*)]]></output>', text, re.DOTALL)
     if match:
         return match.group(1)
     # 如果没有找到标签，可能LLM直接输出了代码
@@ -53,33 +52,37 @@ def detect_file_language(filename):
     return text_type
 
 
-PROMPT_TEMPLATE = '''
-{% if references %}
+APP_CONFIG = '''
+[module_default]
+model = "Code-Model"
+output_channel = "stdout"
+reasoning_channel = "reasoning"
+
+[module.code_edit]
+template.user = """{% if references %}
 # 参考文件
 {% for ref in references %}
-## {{ref.filename}}
-<code>
-{{ref.content}}
-</code>
+<file name="{{ ref.filename }}">{{ref.content}}</file>
 {% endfor %}
 {% endif %}
 {% if input_content -%}
 # 当前文件
-<code>
-{{input_content}}
-</code>
+<file name="{{ input_filename }}">{{input_content}}</file>
 {%- endif %}
 # 要求
 {{user_instruction}}
-{{system_instruction}}
-'''.strip()
+{% if use_system -%}
+将修改后的文件用 <output><![CDATA[文件内容]]></output> 包围
+{% endif %}"""
+post_processor = "extract_code"
+'''
 
 
 # ------------------------------
 # 异步处理函数
 # ------------------------------
 async def process_single_file(
-        client: aitoolman.LLMClient,
+        app: aitoolman.LLMApplication,
         model_name: str,
         reference_files: List[str],
         input_file: str,
@@ -94,33 +97,13 @@ async def process_single_file(
 
     logger.info(f"开始处理: {input_file}")
 
-    # 创建应用配置
-    app_config = {
-        "module_default": {
-            "model": model_name,
-            "stream": not batch_mode,
-            "output_channel": "stdout",
-            "reasoning_channel": "reasoning",
-        },
-        "module": {
-            "code_edit": {
-                "template": {"user": PROMPT_TEMPLATE},
-                "post_processor": "extract_code",
-            }
-        }
-    }
-
-    # 创建应用
-    app = aitoolman.LLMApplication(client, app_config)
-    app.add_processor("extract_code", extract_code_block)
-
     references = []
     for ref_file in reference_files:
         file_path = Path(ref_file)
         with open(ref_file, 'r', encoding='utf-8') as f:
             content = f.read()
         references.append({
-            'filename': file_path.name,
+            'filename': str(file_path),
             'content': content,
             'language': detect_file_language(file_path.name)
         })
@@ -141,22 +124,25 @@ async def process_single_file(
     if not user_instruction:
         user_instruction = read_user_input("请输入修改指令")
 
-    system_instruction = "将修改后的文件用 <output></output> 包围"
-    if not use_system:
-        system_instruction = ''
-
     channel_collector = aitoolman.DefaultTextChannelCollector({
         'Thinking': app.channels['reasoning'],
         'Response': app.channels['stdout']
     })
     output_task = asyncio.create_task(channel_collector.start_listening())
-    result = await app['code_edit'](
-        user_instruction=user_instruction, language=language,
-        input_content=input_content, references=references,
-        system_instruction=system_instruction
-    )
+
+    template_params = {
+        'user_instruction': user_instruction, 'language': language,
+        'input_filename': input_file, 'input_content': input_content,
+        'references': references, 'use_system': use_system
+    }
+    result = await app.call(aitoolman.LLMModuleRequest(
+        module_name='code_edit',
+        template_params=template_params,
+        model_name=model_name,
+        stream=(not batch_mode)
+    ))
     result.raise_for_status()
-    channel_collector.running = False
+    channel_collector.close()
     await output_task
     # 保存结果
     if output:
@@ -201,8 +187,11 @@ async def main(args):
         client = aitoolman.LLMLocalClient(api_config)
 
     async with client:
+        app_config = aitoolman.load_config_str(APP_CONFIG)
+        app = aitoolman.LLMApplication(client, app_config)
+        app.add_processor("extract_code", extract_code_block)
         await process_single_file(
-            client=client,
+            app=app,
             model_name=model_name,
             reference_files=args.reference,
             input_file=args.input,

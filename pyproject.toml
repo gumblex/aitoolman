@@ -33,6 +33,10 @@ dependencies = [
   "pyzmq"
 ]
 [project.optional-dependencies]
+windows = [
+    # pyzmq requires
+    "tornado",
+]
 uuid = [
     "uuid-utils",
 ]

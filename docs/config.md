@@ -225,12 +225,7 @@ result = await app['task_adder'](
 ### 3.3 动态添加配置
 ```python
 # 动态添加模块配置
-app.config['module']['new_module'] = {
-    'model': 'Cheap-Model',  # 使用模型别名
-    'template': {
-        'user': '{{query}}'
-    }
-}
+app.add_module(module_config: ModuleConfig)
 
 # 动态添加后处理器
 app.add_processor('custom_parser', lambda x: x.split('\n'))

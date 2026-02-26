@@ -1,21 +1,20 @@
-import dataclasses
 import json
-import inspect
+import logging
 import asyncio
 import unittest
-from typing import Dict, List, Any, Callable, Optional, Union
 
 from aitoolman.workflow import (
     LLMWorkflow, LLMTask, LLMTaskStatus, LLMTaskDependencyError
 )
-from aitoolman.app import LLMApplication
-from aitoolman.client import LLMClient
 from aitoolman.model import (
-    LLMProviderResponse, Message, ToolCall, FinishReason,
-    LLMProviderRequest, LLMModuleResult, LLMModuleRequest, LLMDirectRequest
-)
+    LLMProviderResponse, ToolCall, FinishReason,
+    LLMProviderRequest, LLMModuleRequest)
 
-from mock_llmclient import MockLLMClient, default_llm_response
+from mock_llmclient import MockLLMClient, default_llm_response, MockTextChannelCollector
+import workflow_customer_service
+
+
+logging.basicConfig(level="DEBUG", format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 TEST_CONFIG = {
@@ -230,327 +229,33 @@ class TestLLMWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(app._reverse_graph), 0)
 
 
-# class TestLLMWorkflowSerialUseCase(unittest.IsolatedAsyncioTestCase):
-#     CONFIG_FILE = '''
-# [module_default]
-# model = "test_model"
-# stream = false
-#
-# [tools."clarify"]
-# type = "function"
-# description = "向用户追问细节"
-# param."question".type = "string"
-# param."question".description = "直接向用户提问的内容"
-# param."question".required = true
-#
-# [tools."check_order"]
-# type = "function"
-# description = "查询订单详情"
-# param."order_id".type = "string"
-# param."order_id".description = "订单号"
-# param."order_id".required = true
-#
-# [module."entry"]
-# model = "test_model"
-# template.user = """({{ state }})
-# {{ context|join('\\n') }}
-#
-# 用户提问：{{ user_question }}
-# {{ user_clarify|join('\\n') }}
-#
-# 如果问题和细节不清楚，调用相应工具了解问题细节；否则直接向用户回答。
-# """
-# tools."clarify" = {}
-# tools."check_order" = {}
-#     '''
-#
-#     @staticmethod
-#     def entry_response(request):
-#         """模拟EntryTask返回澄清工具调用"""
-#         tool_call = ToolCall(
-#             name="ClarifyTask",
-#             arguments_text='{"question": "你的订单号是多少？", "original_question": "我的订单在哪里？"}',
-#             arguments={
-#                 "question": "你的订单号是多少？", "original_question": "我的订单在哪里？"
-#             }
-#         )
-#         resp = LLMProviderResponse(
-#             client_id=request.client_id,
-#             context_id=request.context_id,
-#             request_id=request.request_id,
-#             model_name=request.model_name,
-#             stream=False,
-#             finish_reason=FinishReason.tool_calls.value,
-#             response_tool_calls=[tool_call],
-#             response_message={"tool_calls": [tool_call._asdict()]}
-#         )
-#         return resp
-#
-#     @staticmethod
-#     def clarify_response(request):
-#         """模拟ClarifyTask返回订单查询工具调用"""
-#         tool_call = ToolCall(
-#             name="OrderTask",
-#             arguments_text='{"order_id": "12345", "original_question": "我的订单在哪里？", "clarification": "12345"}',
-#             arguments={
-#                 "order_id": "12345", "original_question": "我的订单在哪里？",
-#                 "clarification": "12345"
-#             }
-#         )
-#         resp = LLMProviderResponse(
-#             client_id=request.client_id,
-#             context_id=request.context_id,
-#             request_id=request.request_id,
-#             model_name=request.model_name,
-#             stream=False,
-#             finish_reason=FinishReason.tool_calls.value,
-#             response_tool_calls=[tool_call],
-#             response_message={"tool_calls": [tool_call._asdict()]}
-#         )
-#         return resp
-#
-#     @staticmethod
-#     def order_response(request):
-#         """模拟OrderTask返回查询结果"""
-#         resp = LLMProviderResponse(
-#             client_id=request.client_id,
-#             context_id=request.context_id,
-#             request_id=request.request_id,
-#             model_name=request.model_name,
-#             stream=False,
-#             finish_reason=FinishReason.stop.value,
-#             response_text=json.dumps({"result": "你的订单12345状态是已发货"}),
-#             response_message={"content": "你的订单12345状态是已发货"}
-#         )
-#         return resp
-#
-#     @staticmethod
-#     def dynamic_response(request):
-#         messages = request.messages
-#         if not messages:
-#             return default_llm_response(request)
-#         last_msg = messages[-1].content
-#         if last_msg.startswith('(ClarifyTask)'):
-#             return TestLLMWorkflowSerialUseCase.clarify_response(request)
-#         elif last_msg.startswith('(OrderTask)'):
-#             return TestLLMWorkflowSerialUseCase.order_response(request)
-#         elif "我的订单在哪里？" in last_msg:
-#             return TestLLMWorkflowSerialUseCase.entry_response(request)
-#         return default_llm_response(request)
-#
-#     # 定义EntryTask
-#     class EntryTask(LLMTask):
-#         async def post_process(self):
-#             self.on_tool_call_goto(ClarifyTask=lambda )
-#             if self.module_result and self.module_result.tool_calls:
-#                 tool_call = self.module_result.tool_calls[0]
-#                 if tool_call.name == "ClarifyTask":
-#                     self.next_task = ClarifyTask(
-#                         workflow=self.workflow,
-#                         task_id="clarify",
-#                         module_name="test_module_with_input",
-#                         input_data={
-#                             "input": f"(ClarifyTask) 原始问题：{tool_call.arguments['original_question']} 追问：{tool_call.arguments['question']}"
-#                         }
-#                     )
-#             elif self.module_result:
-#                 self.output_data = self.module_result.data
-#
-#     # 定义ClarifyTask
-#     class ClarifyTask(LLMTask):
-#         async def pre_process(self) -> Union[LLMModuleRequest, LLMDirectRequest, None]:
-#             # 应该要问用户问题
-#             return await super().pre_process()
-#
-#         async def post_process(self):
-#             if self.module_result and self.module_result.tool_calls:
-#                 tool_call = self.module_result.tool_calls[0]
-#                 if tool_call.name == "OrderTask":
-#                     self.next_task = OrderTask(
-#                         workflow=self.workflow,
-#                         task_id="order",
-#                         module_name="test_module_with_input",
-#                         input_data={
-#                             "input": f"(OrderTask) 原始问题：{tool_call.arguments['original_question']} 澄清信息：{tool_call.arguments['clarification']} 查询订单号{tool_call.arguments['order_id']}"
-#                         }
-#                     )
-#             elif self.module_result:
-#                 self.output_data = self.module_result.data
-#
-#     # 定义OrderTask
-#     class OrderTask(LLMTask):
-#         async def post_process(self):
-#             if self.module_result:
-#                 self.output_data = self.module_result.data
-#
-#
-#     async def test_serial_workflow_customer_service(self):
-#         """测试串行工作流：客服助手"""
-#         client = MockLLMClient(self.dynamic_response)
-#         app = LLMWorkflow(client, config_dict=TEST_CONFIG)
-#
-#         # 启动工作流
-#         start_task = EntryTask(
-#             workflow=app,
-#             task_id="entry",
-#             module_name="test_module_with_input",
-#             input_data={"input": "我的订单在哪里？"}
-#         )
-#
-#         result_task = await app.run(start_task)
-#         self.assertEqual(result_task.status, LLMTaskStatus.COMPLETED)
-#         self.assertEqual(result_task.output_data, {"result": "你的订单12345状态是已发货"})
-#         self.assertEqual(len(client.requests), 3)
-#
-#     async def test_nested_workflow_file_scan(self):
-#         """测试嵌套工作流：逐层扫描文件"""
-#         def entry_response(request):
-#             tool_call = ToolCall(
-#                 name="FolderAnalyzeTask",
-#                 arguments_text='{"folder_path": "root"}',
-#                 arguments={"folder_path": "root"}
-#             )
-#             resp = LLMProviderResponse(
-#                 client_id=request.client_id,
-#                 context_id=request.context_id,
-#                 request_id=request.request_id,
-#                 model_name=request.model_name,
-#                 stream=False,
-#                 finish_reason=FinishReason.tool_calls.value,
-#                 response_tool_calls=[tool_call],
-#                 response_message={"tool_calls": [tool_call._asdict()]}
-#             )
-#             return resp
-#
-#         def folder_response(request):
-#             folder_path = request.messages[-1].content.split(":")[1].strip()
-#             resp = LLMProviderResponse(
-#                 client_id=request.client_id,
-#                 context_id=request.context_id,
-#                 request_id=request.request_id,
-#                 model_name=request.model_name,
-#                 stream=False,
-#                 finish_reason=FinishReason.stop.value,
-#                 response_text=json.dumps({
-#                     "result": f"{folder_path}包含file1.txt和subfolder"
-#                 }),
-#                 response_message={"content": f"{folder_path}包含file1.txt和subfolder"}
-#             )
-#             return resp
-#
-#         def file_response(request):
-#             file_path = request.messages[-1].content.split(":")[1].strip()
-#             resp = LLMProviderResponse(
-#                 client_id=request.client_id,
-#                 context_id=request.context_id,
-#                 request_id=request.request_id,
-#                 model_name=request.model_name,
-#                 stream=False,
-#                 finish_reason=FinishReason.stop.value,
-#                 response_text=json.dumps({
-#                     "result": f"{file_path}内容：测试文件内容"
-#                 }),
-#                 response_message={"content": f"{file_path}内容：测试文件内容"}
-#             )
-#             return resp
-#
-#         def dynamic_response(request):
-#             messages = request.messages
-#             if not messages:
-#                 return default_llm_response(request)
-#             last_msg = messages[-1].content
-#             if "扫描root文件夹" in last_msg:
-#                 return entry_response(request)
-#             elif "folder:" in last_msg:
-#                 return folder_response(request)
-#             elif "file:" in last_msg:
-#                 return file_response(request)
-#             return default_llm_response(request)
-#
-#         client = MockLLMClient(dynamic_response)
-#         app = LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=2)
-#
-#         # 文件分析任务
-#         class FileAnalyzeTask(LLMTask):
-#             module_name = 'test_module_with_input'
-#
-#             async def pre_process(self):
-#                 return LLMModuleRequest(
-#                     module_name=self.module_name,
-#                     template_params={"input": f"file:{self.input_data['file_path']}"}
-#                 )
-#
-#             async def post_process(self):
-#                 if self.module_result:
-#                     self.output_data = self.module_result.data
-#
-#         # 文件夹分析任务（递归）
-#         class FolderAnalyzeTask(LLMTask):
-#             module_name = 'test_module_with_input'
-#             # input_data
-#             # path: str
-#             # is_root: bool
-#
-#             async def pre_process(self):
-#                 folder_path = self.input_data['folder_path']
-#
-#                 # 模拟生成子任务
-#                 tasks = []
-#                 if folder_path == "root":
-#                     tasks.append(FileAnalyzeTask(
-#                         {"file_path": "root/file1.txt"}
-#                     ))
-#                     tasks.append(FolderAnalyzeTask(
-#                         {"folder_path": "root/subfolder"}
-#                     ))
-#                 elif folder_path == "root/subfolder1":
-#                     tasks.append(FileAnalyzeTask(
-#                         input_data={"file_path": "root/subfolder1/file2.txt"}
-#                     ))
-#
-#                 if tasks:
-#                     await self.workflow.wait_tasks(*tasks)
-#                     self.output_data["children"] = [t.output_data for t in tasks]
-#
-#                 return LLMModuleRequest(
-#                     module_name=self.module_name,
-#                     template_params={"input": f"folder:{self.input_data['folder_path']}"}
-#                 )
-#
-#             async def post_process(self):
-#                 if not self.module_result:
-#                     return
-#
-#                 folder_path = self.input_data['folder_path']
-#                 self.output_data = {
-#                     "folder": folder_path,
-#                     "result": self.module_result.data
-#                 }
-#
-#
-#         # 入口任务
-#         class EntryTask(LLMTask):
-#             module_name = "test_module_with_input"
-#
-#             async def post_process(self):
-#                 self.on_tool_call_goto(FolderAnalyzeTask=FolderAnalyzeTask)
-#
-#         fs = {
-#             "root": ["file1.txt", "sub1/"],
-#             "root/sub1": ["file2.txt", "sub2/"],
-#             "root/sub1/sub2": ["file3.txt", "file4.txt"],
-#         }
-#         # 启动工作流
-#         start_task = EntryTask(
-#             task_id="entry",
-#             input_data={"input": "用户提问：扫描root文件夹"}
-#         )
-#
-#         result_task = await app.run(start_task)
-#         self.assertEqual(result_task.status, LLMTaskStatus.COMPLETED)
-#         self.assertEqual(result_task.output_data["folder"], "root")
-#         self.assertEqual(len(result_task.output_data["children"]), 2)
-#         self.assertEqual(len(client.requests), 5)  # entry + root + file1 + subfolder + file2
+class TestLLMWorkflowSerialUseCase(unittest.IsolatedAsyncioTestCase):
+    async def test_serial_workflow_customer_service(self):
+        """测试串行工作流：客服助手"""
+        client = MockLLMClient(workflow_customer_service.mock_response)
+        app = workflow_customer_service.create_workflow(client, 'test-model')
+
+        channel_collector = MockTextChannelCollector({
+            k: v for k, v in app.channels.items()
+            if k in ('stdout', 'reasoning', 'status')
+        })
+        output_task = asyncio.create_task(channel_collector.start_listening())
+
+        await app.channels['stdin'].write('我的订单现在什么状态？')
+        await app.channels['stdin'].write('15641651')
+        user_question = await app.channels['stdin'].read()
+        app.vars['user_question'] = user_question
+        result_task = await app.run(workflow_customer_service.EntryTask(input_data={
+            'user_question': user_question
+        }))
+        channel_collector.close()
+        await output_task
+
+        print(result_task)
+        self.assertEqual(result_task.status, LLMTaskStatus.COMPLETED)
+        self.assertEqual(result_task.output_data, "你的订单15641651，当前状态是已发货")
+        self.assertEqual(len(client.requests), 3)
+        print(channel_collector.events_read)
 
 
 class TestLLMWorkflowNestedUseCase(unittest.IsolatedAsyncioTestCase):

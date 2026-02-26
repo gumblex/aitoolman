@@ -326,7 +326,7 @@ class LLMModuleRequest(typing.NamedTuple):
     media_content: Optional[MediaContent] = None
 
     # 覆盖原始配置
-    tools: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
+    tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: Optional[bool] = None
     output_channel: Union[str, TextFragmentChannel, None] = None
@@ -348,7 +348,7 @@ class LLMModuleResult:
     # 状态信息
     status: FinishReason = FinishReason.stop
     error_text: Optional[str] = None
-    # 原始请求参数
+    # 原始模板参数
     request_params: Dict[str, Any] = field(default_factory=dict)
     # 原始响应（用于拼接上下文）
     response_message: Optional[Message] = None

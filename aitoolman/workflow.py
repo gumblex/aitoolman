@@ -109,13 +109,17 @@ class LLMTask:
         """
         前处理钩子：在调用LLM模块之前执行
 
-        默认实现：直接使用 input_data 作为模板参数
+        默认实现：
+        - input_data 为 LLMModuleRequest/LLMDirectRequest：直接调用
+        - input_data 为 dict：作为模板参数
+        - 其他：报错
+
         用户可以重写此方法以实现：
         - 动态修改输入数据
         - 添加上下文消息
         - 添加多媒体内容
         """
-        if isinstance(self.input_data, _model.LLMDirectRequest):
+        if isinstance(self.input_data, (_model.LLMModuleRequest, _model.LLMDirectRequest)):
             return self.input_data
         if not isinstance(self.input_data, dict):
             raise ValueError("input_data is not dict")
@@ -243,7 +247,7 @@ class LLMWorkflow(LLMApplication):
     def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
         """
         添加后台任务，不立即执行
-        current_task 依赖 dependent_task
+        dependent_task 为 current_task 之前要运行的任务
         current_task 为 None 时，单独添加 dependent_task
 
         这个方法设计为在 LLMTask.pre_process 或 post_process 中调用

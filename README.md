@@ -1,186 +1,53 @@
 # aitoolman - A Controllable, Transparent LLM Application Framework
 
-* [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](./docs/quick_start.md) （所有文档以中文为准）
+* [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](docs/quick_start.md) （所有文档以中文为准）
 * [One-page Quick Start (for human and AI)](./docs/quick_start.en.md)
 
 ## Project Introduction
-aitoolman is a developer-oriented LLM (Large Language Model) application framework designed to address common problems in existing frameworks such as **vendor lock-in, unclear workflows, and difficult debugging**. The framework positions AI as a "Toolman", emphasizing that **users directly control all prompts, data flows, and control flows** to help developers quickly build stable, debuggable LLM applications.
+aitoolman is a developer-focused LLM (Large Language Model) application framework designed to address pain points of existing frameworks such as **vendor lock-in, unclear workflows, and debugging difficulties**. The framework positions AI as a normal worker, emphasizing **direct user control over all prompts, data flows, and control flows** to help developers quickly build stable, debuggable LLM applications.
 
-### Design Philosophy
-1. **AI is not an Agent, but a tool**: AI should act like a "top university intern" that executes clear instructions rather than making independent decisions.
-2. **Controllable Workflows**: All program logic is dominated by user code, **with no unexpected operations, no hidden prompts**, and no autonomy granted to the LLM.
-3. **Transparent Data Flows**: Users can customize all data sent to the LLM, fully leveraging the unique features of each provider.
-4. **Template-Driven Prompts**: Encapsulate prompts as reusable templates in fixed locations, preventing prompts from being scattered across the codebase.
+## Design Principles
+1. **Full User Control**: All prompts, data flows, and control flows are dominated by user code. The LLM only acts as an execution tool, with **no unexpected operations or hidden prompts**.
+2. **Transparent & Debuggable Workflows**: All data sent to and received from LLMs is customizable and auditable, making it easy to troubleshoot issues and optimize prompts.
+3. **Vendor-agnostic Architecture**: Unified abstraction layer natively supports multiple LLM providers, enabling seamless model switching while leveraging each provider's unique features.
+4. **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse.
+5. **Production-grade Features**: Built-in resource management, error handling, microservice deployment, and monitoring capabilities, ready for direct production use.
 
-### Core Advantages
-- **Vendor-Agnostic**: Directly pass in HTTP headers and custom options, abstract request/response formats, and easily switch between providers.
-- **Modular Design**: Components have single responsibilities, making them easy to test and replace.
-- **Streaming Support**: Implement real-time data transmission (e.g., thinking processes, response fragments) via `Channel`.
-- **Tool Calling**: Support LLM tool invocation as a workflow control mechanism (e.g., calling Tool A represents following Workflow A; or pausing to wait for user confirmation when tool invocation is needed).
-- **Microservice Support**: The LLM scheduler can be deployed as an independent service for unified resource management and audit logging.
+| Dimension              | aitoolman                                                        | Traditional Agent Frameworks                                                  |
+|------------------------|------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| Positioning            | **LLM is a "worker", only executes predefined instructions**     | LLM is an autonomous "agent" with decision-making capabilities                |
+| Control                | User has full control over workflows                             | Framework implies hidden control flows                                        |
+| Prompts                | Developers write all prompts with full customization             | Includes many default prompts, high adaptation cost for non-English scenarios |
+| Multi-model Adaptation | Natively supports multi-vendor with low switching cost           | Optimized for single platforms, high adaptation cost                          |
+| Feature Boundaries     | Focuses on LLM function orchestration, no redundant dependencies | Bulky dependencies with built-in vector indexing, RAG, and other features     |
+| Use Cases              | Controllable workflow orchestration, batch task processing       | Autonomous agents, exploratory applications                                   |
 
-## Project Structure Design
-### Data Flow Sequence
+## Core Features
+- **Prompt Templating**: Encapsulate prompts as reusable Jinja2 templates for centralized management, avoiding scattered prompt definitions.
+- **Flexible Workflow Orchestration**: Supports serial, parallel, and dynamic DAG (Directed Acyclic Graph) workflows to handle complex multistep tasks easily.
+- **Native Tool Call Support**: Treats tool calls as a workflow control mechanism, enabling intent recognition or classic function call patterns.
+- **Real-time Streaming**: Channel system enables real-time output of response content and reasoning processes, enhancing interactive experiences.
+- **Microservice Architecture**: Deploy LLM schedulers as independent services for unified resource management, key isolation, and global auditing.
 
-User Input → LLMApplication → LLMModule → LLMClient → LLMProviderManager → 
-LLMFormatStrategy → HTTP API → Response Parsing → Post-Processing → Channel Output → User Reception
+## Use Cases
+aitoolman is suitable for various scenarios requiring controllable, reliable LLM integration:
 
-### Class Call Relationship Diagram
+- **Professional Text Processing**: Summarization, translation, data annotation, structured information extraction.
+- **Report Generation**: Generate standardized text reports based on structured data.
+- **Controllable Multi-turn Dialogues**: Handle complex user requests through predefined workflows to ensure compliance with business rules.
+- **Intelligent Task Orchestration**: Decompose complex business tasks into executable steps, dynamically adjusting workflow branches based on results.
+- **Batch Task Processing**: Efficiently process large volumes of standardized tasks in parallel, such as ticket classification, content moderation, and data cleansing.
 
-```mermaid
-graph TB
-    subgraph "User Code"
-        User[User Application]
-    end
-    
-    subgraph "Application Layer"
-        App[LLMApplication]
-        Module[LLMModule]
-    end
-    
-    subgraph "Client Layer"
-        Client[LLMClient]
-        LocalClient[LLMLocalClient]
-        ZmqClient[LLMZmqClient]
-    end
-    
-    subgraph "Microservices"
-        ZmqServer[LLMZmqServer]
-    end
-    
-    subgraph "Service Layer"
-        ProviderManager[LLMProviderManager]
-        ResourceMgr[ResourceManager]
-        FormatStrategy[LLMFormatStrategy]
-        OpenAIFormat[OpenAICompatibleFormat]
-    end
-    
-    subgraph "Channel Layer"
-        Channel[Channel]
-        TextFragmentChannel[TextFragmentChannel]
-    end
-    
-    subgraph "Data Models"
-        Request[LLMProviderRequest]
-        Response[LLMProviderResponse]
-        Message[Message]
-        LLMModuleResult[LLMModuleResult]
-    end
-    
-    User --> App
-    App --> Module
-    Module --> Client
-    Module --> Channel
-    
-    Client --> LocalClient
-    Client --> ZmqClient
-    LocalClient --> ProviderManager
-    ZmqClient --> ZmqServer
-    ZmqServer --> ProviderManager
-    
-    ProviderManager --> ResourceMgr
-    ProviderManager --> FormatStrategy
-    FormatStrategy --> OpenAIFormat
-    
-    ProviderManager --> Request
-    Request --> Response
-    Request --> Message
-    Response --> LLMModuleResult
-    
-    Channel --> TextFragmentChannel
-```
+## Architecture Overview
+1. User Application Layer: Business logic implementation
+2. Application Layer (LLMApplication / LLMWorkflow): Template management, workflow orchestration, result processing
+3. Transport Layer (LLMClient / Channel): Request sending, streaming response transmission, microservice communication
+4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting & retries
+5. LLM Provider APIs (OpenAI / Anthropic, etc.): Underlying LLM services
 
-### Data Flow Diagram
-```mermaid
-flowchart TD
-    subgraph "Input Processing"
-        USER[User Input] --> TEMPLATE[Template Rendering]
-        TEMPLATE --> MESSAGES[Message List]
-    end
-    
-    subgraph "Request Construction"
-        MESSAGES --> REQUEST[LLMProviderRequest]
-        REQUEST --> FORMAT[Format Strategy]
-        FORMAT --> REQ_BODY[Request Body]
-    end
-    
-    subgraph "API Call"
-        REQ_BODY --> PROVIDER[ProviderManager]
-        PROVIDER --> RESOURCE[Resource Management]
-        RESOURCE --> HTTP[HTTP Request]
-        HTTP --> STREAM{Streaming?}
-        
-        STREAM -->|Yes| SSE[SSE Streaming Parsing]
-        STREAM -->|No| BATCH[Batch Response Parsing]
-    end
-    
-    subgraph "Response Processing"
-        SSE --> FRAGMENT[Write Fragment]
-        BATCH --> FULL[Write Full Response]
-        
-        FRAGMENT --> CHANNEL[TextFragmentChannel]
-        FULL --> CHANNEL
-        
-        CHANNEL --> MULTI_CHANNEL[Multi-Channel Distribution]
-        
-        MULTI_CHANNEL --> REASONING[Reasoning Channel]
-        MULTI_CHANNEL --> RESPONSE[Response Channel]
-    end
-    
-    subgraph "Post-Processing"
-        RESPONSE --> POSTPROCESS[Post-Processor]
-    end
-    
-    subgraph "Output"
-        POSTPROCESS --> RESULT[LLMModuleResult]
-        RESULT --> CONTEXT[Context Update]
-        CONTEXT --> NEXT[Next Step Decision]
-    end
-```
-
-### Data Flow Sequence Diagram
-```mermaid
-sequenceDiagram
-    participant User as User Application
-    participant App as LLMApplication
-    participant Module as LLMModule
-    participant Client as LLMClient
-    participant Provider as ProviderManager
-    participant Resource as ResourceManager
-    participant API as External API
-    participant Channel as TextFragmentChannel
-    
-    User->>App: Create application context
-    App->>Module: Initialize module
-    App->>Client: Configure client
-    
-    User->>Module: Invoke module (parameters)
-    
-    Module->>Module: Render template
-    Module->>Module: Build message list
-    Module->>Client: request(model, messages, tools)
-    
-    Client->>Provider: process_request(LLMProviderRequest)
-    
-    Provider->>Resource: acquire(model resource)
-    Resource-->>Provider: Resource granted
-    
-    Provider->>Provider: Build request body (format strategy)
-    Provider->>API: HTTP POST request
-    
-    alt Streaming Response
-        API-->>Provider: SSE streaming data
-        Provider->>Channel: write_fragment(fragment)
-        Channel-->>User: Real-time fragment output
-    else Batch Response
-        API-->>Provider: Full response
-        Provider->>Channel: write_message(full response)
-        Channel-->>User: Full output
-    end
-    
-    Provider->>Resource: release(resource)
-    
-    Provider-->>Client: LLMProviderResponse
-    Client-->>Module: LLMModuleResult
-    Module-->>User: Processing result
-```
+## Quick Start
+1. `pip install aitoolman`
+2. Refer to the [Developer Documentation](docs/quick_start.en.md) for detailed framework docs, API references, and sample code
+3. Configure LLM provider API keys and model parameters (llm_config.toml)
+4. Write prompt template configurations (app_prompt.toml)
+5. Build application logic using LLMApplication or LLMWorkflow

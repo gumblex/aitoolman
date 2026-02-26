@@ -1,8 +1,8 @@
 import json
 import inspect
-from typing import Dict, List, Any, Callable, Optional, Union, NamedTuple
+from typing import Dict, List, Any, Callable, Optional, Union, NamedTuple, Tuple
 
-from aitoolman import LLMClient, LLMProviderRequest, LLMProviderResponse, Message
+from aitoolman import LLMClient, LLMProviderRequest, LLMProviderResponse, Message, ChannelCollector
 
 
 class AuditEvent(NamedTuple):
@@ -64,3 +64,25 @@ class MockLLMClient(LLMClient):
 
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         self.events.append(AuditEvent(context_id, event_type, kwargs))
+
+
+class MockTextChannelCollector(ChannelCollector):
+    def __init__(self, channels):
+        super().__init__(channels)
+        self.events_start: List[str] = []
+        self.events_read: List[Tuple[str, Any]] = []
+        self.events_end: List[str] = []
+        self.events_eof: List[str] = []
+
+    async def on_channel_start(self, channel_name: str):
+        self.events_start.append(channel_name)
+
+    async def on_channel_read(self, channel_name: str, message):
+        self.events_read.append((channel_name, message))
+
+    async def on_channel_end(self, channel_name: str):
+        self.events_end.append(channel_name)
+
+    async def on_channel_eof(self, channel_name: str):
+        self.events_eof.append(channel_name)
+

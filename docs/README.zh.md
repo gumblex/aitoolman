@@ -1,187 +1,50 @@
 # aitoolman - 可控、透明的LLM应用框架
 
-
 ## 项目介绍
 aitoolman 是一个面向开发者的LLM（大语言模型）应用框架，旨在解决现有框架的**供应商锁定、流程不清晰、调试困难**等痛点。框架将AI定位为“工具人”，强调**用户直接控制所有提示词、数据流、控制流**，帮助开发者快速构建稳定、可调试的LLM应用。
 
+## 设计理念
+1. **用户完全控制**：所有提示词、数据流、控制流均由用户代码主导，LLM 仅作为执行工具，**无意外操作、无隐藏提示词**
+2. **流程透明可调试**：所有发往LLM和从LLM返回的数据均可自定义、可审计，便于排查问题和优化提示词
+3. **供应商无关**：通过抽象层统一适配多种LLM提供商，轻松切换模型且充分利用各提供商的特色功能
+4. **模块化设计**：组件职责单一，易于测试、替换和复用
+5. **生产级特性**：内置资源管理、错误处理、微服务部署、监控审计能力，可直接用于生产环境
 
-### 设计理念
-1. **AI是工具人**：AI应像“985实习生”一样，执行明确指令，而非自主决策。
-2. **流程可控**：所有程序逻辑由用户代码主导，**无意外操作、无隐藏提示词**，LLM也无自主权。
-3. **数据流透明**：用户可自定义所有发往LLM的数据，充分利用各提供商特色功能。
-4. **提示词模板化**：将提示词在固定的地方封装为可复用模板，避免提示词散落各处。
+| 维度 | aitoolman | 传统 Agent 框架 |
+|------|-----------|----------------|
+| 定位 | **LLM是工具人，仅执行预设指令** | LLM是智能体，可自主决策 |
+| 控制权 | 用户完全控制流程 | 框架隐含控制流 |
+| 提示词 | 开发者编写所有提示词，完全自定义 | 自带大量默认提示词，适配非英语场景成本高 |
+| 多模型适配 | 原生支持多厂商、多模型，切换成本低 | 多为单一平台优化，适配成本高 |
+| 功能边界 | 专注LLM功能编排，无冗余依赖 | 内置向量索引、RAG等大量功能，依赖库臃肿 |
+| 适用场景 | 企业级可控流程编排、批量任务处理 | 开放式自主智能体、探索性应用 |
 
+## 核心功能
+- **提示词模板化**：将提示词封装为可复用的 Jinja2 模板，集中管理，避免散落各处。
+- **灵活的工作流编排**：支持串行、并行及动态 DAG（有向无环图）工作流，轻松处理复杂多步骤任务。
+- **原生工具调用支持**：将工具调用作为流程控制机制，实现意图识别或经典函数调用模式。
+- **实时流式传输**：通过 `Channel` 系统实现响应内容、推理过程的实时输出，提升交互体验。
+- **微服务架构**：可将 LLM 调度器部署为独立服务，实现统一的资源管理、密钥隔离与全局审计。
 
-### 核心优势
-- **供应商无关**：直接带入HTTP头和自定义选项，可抽象请求/响应格式，轻松切换供应商。
-- **模块化设计**：组件职责单一，易于测试和替换。
-- **流式支持**：通过`Channel`实现实时数据传输（如思考过程、响应片段）。
-- **工具调用**：支持LLM工具调用，作为流程控制机制（如用调用A工具代表走A流程；或在需要调用工具时暂停，等待用户确认）。
-- **微服务支持**：可将LLM调度器作为独立服务，统一资源管理和审计日志。
+## 适用场景
+aitoolman 适用于多种需要可控、可靠 LLM 集成的场景：
 
-## 项目结构设计
-### 数据流顺序
+- **专业文本处理**：总结、翻译、数据标注、结构化信息提取。
+- **报告内容生成**：基于结构化数据生成标准化的文字报告。
+- **可控多轮对话**：通过预设流程处理复杂用户请求，确保交互完全符合业务规则。
+- **智能任务编排**：分解复杂业务任务为可执行步骤，根据结果动态调整流程分支。
+- **批量任务处理**：高效并行处理大量标准化任务，如工单分类、内容审核、数据清洗。
 
-用户输入 → LLMApplication → LLMModule → LLMClient → LLMProviderManager → 
-LLMFormatStrategy → HTTP API → 响应解析 → 后处理 → 通道输出 → 用户接收
+## 架构概览
+1. 用户应用层：业务逻辑实现
+2. 应用层 (LLMApplication / LLMWorkflow)：模板管理、流程编排、结果处理
+3. 传输层 (LLMClient / Channel)：请求发送、流式响应传输、微服务通信
+4. 数据接口层 (ProviderManager)：多厂商适配、请求调度、限流重试
+5. LLM 提供商 API (OpenAI / Anthropic 等)：底层LLM服务
 
-### 类调用关系图
-
-```mermaid
-graph TB
-    subgraph "用户代码"
-        User[用户应用]
-    end
-    
-    subgraph "应用层"
-        App[LLMApplication]
-        Module[LLMModule]
-    end
-    
-    subgraph "客户端层"
-        Client[LLMClient]
-        LocalClient[LLMLocalClient]
-        ZmqClient[LLMZmqClient]
-    end
-    
-    subgraph "微服务"
-        ZmqServer[LLMZmqServer]
-    end
-    
-    subgraph "服务层"
-        ProviderManager[LLMProviderManager]
-        ResourceMgr[ResourceManager]
-        FormatStrategy[LLMFormatStrategy]
-        OpenAIFormat[OpenAICompatibleFormat]
-    end
-    
-    subgraph "通道层"
-        Channel[Channel]
-        TextFragmentChannel[TextFragmentChannel]
-    end
-    
-    subgraph "数据模型"
-        Request[LLMProviderRequest]
-        Response[LLMProviderResponse]
-        Message[Message]
-        LLMModuleResult[LLMModuleResult]
-    end
-    
-    User --> App
-    App --> Module
-    Module --> Client
-    Module --> Channel
-    
-    Client --> LocalClient
-    Client --> ZmqClient
-    LocalClient --> ProviderManager
-    ZmqClient --> ZmqServer
-    ZmqServer --> ProviderManager
-    
-    ProviderManager --> ResourceMgr
-    ProviderManager --> FormatStrategy
-    FormatStrategy --> OpenAIFormat
-    
-    ProviderManager --> Request
-    Request --> Response
-    Request --> Message
-    Response --> LLMModuleResult
-    
-    Channel --> TextFragmentChannel
-```
-
-### 数据流图
-```mermaid
-flowchart TD
-    subgraph "输入处理"
-        USER[用户输入] --> TEMPLATE[模板渲染]
-        TEMPLATE --> MESSAGES[Message列表]
-    end
-    
-    subgraph "请求构建"
-        MESSAGES --> REQUEST[LLMProviderRequest]
-        REQUEST --> FORMAT[格式策略]
-        FORMAT --> REQ_BODY[请求体]
-    end
-    
-    subgraph "API调用"
-        REQ_BODY --> PROVIDER[ProviderManager]
-        PROVIDER --> RESOURCE[资源管理]
-        RESOURCE --> HTTP[HTTP请求]
-        HTTP --> STREAM{流式?}
-        
-        STREAM -->|是| SSE[SSE流式解析]
-        STREAM -->|否| BATCH[批量响应解析]
-    end
-    
-    subgraph "响应处理"
-        SSE --> FRAGMENT[片段写入]
-        BATCH --> FULL[完整写入]
-        
-        FRAGMENT --> CHANNEL[TextFragmentChannel]
-        FULL --> CHANNEL
-        
-        CHANNEL --> MULTI_CHANNEL[多通道分发]
-        
-        MULTI_CHANNEL --> REASONING[推理通道]
-        MULTI_CHANNEL --> RESPONSE[响应通道]
-    end
-    
-    subgraph "后处理"
-        RESPONSE --> POSTPROCESS[后处理器]
-    end
-    
-    subgraph "输出"
-        POSTPROCESS --> RESULT[LLMModuleResult]
-        RESULT --> CONTEXT[上下文更新]
-        CONTEXT --> NEXT[下一步决策]
-    end
-```
-
-### 数据流时序图
-```mermaid
-sequenceDiagram
-    participant User as 用户应用
-    participant App as LLMApplication
-    participant Module as LLMModule
-    participant Client as LLMClient
-    participant Provider as ProviderManager
-    participant Resource as ResourceManager
-    participant API as 外部API
-    participant Channel as TextFragmentChannel
-    
-    User->>App: 创建应用上下文
-    App->>Module: 初始化模块
-    App->>Client: 配置客户端
-    
-    User->>Module: 调用模块(参数)
-    
-    Module->>Module: 渲染模板
-    Module->>Module: 构建Message列表
-    Module->>Client: request(model, messages, tools)
-    
-    Client->>Provider: process_request(LLMProviderRequest)
-    
-    Provider->>Resource: acquire(模型资源)
-    Resource-->>Provider: 资源许可
-    
-    Provider->>Provider: 构建请求体(格式策略)
-    Provider->>API: HTTP POST请求
-    
-    alt 流式响应
-        API-->>Provider: SSE流式数据
-        Provider->>Channel: write_fragment(片段)
-        Channel-->>User: 实时输出片段
-    else 批量响应
-        API-->>Provider: 完整响应
-        Provider->>Channel: write_message(完整)
-        Channel-->>User: 完整输出
-    end
-    
-    Provider->>Resource: release(资源)
-    
-    Provider-->>Client: LLMProviderResponse
-    Client-->>Module: LLMModuleResult
-    Module-->>User: 处理结果
-```
-
+## 快速开始
+1. `pip install aitoolman`
+2. 参考《[开发者文档](quick_start.md)》查看详细框架文档、API说明和示例代码
+3. 配置LLM提供商API密钥和模型参数 (llm_config.toml)
+4. 编写提示词模板配置 (app_prompt.toml)
+5. 通过 LLMApplication 或 LLMWorkflow 构建应用逻辑

@@ -3,878 +3,683 @@
 ## 1. Framework Overview
 
 ### 1.1 Design Philosophy
-aitoolman is a developer-focused LLM application framework with the core concept of **"AI as a Toolman"** — enabling LLMs to execute explicit instructions like interns, rather than making autonomous decisions. The framework emphasizes:
-- **Controllable Workflow**: All program logic is dominated by user code, with no autonomy for LLMs
-- **Transparent Data Flow**: Users can customize all data sent to LLMs and clearly view request/response content
-- **Template-based Prompting**: Encapsulate prompts into reusable templates to avoid the chaos of "one-size-fits-all dialog boxes"
+aitoolman is a developer-oriented LLM application framework with the core idea of **AI as a Toolman** — treating LLM like a junior employee in an enterprise, only executing clear instructions within the rules and processes preset by developers, without autonomous decision-making power. The framework has clear role divisions:
+- End User = Client: Proposes vague requirements
+- Application Developer = Business Owner: Defines all rules, processes, prompt templates, and holds 100% decision-making power
+- LLMWorkflow = Middle Manager: Schedules tasks according to preset workflows, switches process branches based on presets or LLM return results
+- LLM Module = Junior Employee: Only completes assigned single, clear tasks, with output strictly adhering to preset format requirements
 
-### 1.2 Core Data Flow
-```
-User Code → LLMApplication → LLMModule → LLMClient → ProviderManager → HTTP API
-    ↑            ↑              ↑           ↑            ↑
-    └─ Result Return ──┴─ Template Rendering ───┴─ Request Construction ──┴─ Format Conversion ──┴─ Response Parsing
-```
+The framework emphasizes:
+- **Full User Control**: All prompts, data flows, and control flows are dominated by user code; LLM only serves as an execution tool with no hidden logic or unexpected behavior
+- **Transparent and Debuggable Workflow**: All data sent to and received from LLM can be customized and audited, facilitating problem troubleshooting and prompt optimization
+- **Vendor Agnostic**: Unified adaptation of multiple LLM providers through abstraction layer, easy model switching while fully utilizing each provider's unique features
+- **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse
+- **Production-Grade Features**: Built-in resource management, error handling, microservice deployment, monitoring, and auditing capabilities, ready for direct production use
 
-**Key Flow Nodes**:
-1. **Template Rendering**: Jinja2 template + variable substitution → final prompt
-2. **Message Construction**: Rendered prompt → list of Message objects
-3. **Request Sending**: Message list → LLMProviderRequest → HTTP API
-4. **Response Handling**: API response → TextFragmentChannel stream → post-processing → final result
+Whether it's simple one-time queries or complex multi-step business processes, aitoolman provides a stable, reliable, and maintainable solution. The framework encourages developers to deeply understand business logic, carefully design prompts, and seamlessly integrate AI capabilities into existing systems.
 
-### 1.3 Core Components
-- **LLMApplication**: Application context that manages modules, templates, variables, channels, and post-processors
-- **LLMModule**: Encapsulates the complete flow of "input → template → LLM → output"
-- **LLMClient**: Abstracts LLM provider calls, supporting local and remote (ZeroMQ) modes
-- **TextFragmentChannel**: Asynchronous message channel that supports streaming fragment transmission
-- **FormatStrategy**: Abstracts message format conversion for different LLM providers
+### 1.2 Differences from Traditional Agent Frameworks
+| Dimension | aitoolman | Traditional Agent Frameworks |
+|-----------|-----------|-------------------------------|
+| Positioning | LLM is a toolman, only executes preset instructions | LLM is an agent with autonomous decision-making capabilities |
+| Control | User has complete control over workflow | Framework implies control flow |
+| Prompts | Developers write all prompts, fully customizable | Comes with numerous default prompts, high adaptation cost for non-English scenarios |
+| Multi-Model Adaptation | Native support for multiple vendors and models, low switching cost | Optimized for single platform, high adaptation cost |
+| Functional Boundaries | Focuses on LLM function orchestration, no redundant dependencies | Built-in vector indexing, RAG, and other features, resulting in bloated dependency libraries |
+| Applicable Scenarios | Enterprise-grade controllable workflow orchestration, batch task processing | Open autonomous agents, exploratory applications |
 
-## 2. Core API Reference
+### 1.3 Use Cases
+1. Professional Applications: Clear input and output scope
+   - **Text Processing**: Summarization, translation, data annotation, structured information extraction
+   - **Report Generation**: Generate standardized text reports based on existing structured data
+2. Assistant Applications: Uncertain user input requirements
+   - **Multi-Round Dialogue**: Handle complex user requests through workflow orchestration
+   - **Intelligent Planning**: Decompose complex tasks into executable steps
+   - **Dynamic Decision Making**: Adjust workflows based on context and tool call results
 
-### 2.1 LLMApplication - Application Context
+In this framework, prompt templates are core, and dialogue context is supplementary. It encourages optimizing prompt quality through careful template parameter orchestration instead of stacking dialogue context, thereby avoiding information forgetting and misguidance.
 
-**Purpose**: Container for managing LLM modules, templates, variables, channels, post-processors, and global tools
+### 1.4 Architecture Overview
+The framework adopts a layered architecture:
+1. User Application Layer: Business logic implementation
+2. Application Layer (LLMApplication / LLMWorkflow): Template management, workflow orchestration, result processing
+3. Transport Layer (LLMClient / Channel): Request sending, streaming response transmission, microservice communication
+4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting and retries
+5. LLM Provider API (OpenAI / Anthropic, etc.): Underlying LLM services
 
-```python
-class LLMApplication:
-    def __init__(
-        self,
-        client: LLMClient,                      # LLM client instance
-        config_dict: Optional[Dict[str, Any]] = None,  # Configuration dictionary (loaded from TOML)
-        processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # Custom post-processors
-        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # Custom channels
-        context_id: Optional[str] = None      # Context ID
-    ) -> None
-```
+## 2. Data Model Classes
 
-**Key Attributes**:
-- `client: LLMClient` - LLM client instance
-- `channels: Dict[str, TextFragmentChannel]` - Channel dictionary (includes stdin/stdout/reasoning by default)
-- `vars: Dict[str, Any]` - Global variables accessible in all templates
-- `modules: Dict[str, LLMModule]` - Loaded module instances
-- `processors: Dict[str, Callable[[str], Any]]` - Post-processor dictionary
-- `global_tools: Dict[str, Any]` - Global tool set referenced by all modules
-
-**Key Methods**:
-```python
-# Dynamically access modules (lazy loading)
-module = app.module_name  # Auto-initializes module from config
-
-# Add post-processor
-app.add_processor("custom.parse_xml", parse_xml_function)
-
-# Get post-processor
-processor = app.get_processor("builtin.parse_json")
-
-# Render global templates (supports cross-template references)
-text = app.render_template("template_name", **variables)
-
-# Add custom channel
-app.add_channel("custom", TextFragmentChannel(read_fragments=True))
-
-# Create application factory (batch create application instances)
-@classmethod
-def factory(
-    cls,
-    client: LLMClient,
-    config_dict: Optional[Dict[str, Any]] = None,
-    processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-    channels: Optional[Dict[str, TextFragmentChannel]] = None,
-) -> Callable[..., 'LLMApplication']:
-    """Create reusable application factory function"""
-    pass
-
-# Use factory to create instances
-app_factory = LLMApplication.factory(
-    client=client,
-    config_dict=app_config,
-    processors={"custom.parser": custom_parser}
-)
-app = app_factory()
-
-# Send custom audit event to LLMClient/LLMZmqServer
-await app.audit_event(event_type, **kwargs)
-```
-
-### 2.2 LLMModule / DefaultLLMModule - LLM Module
-
-**Purpose**: Encapsulates logical units for LLM calls, with each module corresponding to a specific task
+### Message Structure
+The `Message` class represents messages sent to LLM, supporting text, multimedia content, tool call responses, etc.
 
 ```python
-class DefaultLLMModule(LLMModule):
-    def __init__(self, app: LLMApplication, config: ModuleConfig) -> None
-```
-
-**Recommended Calling Method** (dependency injection pattern, supports batch processing):
-```python
-async def process_task(app: aitoolman.LLMApplication, task_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Single task processing function"""
-    result: LLMModuleResult = await app['module_name'](
-        _media=MediaContent(...),  # Optional: Multimedia content
-        **task_data                # Template variables
-    )
-    result.raise_for_status()  # Auto-handle exceptions
-    return {
-        "task_id": task_data["id"],
-        "result": result.data if result.data else result.text
-    }
-
-# Batch processing example
-async with asyncio.TaskGroup() as tg:
-    tasks = [tg.create_task(process_task(app_factory(), task)) for task in task_list]
-    for task in tasks:
-        result = await task
-        print(f"Task {result['task_id']} Result: {result['result']}")
-```
-
-**ModuleConfig Data Class**:
-```python
-@dataclass
-class ModuleConfig:
-    name: str                               # Module name
-    model: str                              # Model name or alias to use
-    templates: Dict[str, str]              # Template dictionary (must include user, system is optional)
-    tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Tool configuration
-    stream: bool = False                    # Whether to use streaming output
-    output_channel: Optional[TextFragmentOutput] = None  # Output channel
-    reasoning_channel: Optional[TextFragmentOutput] = None  # Reasoning channel
-    post_processor: Optional[str] = None    # Post-processor name (corresponds to key in app.processors)
-    options: Dict[str, Any] = field(default_factory=dict)  # Request options (temperature, etc.)
-```
-
-**Tool Configuration Notes**:
-- Empty values (`{}`) in the module's `tools` dictionary indicate referencing **global tool** definitions
-- To override global tool configurations, define complete tool parameters directly in the module
-
-### 2.3 LLMClient - LLM Client
-
-**Purpose**: Abstracts LLM provider calls, supporting local and remote modes
-
-```python
-class LLMClient(abc.ABC):
-    def __init__(self) -> None:
-        ...
-
-    async def initialize(self) -> None:
-        """Initialize client (automatically called in __aenter__)"""
-        pass
-
-    async def close(self) -> None:
-        """Close client (automatically called in __aexit__)"""
-        pass
-```
-
-**Key Methods**:
-```python
-# Send request (automatically called by modules, not typically used directly)
-request: LLMProviderRequest = await client.request(
-    model_name: str,                        # Model name or alias
-    messages: List[Message],               # List of messages
-    tools: Dict[str, Dict[str, Any]] = None,  # Tool configuration
-    options: Optional[Dict[str, Any]] = None,  # Request options
-    stream: bool = False,                   # Whether to use streaming
-    context_id: Optional[str] = None,      # Context ID
-    output_channel: Optional[TextFragmentChannel] = None,  # Response channel
-    reasoning_channel: Optional[TextFragmentChannel] = None   # Reasoning channel
-)
-
-# Cancel request
-await client.cancel(request_id: str)
-
-# Alternatives to with statement
-await client.initialize()
-await client.close()
-```
-
-**Implementation Classes**:
-- `LLMLocalClient`: Local client that directly calls ProviderManager
-- `LLMZmqClient`: ZMQ client that connects to remote microservices
-
-**Usage Pattern**:
-```python
-# As asynchronous context manager (recommended)
-async with LLMLocalClient(api_config) as client:
-    app = LLMApplication(client, app_config)
-    result = await app['module_name'](...)
-```
-
-### 2.4 Channel / TextFragmentChannel - Channel System
-
-**Purpose**: Asynchronous message passing channel that supports complete messages and fragment transmission
-
-```python
-class TextFragmentChannel(Channel):
-    def __init__(self, read_fragments: bool = False) -> None
-```
-
-**Key Methods**:
-
-```python
-# Write complete message
-await channel.write("Complete message content")
-
-# Write message fragments (streaming)
-await channel.write_fragment("Fragment 1", end=False)
-await channel.write_fragment("Fragment 2", end=False)
-await channel.write_fragment("Fragment 3", end=True)  # Mark as end
-
-# Read complete message (non-streaming mode)
-message: Optional[str] = await channel.read()
-
-# Read message fragments (streaming mode)
-fragment: Optional[str] = await channel.read_fragment()  # None indicates end
-```
-
-**Default Channels**:
-- `stdin`: Standard input (non-fragment mode)
-- `stdout`: Standard output (fragment mode)
-- `reasoning`: Reasoning output (fragment mode)
-
-### 2.5 XmlTagToChannelFilter - XML Tag Routing
-
-**Purpose**: Parses XML tags and routes content to different channels
-
-```python
-class XmlTagToChannelFilter(BaseXmlTagFilter):
-    def __init__(
-        self,
-        default_channel: TextFragmentChannel,           # Default channel (for unmatched tags)
-        channel_map: Dict[str, TextFragmentChannel]    # Mapping of tags to channels
-    ) -> None
-```
-
-**Usage Example**:
-```python
-# Create channels
-output_channel = TextFragmentChannel(read_fragments=True)
-reasoning_channel = TextFragmentChannel(read_fragments=True)
-
-# Create filter
-filter = XmlTagToChannelFilter(
-    default_channel=output_channel,
-    channel_map={"reasoning": reasoning_channel}
-)
-
-# Process LLM output (auto-routing)
-await filter.write_fragment("<reasoning>Thinking process...</reasoning>", end=False)
-await filter.write_fragment("<response>Final answer</response>", end=True)
-```
-
-### 2.6 collect_text_channels - Multi-channel Collector
-
-**Purpose**: Listens to multiple TextChannels simultaneously and generates a unified event stream
-
-```python
-async def collect_text_channels(
-    channels: Dict[str, TextFragmentChannel],           # Channel dictionary (name → channel)
-    read_fragments: bool = True,               # Whether to read in fragment mode
-    timeout: Optional[float] = None            # Timeout in seconds
-) -> AsyncGenerator[ChannelEvent, None]
-```
-
-**ChannelEvent Structure**:
-```python
-class ChannelEvent(NamedTuple):
-    channel: str                               # Channel name
-    message: Any                               # Message content
-    is_fragment: bool                          # Whether it's a fragment
-    is_end: bool                               # Whether it's the end marker
-```
-
-**Usage Example**:
-```python
-channels = {
-    'response': app.channels['stdout'],
-    'reasoning': app.channels['reasoning']
-}
-
-async for event in collect_text_channels(channels, read_fragments=True):
-    if event.channel == 'reasoning':
-        print(f"[Reasoning] {event.message}", end="", flush=True)
-    elif event.channel == 'response':
-        print(f"[Response] {event.message}", end="", flush=True)
-```
-
-### 2.7 Data Models (model.py)
-
-**Message - Message Object**:
-```python
-@dataclass
-class Message:
+class Message(typing.NamedTuple):
+    """Message sent to LLM"""
     role: Optional[str] = None                # Role: system/user/assistant/tool
-    content: Optional[str] = None            # Text content
+    content: Optional[str] = None             # Text content
     media_content: Optional[MediaContent] = None  # Multimedia content
-    reasoning_content: Optional[str] = None  # Reasoning content
-    tool_call_id: Optional[str] = None       # Tool call ID
-    raw_value: Optional[Dict] = None         # Raw value (directly passed to provider)
+    reasoning_content: Optional[str] = None   # Assistant's reasoning content
+    tool_call_id: Optional[str] = None        # Tool call ID (for tool role)
+    raw_value: Optional[Dict] = None          # Provider's raw message (ignores all above fields)
 ```
 
-**LLMProviderRequest - Request Object**:
+`MediaContent` is used to encapsulate multimedia content such as images and videos, supporting multiple sources like local files, binary data, and remote URLs, unifying the format of multimodal inputs.
+
+```python
+class MediaContent(typing.NamedTuple):
+    """Multimedia content (images/videos, etc.)"""
+    media_type: str                    # Media type, e.g., "image", "video"
+    # Priority order:
+    # 1. raw_value
+    raw_value: Optional[Dict] = None   # Provider's raw value (highest priority)
+    # 2. data + mime_type
+    data: Optional[bytes] = None       # Raw binary data
+    mime_type: Optional[str] = None    # MIME type, e.g., "image/jpeg"
+    # 3. filename
+    filename: Optional[str] = None     # Filename (auto-read)
+    # 4. url
+    url: Optional[str] = None          # Remote URL
+    options: Optional[Dict] = None     # Provider-specific options
+```
+
+The `ToolCall` class represents tool call requests returned by LLM.
+
+```python
+class ToolCall(typing.NamedTuple):
+    """Tool call request returned by LLM"""
+    name: str                     # Tool function name
+    arguments_text: str           # Argument string (raw JSON)
+    arguments: Optional[Dict[str, Any]]  # Parsed argument dictionary
+    id: Optional[str] = None      # Tool call ID
+    type: str = 'function'        # Type, default 'function'
+```
+
+
+### Application Layer Request/Response
+`LLMDirectRequest`: Direct request parameters without template module configuration, suitable for classic tool calls, multi-round dialogues, and dynamically generated request scenarios.
+
+```python
+class LLMDirectRequest(typing.NamedTuple):
+    """Application layer direct request parameters"""
+    model_name: str
+    messages: List[Message]
+    tools: Optional[Dict[str, Dict[str, Any]]] = None
+    options: Optional[Dict[str, Any]] = None
+    stream: bool = False
+    output_channel: Union[str, TextFragmentChannel, None] = None
+    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+```
+
+`LLMModuleRequest`: Sends requests based on configured template modules, automatically renders prompts, loads preset tool and model configurations, and allows overriding default configurations.
+
+```python
+class LLMModuleRequest(typing.NamedTuple):
+    """Application layer template request parameters (module configuration)"""
+    module_name: str                    # Module name
+    template_params: Dict[str, Any]     # Template parameters
+    model_name: Optional[str] = None    # Override module's default model
+    context_messages: List[Message] = []  # Context messages
+    media_content: Optional[MediaContent] = None  # Multimedia content
+
+    # Override original configuration
+    tools: Optional[Dict[str, Dict[str, Any]]] = None
+    options: Optional[Dict[str, Any]] = None
+    stream: Optional[bool] = None
+    output_channel: Union[str, TextFragmentChannel, None] = None
+    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+```
+
+`LLMModuleResult`: Unified encapsulation of all results returned by LLM, including raw responses, processed text, tool calls, status information, etc.
+
+```python
+@dataclass
+class LLMModuleResult:
+    """Application layer (template) request response"""
+    module_name: str                    # Module name
+    request: LLMDirectRequest = None    # Original request parameters
+    response_text: str = ""             # Raw response text
+    response_reasoning: str = ""        # Raw reasoning text
+    text: str = ""                      # Processed text
+    tool_calls: List[ToolCall] = field(default_factory=list)  # Tool calls
+    status: FinishReason = FinishReason.stop  # Completion status
+    error_text: Optional[str] = None    # Error message
+    request_params: Dict[str, Any] = field(default_factory=dict)  # Original template parameters
+    response_message: Optional[Message] = None  # Original response message
+    data: Any = None                    # Post-processing result
+
+    def raise_for_status(self):
+        """Raise error based on status"""
+
+    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> List[Message]:
+        """Execute tool calls and return Message context list"""
+```
+
+
+### Data Interface Layer Request/Response
+Used for interacting with LLM providers, no need for upper-layer applications to关注.
+
+`LLMProviderRequest`: Request sent to model provider, containing complete request data and channel configurations.
+
 ```python
 @dataclass
 class LLMProviderRequest:
-    client_id: str                            # Client ID
-    context_id: Optional[str]                 # Context ID
-    request_id: str                          # Request ID
-    model_name: str                          # Model name or alias
-    messages: List[Message]                  # List of messages
-    tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Tool configuration
-    options: Dict[str, Any] = field(default_factory=dict)  # Request options
-    stream: bool = False                     # Whether to use streaming
-    output_channel: Optional[TextFragmentChannel] = None  # Response channel
-    reasoning_channel: Optional[TextFragmentChannel] = None  # Reasoning channel
-    is_cancelled: bool = False               # Whether request is cancelled
-    response: asyncio.Future[LLMProviderResponse] = field(default_factory=asyncio.Future)
+    """Request sent to model provider"""
+    client_id: str                    # Client identifier
+    context_id: Optional[str]         # Context identifier (for dialogue association)
+    request_id: str                   # Unique request ID
+    model_name: str                   # Model name
+    messages: List[Message]           # Message list
+    tools: Dict[str, Dict[str, Any]]  # Tool definitions
+    options: Dict[str, Any]           # Provider-specific options
+    stream: bool = False              # Whether to use streaming response
+    output_channel: Optional[TextFragmentChannel]  # Output channel
+    reasoning_channel: Optional[TextFragmentChannel]  # Reasoning channel
+    is_cancelled: bool = False        # Whether cancelled
+    response: asyncio.Future[LLMProviderResponse]  # Response Future
 ```
 
-**LLMProviderResponse - Response Object**:
+`LLMProviderResponse`: Model provider's response, containing complete time statistics and content information.
+
 ```python
 @dataclass
 class LLMProviderResponse:
+    """Model provider response"""
     client_id: str
     context_id: str
     request_id: str
     model_name: str
     stream: bool
+
     # Time statistics
-    start_time: Optional[float] = None
-    queue_time: Optional[float] = None
-    queue_length: Optional[int] = None
-    time_to_first_token: Optional[float] = None
-    total_response_time: Optional[float] = None
+    start_time: Optional[float] = None      # Request start time
+    queue_time: Optional[float] = None      # Queue time
+    queue_length: Optional[int] = None      # Queue length when requesting
+    time_to_first_token: Optional[float] = None  # Time to first token
+    total_response_time: Optional[float] = None  # Total response time
+
     # Response content
-    response_text: str = ""
-    response_reasoning: str = ""
-    response_tool_calls: List[ToolCall] = field(default_factory=list)
+    response_text: str = ""                 # Complete response text
+    response_reasoning: str = ""            # Complete reasoning text
+    response_tool_calls: List[ToolCall] = field(default_factory=list)  # Tool calls
+
     # Completion information
-    finish_reason: Optional[str] = None
-    error_text: Optional[str] = None
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    # Complete request/response data
-    response_message: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None     # Completion reason
+    error_text: Optional[str] = None        # Error message
+    prompt_tokens: Optional[int] = None     # Input token count
+    completion_tokens: Optional[int] = None # Output token count
 
-    def raise_for_status(self) -> None:
-        """Raise corresponding exceptions based on finish_reason"""
-        pass
+    # Raw data
+    response_message: Optional[Dict[str, Any]] = None  # Original response message
+```
 
-    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+### Status and Error Types
+The `FinishReason` enum defines all possible completion reasons, used to determine request result status.
+
+```python
+class FinishReason(enum.Enum):
+    # Provider reasons
+    stop = "stop"                     # Normal completion
+    length = "length"                 # Length limit reached
+    content_filter = "content_filter" # Content filtered by moderation
+    tool_calls = "tool_calls"         # Tool calls invoked
+
+    # Local reasons
+    error = "error"                   # General error
+    error_request = "error: request"  # Request error
+    error_format = "error: format"    # Response format error
+    error_app = "error: application"  # Application error
+    cancelled = "cancelled"           # Request cancelled
+
+    unknown = "unknown"               # Unknown reason
+```
+
+The `raise_for_status()` method in LLMModuleResult or FinishReason automatically converts completion reasons into corresponding exception types.
+
+```python
+class LLMError(RuntimeError): ...
+class LLMLengthLimitError(LLMError): ...      # Response length limit reached
+class LLMContentFilterError(LLMError): ...    # Content filtered by moderation
+class LLMApiRequestError(LLMError): ...       # API request error
+class LLMResponseFormatError(LLMError): ...   # Response format error
+class LLMApplicationError(LLMError): ...      # Application code error
+class LLMCancelledError(LLMError): ...        # Request cancelled
+class LLMUnknownError(LLMError): ...          # Unknown completion reason
+class GenericError(LLMError): ...             # General error
+```
+
+## 3. Application Layer
+
+### 3.1 LLMApplication Class
+LLMApplication is the core entry class of the framework, responsible for managing configurations, template rendering, LLM calls, channels, and post-processors, serving as the basic carrier for all LLM applications.
+
+#### 3.1.1 Core Features
+LLMApplication is the main entry point of the framework, responsible for:
+- Loading and managing modules in configuration files
+- Rendering prompt templates
+- Calling LLM and processing responses
+- Managing context variables and channels
+
+#### 3.1.2 Initialization
+Create an LLM application instance, bind client, load configurations, register post-processors and channels. Each application instance corresponds to an independent context.
+
+```python
+class LLMApplication:
+    def __init__(
+        self,
+        client: LLMClient,                     # LLM client
+        config_dict: Optional[Dict[str, Any]] = None,  # Configuration file dictionary
+        processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # Post-processors
+        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # Custom channels
+        context_id: Optional[str] = None       # Context ID (for client tracking, debugging, and auditing)
+    ): ...
+```
+
+#### 3.1.3 Main Interfaces
+Quickly retrieve callable module objects by module name, and complete LLM calls directly by passing template parameters.
+```python
+# Access module via subscript (returns callable object)
+result: LLMModuleResult = await app['module_name'](template_param1='value1', ...)
+```
+
+General request entry, supports passing module requests or direct requests, suitable for dynamically constructing requests.
+```python
+# Directly call LLM (bypasses module configuration)
+async def call(
+    self,
+    request: Union[LLMModuleRequest, LLMDirectRequest]
+) -> LLMModuleResult: ...
+```
+
+Render a template with the specified name, used for custom message content generation.
+```python
+# Render template
+def render_template(self, template_name: str, **kwargs) -> str: ...
+```
+
+Register custom post-processors for parsing specific format content returned by LLM, such as extracting JSON, XML, code blocks, etc.
+```python
+# Add custom post-processor
+def add_processor(self, name: str, processor: Callable): ...
+```
+
+Register custom channels for receiving streaming responses, reasoning content, etc., enabling real-time output to front-end, files, and other custom scenarios.
+```python
+# Add custom channel
+def add_channel(self, name: str, channel: TextFragmentChannel): ...
+```
+
+Send custom audit events for recording business-level operations, facilitating subsequent problem troubleshooting and business data statistics. Received and unified processed by LLMClient backend.
+```python
+# Trigger audit event
+async def audit_event(self, event_type: str, **kwargs): ...
+```
+
+Create an application factory for generating multiple independent application instances during batch task processing, avoiding context interference and supporting concurrent processing.
+```python
+# Use LLMApplication.factory for batch tasks to generate multiple instances for parallel processing
+@classmethod
+def factory(
+        cls,
+        client: _client.LLMClient,
+        config_dict: Optional[Dict[str, Any]] = None,
+        processors: Optional[Dict[str, Callable[[str], Any]]] = None,
+        channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None,
+) -> Callable[..., 'LLMApplication']: ...
+```
+
+#### 3.1.4 Usage Examples
+```python
+# Method 1: Call via module
+result = await app['translator'](text="Hello", target_lang="zh")
+print(result.data)  # Post-processed translation result
+
+# Method 2: Direct call
+direct_request = LLMDirectRequest(
+    model_name="gpt-4",
+    messages=[Message(role="user", content="Hello")],
+    stream=True
+)
+result = await app.call(direct_request)
+```
+
+### 3.2 LLMWorkflow Class
+
+#### 3.2.1 Core Concepts
+LLMWorkflow extends LLMApplication, supporting dynamic workflow execution with two construction modes:
+
+1. **Sequential Mode**: Connect tasks via `next_task` attribute, execute using `run()` method
+2. **Parallel Mode**: Build DAG (Directed Acyclic Graph) via `add_task()` method, execute using `wait_tasks()` method
+
+The two modes can be mixed.
+
+#### 3.2.2 Task Definition
+Inherit the `LLMTask` class and override the `pre_process()` and `post_process()` methods:
+- `pre_process()`: Prepare request data, dynamically modify inputs
+- `post_process()`: Process response results, generate next task
+
+Tool call handling:
+- `on_tool_call_goto()`: Convert tool calls to next task
+- `run_tool_calls()`: Execute tool calls and continue dialogue
+
+```python
+# Task status enum
+class LLMTaskStatus(enum.Enum):
+    INIT = 0
+    WAITING = 1
+    RUNNING = 2
+    COMPLETED = 3
+    FAILED = 4
+    DEPENDENCY_FAILED = 5
+
+
+class LLMTask:
+    """LLM Task Base Class"""
+    module_name: ClassVar[str] = ''  # Default module name
+
+    # Main methods (can be overridden by users)
+    async def pre_process(self) -> Union[LLMModuleRequest, LLMDirectRequest, None]:
         """
-        Execute tool calls
+        Pre-processing hook: Executed before calling LLM module
 
-        Args:
-            fn_map: Mapping of tool names to functions
+        Default implementation:
+        - input_data is LLMModuleRequest/LLMDirectRequest: Direct call
+        - input_data is dict: Used as template parameters
+        - Others: Throw error
 
-        Returns:
-            Dictionary of tool call IDs to results
-
-        Raises:
-            LLMError: If call fails
-            LLMResponseFormatError: If tool not found
+        Users can override this method to:
+        - Dynamically modify input data
+        - Add context messages
+        - Add multimedia content
         """
-        pass
-```
 
-**LLMModuleResult - Module Result**:
-```python
-@dataclass
-class LLMModuleResult:
-    response_text: str = ""                   # Raw response text
-    response_reasoning: str = ""            # Raw reasoning content
-    text: str = ""                           # Processed text (raw text before post-processing)
-    tool_calls: Dict[str, ToolCall] = field(default_factory=dict)  # Tool calls
-    status: FinishReason = FinishReason.stop  # Completion status
-    error_text: Optional[str] = None         # Error message
-    request_params: Dict[str, Any] = field(default_factory=dict)  # Request parameters
-    request_messages: List[Message] = field(default_factory=list)  # Request messages
-    response_message: Optional[Dict[str, Any]] = None  # Raw response message
-    data: Any = None                         # Post-processing result
-
-    def raise_for_status(self) -> None:
-        """Raise corresponding exceptions based on status"""
-        pass
-
-    def call(self, fn_map: Dict[str, Callable]) -> Dict[str, Any]:
+    async def post_process(self):
         """
-        Execute tool calls
+        Post-processing hook: Executed after LLM module returns result
 
-        Args:
-            fn_map: Mapping of tool names to functions
-
-        Returns:
-            Dictionary of tool call IDs to results
+        Default implementation: Assign module_result.data to output_data
+        Users can override this method to:
+        - Parse and validate output
+        - Dynamically generate next task based on results
+        - Handle tool calls
+        - Implement branch logic
         """
-        pass
+
+    # Tool call helper methods
+    # 1. Tool call as intent recognition
+    def on_tool_call_goto(self, **kwargs: Callable[[], 'LLMTask']):
+        """
+        Used in post_process to convert tool calls to next LLMTask
+        * Not a tool call: Return directly
+        * First call: Set next_task to corresponding LLMTask and end current task
+        * No matching call: Throw error
+        """
+
+    # 2. Classic "tool call" mode: Add call results to context
+    async def run_tool_calls(self, **kwargs: Callable):
+        """
+        Used in post_process: Tool calls as function calls, generate next LLMTask and end current task
+        """
+
+
+class LLMTaskCompleted(Exception):
+    """
+    Early termination of LLMTask, used in LLMTask.post_process
+    """
 ```
 
-### 2.8 postprocess - Post-processing Tools
-
-**Built-in Utility Functions**:
+#### 3.2.3 Workflow Interfaces
 ```python
-import aitoolman.postprocess
-# Extract XML root tag content (no parsing, only raw content extraction, without tag)
-xml_content = aitoolman.postprocess.get_xml_tag_content(xml_string, "result")
-# with tag
-xml_document = aitoolman.postprocess.get_xml_tag_content(xml_string, "result", with_tag=True)
+class LLMWorkflow(LLMApplication):
+    def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
+        """
+        Add background task (not executed immediately)
+        dependent_task is the task to run before current_task
+        When current_task is None, directly add dependent_task to task list
+        """
 
-# JSON parsing (auto-fixes format errors)
-data = aitoolman.postprocess.parse_json(json_string)
+    # Wait for specified tasks to complete
+    async def wait_tasks(self, *tasks: LLMTask, timeout: Optional[float] = None): ...
 
-# XML parsing (extracts specified root tag and parses into dictionary)
-xml_dict = aitoolman.postprocess.parse_xml(xml_string, "root_tag")
+    # Run sequential workflow
+    async def run(self, start_task: LLMTask) -> LLMTask: ...
 ```
 
-**Default Processor Dictionary**:
+#### 3.2.4 Usage Examples
 ```python
-DEFAULT_PROCESSORS = {
-    "builtin.parse_json": parse_json,
-}
-```
+# Define task class
+class TranslationTask(LLMTask):
+    module_name = 'translator'
 
-**Custom Processor**:
-```python
-def custom_xml_processor(text: str) -> Tuple[str, str]:
-    """Custom XML parsing processor"""
-    content = aitoolman.postprocess.get_xml_tag_content(text, root="classification")
-    main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
-    sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
-    return (main_category, sub_category)
-
-# Register to application
-app.add_processor("custom.parse_classification", custom_xml_processor)
-
-# Use in module configuration
-# post_processor = "custom.parse_classification"
-```
-
-## 3. Prompt Configuration File Format (app_prompt.toml)
-
-### 3.1 File Structure
-
-```toml
-# Module Default Configuration (inherited by all modules)
-[module_default]
-model = "Doubao-Seed-1.6"    # Default model (can be model name or alias, defined in llm_config.toml)
-stream = false                # Default non-streaming output
-output_channel = "stdout"     # Default output channel
-reasoning_channel = "reasoning"  # Default reasoning channel
-options = { temperature = 0.7, max_tokens = 4000 }  # Default request options
-
-# Global Templates (renderable with LLMApplication.render_template)
-[template]
-"template1" = "Template content {{variable}}"
-"template2" = "Another template"
-
-# Global Tool Definitions (referenced by all modules)
-[tools]
-
-# Module Definitions (multiple can be defined)
-[module."module_name"]
-model = "Creative-Model"    # Use model alias, maps to model_alias in llm_config.toml
-stream = true                 # Override default streaming setting
-template.user = "User template {{input}}"
-template.system = "System instruction"
-tools = { }                   # Tool configuration (see below)
-post_processor = "builtin.parse_json"  # Post-processor name (corresponds to key in app.processors)
-options = { temperature = 0.5 }  # Override default options
-```
-
-### 3.2 Template Syntax
-
-Uses **Jinja2** syntax, supporting:
-- **Variable Substitution**: `{{variable_name}}`
-- **Control Structures**: `{% if condition %}...{% endif %}`
-- **Loops**: `{% for item in list %}...{% endfor %}`
-- **Filters**: `{{text|upper}}`
-- **Cross-template References**: `{% include %}` directive to reference other templates (including cross-file references), supporting two forms:
-  - Reference global template: `{% include 'header' %}` (corresponds to template in [template] block)
-  - Reference module template: `{% include 'module/task_planner/user' %}` (format: `module/module_name/template_name`)
-
-**Available Variables**:
-- Global variables defined in `app.vars`
-- All keyword parameters passed when calling the module
-
-**Example**:
-```toml
-[module.summarize]
-template.user = """
-Article Title: {{title}}
-Article Content: <article>{{content}}</article>
-
-Please do the following based on the article content:
-1. List arguments and key points according to the article structure
-2. List cases in the article and the problems they illustrate
-3. Summarize the article
-
-Output Format:
-<response>
-<point>Argument 1</point>
-<point>Argument 2</point>
-<case>Case 1</case>
-<case>Case 2</case>
-<summary>Summary</summary>
-</response>
-"""
-```
-
-**Template Reference Example**:
-```
-# Global template header
-[template]
-"header" = "【Task ID: {{task_id}}】Processing started"
-
-[module.task_planner]
-template.user = """
-{% include 'header' %}
-User Instruction: {{user_input}}
-Please analyze the instruction and call appropriate tools
-"""
-```
-
-### 3.3 Tool Call Configuration
-
-Tool configuration uses TOML nested structure:
-
-```toml
-[module."module_name"]
-tools."tool_name".type = "function"  # Fixed value
-tools."tool_name".description = "Tool description"
-
-tools."tool_name".param."param_name".type = "string"  # Parameter type: string/integer/boolean
-tools."tool_name".param."param_name".description = "Parameter description"
-tools."tool_name".param."param_name".required = true   # Whether required
-```
-
-**Global Tool Configuration**:
-Define tools shared by all modules in the `[tools]` block, with the same structure as module-specific tools:
-```toml
-[tools."tool_name"]
-type = "function"
-description = "Tool function description"
-param."param_name1".type = "string/integer/boolean"
-param."param_name1".description = "Parameter description"
-param."param_name1".required = true
-param."param_name2".type = "string"
-param."param_name2".description = "Optional parameter"
-param."param_name2".required = false
-```
-
-**Module Reference to Global Tools**:
-In the module's `tools` configuration, use an empty dictionary `{}` to reference global tool definitions:
-```toml
-[module."task_planner"]
-tools."add_task" = {}
-```
-
-**Complete Example**:
-```toml
-[module.task_planner]
-model = "Fast-Model"  # Use fast inference model alias
-stream = true
-template.user = """
-As a schedule assistant, analyze the user's instruction:
-- If there are specific to-do items, call the add_task tool
-- If not, ask the user for more details
-
-User says: {{user_input}}
-"""
-
-tools.add_task.type = "function"
-tools.add_task.description = "Add schedule item"
-
-tools.add_task.param.datetime.type = "string"
-tools.add_task.param.datetime.description = "Date and time, e.g., 2025-12-31 12:34:56"
-tools.add_task.param.datetime.required = false
-
-tools.add_task.param.content.type = "string"
-tools.add_task.param.content.description = "To-do item content"
-tools.add_task.param.content.required = true
-```
-
-## 4. Example Configuration Files
-
-### 4.1 Complete app_prompt.toml Example
-
-```toml
-# Module Default Configuration
-[module_default]
-model = "Fast-Model"         # Default to fast inference model
-stream = false
-output_channel = "stdout"
-reasoning_channel = "reasoning"
-options = { temperature = 0.7, max_tokens = 4000 }
-
-# Global Templates
-[template]
-"greeting" = "Hello, {{name}}! Welcome to the aitoolman framework."
-
-# Raw Text Processing Module
-[module.raw]
-template.user = "{{content}}"
-
-# Article Summarization Module
-[module.summarize]
-model = "Creative-Model"     # Use creative model
-template.user = """
-Article Title: {{title}}
-Article Content: <article>{{content}}</article>
-
-Please do the following based on the article content:
-1. List arguments and key points according to the article structure
-2. List cases in the article and the problems they illustrate
-3. Summarize the article
-
-Output Format:
-<response>
-<point>Argument 1</point>
-<point>Argument 2</point>
-<case>Case 1</case>
-<case>Case 2</case>
-<summary>Summary</summary>
-</response>
-"""
-post_processor = "builtin.parse_json"
-
-# Schedule Planning Module (supports tool calls)
-[module.task_planner]
-model = "Fast-Model"         # Use fast inference model
-stream = true
-template.user = """
-As a schedule assistant, analyze the user's instruction:
-- If there are specific to-do items, call the add_task tool
-- If not, ask the user for more details
-
-User says: {{user_input}}
-"""
-
-tools.add_task.type = "function"
-tools.add_task.description = "Add schedule item"
-
-tools.add_task.param.datetime.type = "string"
-tools.add_task.param.datetime.description = "Date and time, e.g., 2025-12-31 12:34:56"
-tools.add_task.param.datetime.required = false
-
-tools.add_task.param.content.type = "string"
-tools.add_task.param.content.description = "To-do item content"
-tools.add_task.param.content.required = true
-
-# JSON Extraction Module
-[module.json_extractor]
-model = "Precise-Model"      # Use high-precision model
-template.user = """
-Extract structured information from the following text:
-{{text}}
-
-Output Format:
-<response>
-{
-  "field1": "value1",
-  "field2": "value2"
-}
-</response>
-"""
-post_processor = "builtin.parse_json"
-
-# Multi-turn Dialogue Module
-[module.chat]
-model = "Doubao-Seed-1.6"
-stream = true
-template.user = "{{message}}"
-```
-
-## 5. Example Application Structure
-
-### 5.1 Project Directory Structure
-
-```
-my_llm_app/
-├── config/
-│   ├── llm_config.toml          # API configuration (models, keys)
-│   └── app_prompt.toml          # Prompt configuration (modules, templates)
-├── src/
-│   ├── __init__.py
-│   ├── main.py                  # Application entry point
-│   ├── processors.py            # Custom post-processors
-│   └── workflows.py             # Workflow logic
-└── requirements.txt
-```
-
-### 5.2 Application Entry Point (main.py)
-
-```python
-import re
-import asyncio
-import aitoolman
-from typing import Dict, Any, List, Tuple
-
-# Custom Post-processor
-def parse_classification(text: str) -> Tuple[str, str]:
-    content = aitoolman.postprocess.get_xml_tag_content(text, root="classification")
-    main_category = re.search(r"<main_category>(.*?)</main_category>", content).group(1).strip()
-    sub_category = re.search(r"<sub_category>(.*?)</sub_category>", content).group(1).strip()
-    return (main_category, sub_category)
-
-# Single Task Processing Function
-async def process_ticket(app: aitoolman.LLMApplication, ticket: Dict[str, Any]) -> Dict[str, Any]:
-    """Process ticket classification"""
-    result = await app['classify_ticket'](**ticket)
-    result.raise_for_status()  # Auto-handle exceptions
-    return {
-        "ticket_id": ticket["ticket_id"],
-        "main_category": result.data[0],
-        "sub_category": result.data[1]
-    }
-
-async def main():
-    # 1. Load configurations
-    api_config = aitoolman.load_config("config/llm_config.toml")
-    app_config = aitoolman.load_config("config/app_prompt.toml")
-
-    # 2. Create and initialize client
-    async with aitoolman.LLMLocalClient(api_config) as client:
-        # 3. Create application factory
-        app_factory = aitoolman.LLMApplication.factory(
-            client=client,
-            config_dict=app_config,
-            processors={
-                "custom.parse_classification": parse_classification
-            }
+    async def post_process(self):
+        # Determine next step based on tool call
+        self.on_tool_call_goto(
+            refine=self.refine_task,
+            finalize=self.finalize_task
         )
 
-        # 4. Batch process tickets
-        tickets: List[Dict[str, Any]] = [
-            {"ticket_id": "123", "content": "Ticket content 1", "location": "Location 1"},
-            {"ticket_id": "456", "content": "Ticket content 2", "location": "Location 2"}
-        ]
+    def refine_task(self):
+        return RefinementTask()
 
-        async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(process_ticket(app_factory(), ticket)) for ticket in tickets]
-            for task in tasks:
-                result = await task
-                print(f"Ticket {result['ticket_id']} Classification: {result['main_category']} / {result['sub_category']}")
+    def finalize_task(self):
+        return FinalizationTask()
 
-if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    asyncio.run(main())
+# Run workflow
+workflow = LLMWorkflow(client, config)
+start_task = TranslationTask(input_data={"text": "Hello"})
+final_task = await workflow.run(start_task)
 ```
 
-### 5.3 Custom Post-processors (processors.py)
+## 4. Transport Layer
+
+### 4.1 Channel System
+The channel system is used for asynchronous transmission of streaming responses, reasoning content, etc., enabling real-time output.
+
+#### 4.1.1 Basic Channels
+Channel is a general asynchronous message channel for asynchronous communication between different components.
+
+TextFragmentChannel is specifically used for transmitting text fragments, supporting streaming reception of LLM output fragments.
 
 ```python
-import re
-from typing import Tuple, List
-import aitoolman.postprocess
+class Channel(Generic[T]):
+    """General channel base class"""
+    async def read(self) -> T: ...
+    async def write(self, message: T): ...
+    # Mark channel write completion, EOF
+    async def write_complete(self): ...
 
-def parse_xml_classification(xml_str: str) -> Tuple[str, str]:
-    """Parse classification result XML"""
-    content = aitoolman.postprocess.get_xml_tag_content(xml_str, root="result")
-    if not content:
-        raise ValueError("Invalid classification result")
-
-    main_category = re.search(r"<main>(.*?)</main>", content, re.DOTALL).group(1).strip()
-    sub_category = re.search(r"<sub>(.*?)</sub>", content, re.DOTALL).group(1).strip()
-    return (main_category, sub_category)
-
-def extract_keywords(text: str) -> List[str]:
-    """Extract text keywords"""
-    # Implement custom keyword extraction logic
-    return ["keyword1", "keyword2"]
+class TextFragmentChannel(Channel[Optional[str]]):
+    """
+    Text fragment channel
+    None indicates end of a complete message
+    """
+    # Read all fragments and merge into a complete message
+    async def read_whole_message(self) -> str: ...
 ```
 
-### 5.4 Complex Workflow Example (workflows.py)
+#### 4.1.2 Channel Collectors
+Mainly used in application development to listen to multiple channels simultaneously and unify processing of outputs from different sources.
 
 ```python
-import aitoolman
-from typing import Dict, Any, List
+class ChannelCollector(abc.ABC):
+    """Multi-channel collector base class"""
+    async def start_listening(self): ...
+    def close(self): ...
 
-class DocumentPipeline:
-    """Document processing pipeline"""
+    @abc.abstractmethod
+    async def on_channel_start(self, channel_name: str):
+        """Channel starts current output"""
 
-    def __init__(self, app: aitoolman.LLMApplication):
-        self.app = app
+    @abc.abstractmethod
+    async def on_channel_read(self, channel_name: str, message):
+        """Channel outputs content"""
 
-    async def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Sentiment analysis"""
-        result = await self.app.sentiment_analysis(text=text)
-        result.raise_for_status()
-        return result.data
+    @abc.abstractmethod
+    async def on_channel_end(self, channel_name: str):
+        """Channel ends current output"""
 
-    async def extract_entities(self, text: str) -> List[Dict[str, str]]:
-        """Entity extraction"""
-        result = await self.app.entity_extraction(text=text)
-        result.raise_for_status()
-        return result.data.get("entities", [])
+    @abc.abstractmethod
+    async def on_channel_eof(self, channel_name: str):
+        """Channel ends all outputs"""
 
-    async def generate_summary(
-        self,
-        title: str,
-        content: str,
-        max_length: int = 300
-    ) -> str:
-        """Generate summary"""
-        result = await self.app.summarize(
-            title=title,
-            content=content,
-            max_length=max_length
-        )
-        result.raise_for_status()
-        return result.text
-
-    async def process_document(
-        self,
-        document: Dict[str, str],
-        enable_sentiment: bool = True,
-        enable_entities: bool = True
-    ) -> Dict[str, Any]:
-        """Complete document processing workflow"""
-        results = {
-            "metadata": document,
-            "summary": await self.generate_summary(
-                document["title"],
-                document["content"]
-            )
-        }
-
-        if enable_sentiment:
-            results["sentiment"] = await self.analyze_sentiment(
-                document["content"]
-            )
-
-        if enable_entities:
-            results["entities"] = await self.extract_entities(
-                document["content"]
-            )
-
-        return results
-
-# Usage Example
-async def run_pipeline():
-    api_config = aitoolman.load_config("config/llm_config.toml")
-    app_config = aitoolman.load_config("config/app_prompt.toml")
-
-    async with aitoolman.LLMLocalClient(api_config) as client:
-        app = aitoolman.LLMApplication(client, app_config)
-        pipeline = DocumentPipeline(app)
-
-        doc = {
-            "title": "AI Technology Breakthrough",
-            "content": "Latest research shows that AI has made significant progress in image recognition..."
-        }
-
-        result = await pipeline.process_document(doc)
-        print(f"Summary: {result['summary']}")
-        print(f"Sentiment: {result['sentiment']}")
-        print(f"Entities: {result['entities']}")
+class DefaultTextChannelCollector(ChannelCollector):
+    """Default text channel collector (prints to console)"""
 ```
 
-### 5.5 Configuration Example (llm_config.toml)
+#### 4.1.3 XML Tag Filters
+BaseXmlTagFilter automatically identifies XML tags from streaming text, mainly used when LLM outputs single-layer XML tags representing different types of text, which are then output to different channels. For example: output current status, output to users, processing results to applications.
+
+```python
+class BaseXmlTagFilter(abc.ABC):
+    """XML tag filter base class"""
+    async def write(self, message: Optional[str]) -> None: ...
+
+class XmlTagToChannelFilter(BaseXmlTagFilter):
+    """Distribute XML tags to different channels"""
+    def __init__(self, default_channel: TextFragmentChannel,
+                 channel_map: Dict[str, TextFragmentChannel]): ...
+```
+
+### 4.2 LLMClient Abstraction
+LLMClient is the abstract base class for LLM clients, unifying the calling interfaces of different deployment methods.
+
+#### 4.2.1 Client Interfaces
+```python
+class LLMClient(abc.ABC):
+    """LLM client abstract base class"""
+    async def request(
+        self,
+        model_name: str,
+        messages: List[Message],
+        tools: Dict[str, Dict[str, Any]] = None,
+        options: Optional[Dict[str, Any]] = None,
+        stream: bool = False,
+        context_id: Optional[str] = None,
+        output_channel: Optional[TextFragmentChannel] = None,
+        reasoning_channel: Optional[TextFragmentChannel] = None
+    ) -> LLMProviderRequest
+
+    async def cancel(self, request_id: str): ...
+    async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
+```
+
+#### 4.2.2 Local Client
+LLMLocalClient is a local client that directly calls LLM provider APIs.
+
+```python
+class LLMLocalClient(LLMClient):
+    """Local client (directly calls ProviderManager)"""
+    def __init__(self, config: Dict[str, Any]): ...
+```
+
+#### 4.2.3 ZeroMQ Client (Microservice)
+LLMZmqClient is a ZeroMQ remote client that connects to remote LLM microservices.
+
+```python
+class LLMZmqClient(LLMClient):
+    """ZeroMQ client (connects to remote service)"""
+    def __init__(self, router_endpoint: str, auth_token: Optional[str] = None): ...
+
+    # Cancel all requests for the specified context, suitable for terminating all incomplete requests when user exits session
+    async def cancel_all(self, context_id: Optional[str] = None): ...
+```
+
+## 5. Data Interface Layer
+
+LLM Provider Management
+
+### 5.1 LLMFormatStrategy Format Strategy
+Unified handling of request/response formats for different LLM providers, achieving vendor agnosticism.
+
+```python
+class LLMFormatStrategy(abc.ABC):
+    """LLM request/response format conversion strategy"""
+    def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]: ...
+    def parse_tool_calls(self, tool_calls: List[Dict]) -> List[ToolCall]: ...
+    def serialize_message(self, message: Message) -> Dict[str, Any]: ...
+    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]: ...
+    def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]): ...
+    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent: ...
+
+
+class OpenAICompatibleFormat(LLMFormatStrategy):
+    """OpenAI API compatible format"""
+
+
+class AnthropicFormat(LLMFormatStrategy):
+    """Anthropic Claude API format"""
+```
+
+
+### 5.2 LLMProviderManager Provider Manager
+```python
+class LLMProviderManager:
+    """Manages multiple LLM providers, handling API calls, retries, and resource limits"""
+    def __init__(self, config: Dict[str, Any])
+
+    def process_request(
+        self,
+        request: LLMProviderRequest,
+        callback: Optional[Callable[[LLMProviderRequest], typing.Coroutine]] = None
+    ) -> RequestTask: ...
+
+    async def cancel_request(self, request_id: str): ...
+    async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
+```
+
+## 6. Utility Tools
+
+### 6.1 Configuration Files
+Used for loading and managing TOML format configuration files, supporting both file and string sources.
+
+```python
+# Load toml format configuration file
+aitoolman.load_config(filename)
+
+# Load toml format configuration file text
+aitoolman.load_config_str(s)
+```
+
+### 6.2 Post-processors (aitoolman.postprocess)
+Provides common text post-processing functions for parsing LLM outputs.
+
+```python
+# JSON parsing (automatically fixes format errors)
+parse_json(s: str) -> Any
+
+# XML content extraction
+get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]
+
+# XML parsing to dictionary
+parse_xml(s: str, root: str) -> Optional[Dict]
+```
+
+### 6.3 Resource Manager
+```python
+class ResourceManager:
+    """Manages model parallel processing resources, preventing excessive requests and resource competition"""
+    def __init__(self, capacities: Dict[str, int] = None): ...
+
+    @asynccontextmanager
+    async def acquire(self, key: str, task_name: Optional[str] = None): ...
+    async def add_resource(self, key: str, capacity: int): ...
+    async def remove_resource(self, key: str, force: bool = False): ...
+    def get_queue_length(self, key: str) -> int: ...
+    def get_stats(self, key: str) -> Dict: ...
+```
+
+
+## 7. Configuration Files
+
+Refer to the [Configuration File Documentation](./config.md) for detailed configuration parameters.
+
+### 7.1 Provider Configuration File (llm_config.toml)
 
 ```toml
-# Server Configuration (ZMQ Mode)
+# Server Configuration (ZeroMQ Microservice)
 [server]
-zmq_router_rpc = "tcp://*:5555"
-zmq_pub_event = "tcp://*:5556"
-zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
+zmq_router_rpc = "tcp://*:5555" # ZeroMQ ROUTER endpoint
+zmq_pub_event = "tcp://*:5556"  # ZeroMQ PUB endpoint (audit logs)
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # Interface authentication token
 
 # Default Configuration
 [default]
@@ -906,67 +711,477 @@ model = "gpt-4"
 headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 ```
 
-## 6. Best Practices
+### 7.2 Prompt Configuration File (app_prompt.toml)
 
-### 6.1 Configuration Management
-- **Environment Separation**: Prepare different `llm_config.toml` files for development/testing/production
-- **Secret Management**: Load llm_config via configuration files, databases, etc.
-- **Version Control**: Include `app_prompt.toml` in Git to track prompt iteration history
-- **Template Reuse**: Use global templates and cross-references to reduce duplicate prompts and improve maintainability
-- **Tool Reuse**: Define common tools as global tools to avoid duplicate configurations between modules
-- **Model Aliases**: Unified model mapping via `model_alias` for easy model switching by end users; modify only llm_config.toml when switching models
-- **Layered Configuration**: Set a common model in module_default, and override with aliases in specific modules as needed
+```toml
+# Module Default Configuration
+[module_default]
+model = "Fast-Model"         # Default to fast inference model
+stream = false
+output_channel = "stdout"
+reasoning_channel = "reasoning"
+options = { max_tokens = 4000 }
 
-### 6.2 Error Handling
-```python
-import logging
-import aitoolman
+# Global Templates (can be referenced by modules)
+[template]
+"greeting" = "Hello, {{name}}!"
 
-try:
-    result = await app['module_name'](**params)
-    result.raise_for_status()  # Auto-handle exceptions
+# Global Tool Definitions
+[tools."Tool Name"]
+type = "function"
+description = "Tool function description"
+param."Parameter Name 1".type = "string/integer/boolean"
+param."Parameter Name 1".description = "Parameter description"
+param."Parameter Name 1".required = true
+param."Parameter Name 2".type = "string"
+param."Parameter Name 2".description = "Optional parameter"
+param."Parameter Name 2".required = false
 
-    if result.status == aitoolman.FinishReason.tool_calls:
-        # Execute tool calls
-        tool_results = result.call({
-            "add_task": add_task_function,
-            "query_task": query_task_function
-        })
-        print(f"Tool Call Results: {tool_results}")
-    else:
-        print(f"Processing Result: {result.data if result.data else result.text}")
-except aitoolman.LLMLengthLimitError:
-    print("Response exceeded length limit; optimize prompt or adjust max_tokens")
-except aitoolman.LLMContentFilterError:
-    print("Content triggered filter; please check input")
-except aitoolman.LLMResponseFormatError as e:
-    print(f"Response format error: {e}")
-except Exception as e:
-    print(f"System error: {e}")
-    # Record detailed logs
-    logging.exception("Task processing failed")
+# Raw Text Processing Module
+[module.raw]
+template.user = "{{content}}"
+
+# Article Summarization Module
+[module.summerize]
+model = "Creative-Model"     # Use creative model
+template.user = """
+Article Title: {{title}}
+Article Content: <article>{{content}}</article>
+
+Based on the article content:
+1. List arguments and important points according to the article structure
+2. List cases in the article and the problems they illustrate
+3. Summarize this article
+
+Output Format:
+<response>
+<point>Argument 1</point>
+<point>Argument 2</point>
+<case>Case 1</case>
+<case>Case 2</case>
+<summery>Summary</summery>
+</response>
+"""
+post_processor = "builtin.parse_json"
+
+# Schedule Planning Module (supports tool calls)
+[module.task_planner]
+model = "Fast-Model"         # Use fast inference model
+stream = true
+template.user = """
+As a scheduling assistant, analyze user instructions:
+- If there are specific to-do items, call the add_task tool
+- If not, ask the user for more details
+
+User says: {{user_input}}
+"""
+
+tools.add_task.type = "function"
+tools.add_task.description = "Add schedule"
+
+tools.add_task.param.datetime.type = "string"
+tools.add_task.param.datetime.description = "Date and time, e.g., 2025-12-31 12:34:56"
+tools.add_task.param.datetime.required = false
+
+tools.add_task.param.content.type = "string"
+tools.add_task.param.content.description = "To-do item content"
+tools.add_task.param.content.required = true
+
+# JSON Extraction Module
+[module.json_extractor]
+model = "Precise-Model"      # Use high-precision model
+template.user = """
+Extract structured information from the following text:
+{{text}}
+
+Output Format:
+<response>
+{
+  "Field 1": "Value 1",
+  "Field 2": "Value 2"
+}
+</response>
+"""
+post_processor = "builtin.parse_json"
+
+# Multi-Round Dialogue Module
+[module.chat]
+model = "Doubao-Seed-1.6"
+stream = true
+template.user = "{{message}}"
 ```
 
-### 6.3 Performance Optimization
-- **Connection Reuse**: Share the same `LLMClient` across multiple `LLMApplication` instances
-- **Resource Limits**: Set the `parallel` parameter appropriately based on provider quotas (typically 1-3)
-- **Streaming Output**: Use custom Channels to output workflow status; use `stream=true` for long texts to output content in real time and improve user experience
-- **Batch Processing**: Use `asyncio.TaskGroup` to process multiple tasks in parallel and increase throughput
-- **Caching Strategy**: Cache results of repeated requests to reduce unnecessary LLM calls
-- **Model Selection**: Define and select appropriate model aliases based on task type, then configure suitable specific models for each alias
+## 8. Example Applications
 
-### 6.4 Security Policies
-- **Token Authentication**: Configure `zmq_auth_token` for ZeroMQ interfaces to ensure both clients and servers use the same token.
-- **Network Isolation**: In production environments, restrict access to ZMQ ports through network policies.
-- **Key Management**: Properly manage configuration files to prevent unauthorized access.
+### 8.1 Project Directory Structure
+```
+my_llm_app/
+├── config/
+│   ├── llm_config.toml          # API configuration (models, keys)
+│   └── app_prompt.toml          # Prompt configuration (modules, templates)
+├── src/
+│   ├── __init__.py
+│   ├── main.py                  # Application entry
+│   ├── processors.py            # Custom post-processors
+│   └── workflows.py             # Workflow logic
+└── requirements.txt
+```
 
-## 7. Summary
+### 8.2 Simple Q&A: Code Assistant
+Implement a code modification tool:
+- Load configuration files and prompt templates
+- Create client and application instances
+- Call code editing module to process user input
+- Use post-processor to extract code blocks
 
-The aitoolman framework, through clear architecture design and flexible configuration system, enables developers to:
+```python
+import asyncio
+import aitoolman
 
-1. **Rapid Construction**: Define LLM applications via TOML configuration without writing complex code
-2. **Fine-grained Control**: Complete control over data flow to build transparent and debuggable AI applications
-3. **Easy Extension**: Support custom processors, channels, and format strategies to adapt to different business needs
-4. **Flexible Deployment**: Support local invocation and microservice architecture to adapt to different scenario requirements
+def extract_code(text: str) -> str:
+    ...
 
-By understanding the collaborative relationship between `LLMApplication`, `LLMModule`, `LLMClient`, and `TextFragmentChannel`, developers can efficiently build stable and maintainable LLM applications.
+async def main():
+    # Load configurations
+    api_config = aitoolman.load_config("config/llm_config.toml")
+    prompt_config = aitoolman.load_config("config/app_prompt.toml")
+    
+    # Create client and application
+    async with aitoolman.LLMLocalClient(api_config) as client:
+        app = aitoolman.LLMApplication(client, prompt_config)
+        app.add_processor("extract_code", extract_code)
+        
+        # Monitor output channels
+        collector = aitoolman.DefaultTextChannelCollector({
+            'Reasoning Process': app.channels['reasoning'],
+            'Code Output': app.channels['stdout']
+        })
+        output_task = asyncio.create_task(collector.start_listening())
+        
+        # Call code editor module
+        result = await app['code_editor'](
+            code_content=open("app.py").read(),
+            instruction="Add error handling logic",
+            references=[{"filename": "utils.py", "content": open("utils.py").read()}]
+        )
+        result.raise_for_status()
+        
+        # Save results
+        with open("app_modified.py", "w") as f:
+            f.write(result.data)
+        
+        output_task.close()
+        await output_task
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### 8.3 LLM as a Function: Batch Ticket Classification
+Use `LLMApplication.factory()` to create an application factory for batch ticket processing:
+- Define classification module and post-processor
+- Create asynchronous task group for concurrent processing
+- Collect and output classification results
+
+```python
+import asyncio
+import aitoolman
+
+def parse_classification(text: str) -> dict:
+    ...
+
+async def process_ticket(app_factory, ticket):
+    """Process single ticket"""
+    app = app_factory()
+    result = await app['ticket_classifier'](
+        ticket_content=ticket['content'],
+        ticket_type=ticket['type']
+    )
+    result.raise_for_status()
+    return {
+        "ticket_id": ticket['id'],
+        "category": result.data['main'],
+        "sub_category": result.data['sub']
+    }
+
+async def main():
+    # Load configurations
+    api_config = aitoolman.load_config("config/llm_config.toml")
+    prompt_config = aitoolman.load_config("config/app_prompt.toml")
+    
+    # Create application factory
+    async with aitoolman.LLMLocalClient(api_config) as client:
+        app_factory = aitoolman.LLMApplication.factory(
+            client=client,
+            config_dict=prompt_config,
+            processors={
+                "classify": parse_classification
+            }
+        )
+        
+        # Simulate batch tickets
+        tickets = [
+            {"id": "1", "type": "Technical Support", "content": "System login failed"},
+            {"id": "2", "type": "Business Inquiry", "content": "How to apply for invoice"},
+            # More tickets...
+        ]
+        
+        # Parallel processing
+        async with asyncio.TaskGroup() as tg:
+            tasks = [tg.create_task(process_ticket(app_factory, t)) for t in tickets]
+            
+        # Collect results
+        results = [t.result() for t in tasks]
+        for res in results:
+            print(f"Ticket {res['ticket_id']}: {res['category']} > {res['sub_category']}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+
+### 8.4 Static Workflow: Data Analysis Pipeline
+Use Case: Known task dependencies, such as first fetching data, then analyzing, and finally generating reports
+
+Use `LLMWorkflow` to build a static DAG:
+- Define multiple analysis tasks
+- Use `add_task()` to establish dependencies
+- Use `wait_tasks()` to wait for all tasks to complete
+- Merge analysis results
+
+```python
+import aitoolman
+from src.tasks import (
+    DataFetchTask,
+    DataAnalysisTask,
+    ReportGenerationTask
+)
+
+async def main():
+    # Initialize workflow
+    api_config = aitoolman.load_config("config/llm_config.toml")
+    prompt_config = aitoolman.load_config("config/app_prompt.toml")
+    
+    async with aitoolman.LLMLocalClient(api_config) as client:
+        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        
+        # Create tasks
+        fetch_task = DataFetchTask(input_data={"query": "Q1 2024 sales data"})
+        analysis_task = DataAnalysisTask()
+        report_task = ReportGenerationTask(input_data={"format": "markdown"})
+        
+        # Establish dependencies: fetch → analysis → report
+        workflow.add_task(analysis_task, fetch_task)
+        workflow.add_task(report_task, analysis_task)
+        
+        # Wait for all tasks to complete
+        await workflow.wait_tasks(report_task)
+        
+        # Get results
+        print("Analysis report generated successfully:")
+        print(report_task.output_data)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### 8.5 Dynamic Workflow: Batch Folder Analysis
+Recursively analyze folder structure:
+- Define folder analysis task to output sub-item list
+- Dynamically add sub-tasks in `pre_process()` based on analysis content
+- Use `add_task()` and `wait_tasks()` to manage recursive dependencies
+- Handle file content analysis, classification, and other sub-tasks
+
+### 8.6 Sequential Workflow: Multi-step Decision Making
+Use `LLMTask.next_task` to build sequential processes:
+- Define task chain: analysis → planning → execution → verification
+- Each task determines the next step based on output
+- Use `workflow.run()` to execute the entire process
+- Support tool calls as process branch points
+
+Content Review Pipeline:
+
+```python
+import aitoolman
+
+class ContentSubmitTask(aitoolman.LLMTask):
+    module_name = "content_validator"
+    
+    async def post_process(self):
+        # Determine next step based on verification results
+        if self.output_data['status'] == "valid":
+            self.next_task = AIAuditTask(input_data={"content": self.input_data['content']})
+        else:
+            self.next_task = RejectionTask(input_data={"reason": self.output_data['reason']})
+
+class AIAuditTask(aitoolman.LLMTask):
+    module_name = "content_auditor"
+    
+    async def post_process(self):
+        if self.output_data['risk_level'] <= 1:
+            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+        else:
+            self.next_task = ManualReviewTask(input_data={"content": self.input_data['content'], "risk": self.output_data['risk_details']})
+
+class ManualReviewTask(aitoolman.LLMTask):
+    module_name = "review_coordinator"
+    
+    async def post_process(self):
+        if self.output_data['approved']:
+            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+        else:
+            self.next_task = RevisionTask(input_data={"content": self.input_data['content'], "feedback": self.output_data['feedback']})
+
+# Other task classes: PublishTask, RevisionTask, RejectionTask...
+
+async def main():
+    # Initialize workflow
+    api_config = aitoolman.load_config("config/llm_config.toml")
+    prompt_config = aitoolman.load_config("config/app_prompt.toml")
+    
+    async with aitoolman.LLMLocalClient(api_config) as client:
+        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        
+        # Start workflow
+        start_task = ContentSubmitTask(input_data={
+            "content": "Article content to be published...",
+            "type": "article"
+        })
+        final_task = await workflow.run(start_task)
+        
+        print(f"Process completed, final status: {final_task.task_name}")
+        print(f"Result: {final_task.output_data}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 9. Microservices
+
+### 9.1 Application Scenarios
+The aitoolman microservice architecture is suitable for the following scenarios:
+
+1. **Multi-Project Collaboration**: Multiple projects share the same set of LLM infrastructure
+2. **Centralized Resource Management**: Unified management of API keys, model quotas, and access control
+3. **High-Availability Deployment**: Ensure service stability through load balancing and failover
+4. **Audit and Monitoring**: Centralized logging of all LLM call logs and performance metrics
+5. **Security Isolation**: Sensitive API keys are not exposed to client applications
+
+### 9.2 Feature Highlights
+- **ZeroMQ Communication**: High-performance, low-latency inter-process communication
+- **Authentication and Authorization**: Support token authentication to ensure interface security
+- **Request Queue**: Intelligent scheduling to avoid excessive requests
+- **Real-Time Monitoring**: Publish audit logs via PUB interface
+- **Client Management**: Support request cancellation, batch cancellation, and other operations
+
+### 9.3 Usage Methods
+
+#### 9.3.1 Start Server
+```bash
+# Use default configuration file
+python3 -m aitoolman server -c llm_config.toml
+
+# Enable detailed logging
+python3 -m aitoolman server -c llm_config.toml -v
+```
+
+After starting the server, two ZeroMQ endpoints will be bound:
+- **ROUTER Endpoint** (default: tcp://*:5555): Handles client requests and responses
+- **PUB Endpoint** (default: tcp://*:5556): Publishes audit logs and monitoring data
+
+#### 9.3.2 Client Connection
+```python
+from aitoolman.zmqclient import LLMZmqClient
+client = LLMZmqClient(
+    router_endpoint="tcp://localhost:5555",
+    auth_token="your-secret-token"  # Optional, must match server configuration
+)
+```
+
+Command-line client test:
+```bash
+# Interactive test
+python3 -m aitoolman client \
+  -r tcp://localhost:5555 \
+  -m gpt-4 \
+  -a your-auth-token
+
+# Specify model alias
+python3 -m aitoolman client \
+  -r tcp://localhost:5555 \
+  -m Creative-Model \
+  -a your-auth-token
+```
+
+#### 9.3.4 Monitoring and Audit
+```bash
+# Console real-time monitoring
+python3 -m aitoolman monitor --pub-endpoint tcp://localhost:5556
+
+# Store to SQLite database
+python3 -m aitoolman monitor \
+  --pub-endpoint tcp://localhost:5556 \
+  --db-path llm_audit.db
+```
+
+The monitor will display the following information:
+- Request time statistics (queue time, time to first token, total response time)
+- Token usage
+- Completion reasons and error messages
+- Custom audit events
+
+## 10. Best Practices
+
+### 10.1 Prompt Design
+Design prompts in "**Short Answer Question**" format:
+
+1. **Reading Material**: Long text to be analyzed, reference materials, or historical dialogue context
+2. **Question Background**: Describe scenario design and main objectives, the stem of the short answer question
+3. **Task Description**: Clearly state what needs to be done, a sub-question of the short answer question
+4. **Specific Requirements**: List rules, methods, and key points to follow, which are the question type design, scoring points, and hints in parentheses
+5. Optional **Output Example**: Directly write in the format to be output
+
+Prompt design principles:
+- **Focus on Single Task**: Let AI handle only one task or set of data at a time
+- **Coherent Structure**: The end of the prompt should naturally connect with the beginning of the AI's answer; short input content (1-2 lines) can be placed at the end of the prompt
+- **Language Consistency**: Write prompts in the main working language, with target language text placed at the end
+- **Concise and Clear**: Use concise wording, focus on writing "what to do" rather than "what not to do"; avoid exposing irrelevant content to the large model
+- **Clear Output Format**: Specify clear output formats (e.g., JSON, XML, Markdown) for easy parsing
+
+### 10.2 Module Design
+
+- **Workflow First**: Avoid letting large models perform deterministic tasks, or restrict large model behavior only with prompts
+- **Modular Design**: Split complex prompts into multiple modules and global templates, with each module having a single responsibility
+- **Template Variables**: Use `{{ variable }}` and other Jinja2 template syntax
+- **Context Control**: Minimize use of context messages, prioritize optimizing prompt quality
+- **Tool Description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools
+
+### 10.3 Error Handling
+```python
+try:
+    result = await app['module'](...)
+    result.raise_for_status()  # Check completion status
+    processed_data = result.data
+except LLMLengthLimitError as e:
+    # Handle length limit: process in segments or switch models
+    pass
+except LLMApiRequestError as e:
+    # API error: retry or directly report error
+    pass
+except LLMResponseFormatError as e:
+    # Response format error: retry or adjust prompt
+    pass
+```
+
+### 10.4 Performance Optimization
+- **Parallelism Configuration**: Set `parallel` according to model quotas
+- **Streaming Response**: Use streaming for long text to improve user experience
+- **Batch Requests**: For batch/background tasks, use batch requests or dedicated batch interfaces to improve parallelism
+- **Resource Management**: Use `ResourceManager` to avoid excessive requests
+- **Caching Strategy**: Implement result caching for repeated queries
+
+### 10.5 Debugging Tips
+- **Channel Monitoring**: Use `ChannelCollector` to view LLM output in real-time
+- **Audit Logs**: Enable monitor to record all requests and responses
+- **Step-by-Step Execution**: Test individual tasks first for complex workflows
+- **Provider Logs**: Enable `logging.DEBUG` to view raw API interactions

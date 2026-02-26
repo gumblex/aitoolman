@@ -32,7 +32,11 @@ class Channel(Generic[T]):
 
 
 class TextFragmentChannel(Channel[Optional[str]]):
-    """文本片段通道，支持按文本片段读写"""
+    """
+    文本片段通道，支持按文本片段读写
+
+    None 为一整条消息的结束符
+    """
 
     async def read_whole_message(self) -> str:
         """读取完整消息"""
@@ -53,6 +57,7 @@ class BaseXmlTagFilter(abc.ABC):
         self.current_tag: Optional[str] = None  # 当前激活的指定标签
         self.current_content: list[str] = []  # 当前标签的内容缓冲区
         self.pending_text: str = ""  # 跨片段的不完整标签缓冲区
+        self.pending_closing_tag = ""  # 不完整闭合标签缓冲区
 
         # 匹配所有XML标签的正则（支持命名空间和特殊字符）
         self.tag_pattern = re.compile(r'<(/?)([a-zA-Z_][\w.:-]*)>')
@@ -80,6 +85,7 @@ class BaseXmlTagFilter(abc.ABC):
         self.current_tag = None
         self.current_content = []
         self.pending_text = ""
+        self.pending_closing_tag = ""
 
     async def _parse_content(self, text: str, end: bool) -> str:
         """
@@ -92,19 +98,39 @@ class BaseXmlTagFilter(abc.ABC):
         # 状态1：当前处于指定标签内部（仅搜索当前标签的闭合）
         if self.current_tag is not None:
             closing_tag = self.closing_tag_template % self.current_tag
-            closing_pos = text.find(closing_tag, pos)
+            closing_len = len(closing_tag)
+
+            # 拼接之前的不完整闭合标签与当前文本
+            full_text = self.pending_closing_tag + text
+            self.pending_closing_tag = ""
+
+            closing_pos = full_text.find(closing_tag, pos)
 
             if closing_pos != -1:
                 # 找到闭合标签：处理内容并重置状态
-                self.current_content.append(text[pos:closing_pos])
+                self.current_content.append(full_text[pos:closing_pos])
                 await self._emit_content()
 
                 # 继续解析闭合标签后的内容（递归）
-                pos = closing_pos + len(closing_tag)
-                return await self._parse_content(text[pos:], end)
+                remaining_text = full_text[closing_pos + closing_len:]
+                return await self._parse_content(remaining_text, end)
             else:
-                # 未找到闭合标签：保存所有内容
-                self.current_content.append(text[pos:])
+                # 未找到完整闭合标签：检查是否有部分闭合标签在末尾
+                found_partial = False
+                # 从最长可能的前缀开始检查，避免误匹配
+                for l in range(min(closing_len, len(full_text)), 0, -1):
+                    suffix = full_text[-l:]
+                    if closing_tag.startswith(suffix):
+                        # 保存不完整的闭合标签部分
+                        self.pending_closing_tag = suffix
+                        # 剩余部分加入内容
+                        if len(full_text) > l:
+                            self.current_content.append(full_text[:-l])
+                        found_partial = True
+                        break
+                if not found_partial:
+                    # 没有部分匹配，全部加入内容
+                    self.current_content.append(full_text)
                 return ""
 
         # 状态2：处于顶层（解析所有标签）
@@ -173,12 +199,18 @@ class BaseXmlTagFilter(abc.ABC):
             # 处理未闭合的标签内容
             if self.pending_text:
                 self.current_content.append(self.pending_text)
+            # 加入剩余的不完整闭合标签部分
+            if self.pending_closing_tag:
+                self.current_content.append(self.pending_closing_tag)
             await self._emit_content()
             self.pending_text = ""
+            self.pending_closing_tag = ""  # 新增：清空缓冲区
         elif self.pending_text:
             # 处理未完成的普通文本
             await self.on_tag(None, self.pending_text, True)
             self.pending_text = ""
+        else:
+            await self.on_tag(None, "", True)
 
 
 class XmlTagToChannelFilter(BaseXmlTagFilter):
@@ -204,7 +236,7 @@ class ChannelCollector(abc.ABC):
     def __init__(self, channels: Dict[str, Channel]):
         self.channels = channels
         self.running = True
-        self.last_channel_timeout = 1.0
+        self.last_channel_timeout = 0.1
 
         self._pending_futures: Dict[asyncio.Future, str] = {}  # future -> 通道名称
         self._last_output_channel: Optional[str] = None

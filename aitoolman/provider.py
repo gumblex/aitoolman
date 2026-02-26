@@ -14,7 +14,7 @@ import httpx
 import httpx_sse
 
 
-# logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _get_retry_after(response: httpx.Response) -> Optional[int]:

@@ -287,17 +287,20 @@ class LLMApplication:
         result.request_params = module_request.template_params
 
         config = self.module_configs[module_request.module_name]
-        if config.post_processor and result.status == _model.FinishReason.stop:
-            post_processor = self.processors[config.post_processor]
-            try:
-                data = post_processor(result.response_text)
-                if inspect.isawaitable(data):
-                    result.data = await data
-                else:
-                    result.data = data
-            except Exception:
-                logger.exception("Post-process failed: %s", module_request)
-                result.status = _model.FinishReason.error_format
+        if result.status == _model.FinishReason.stop:
+            if config.post_processor:
+                post_processor = self.processors[config.post_processor]
+                try:
+                    data = post_processor(result.response_text)
+                    if inspect.isawaitable(data):
+                        result.data = await data
+                    else:
+                        result.data = data
+                except Exception:
+                    logger.exception("Post-process failed: %s", module_request)
+                    result.status = _model.FinishReason.error_format
+            else:
+                result.data = result.response_text
         return result
 
     async def call(self, request: Union[_model.LLMModuleRequest, _model.LLMDirectRequest]) -> _model.LLMModuleResult:

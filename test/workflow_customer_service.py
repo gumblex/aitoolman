@@ -37,10 +37,8 @@ template.user = """## 相关信息
 {{ context|join('\\n') }}
 
 ## 要求
-如果问题和细节不清楚，调用相应工具了解问题细节；否则直接向用户回答。
+{% if available_tools %}如果问题和细节不清楚，调用相应工具了解问题细节；否则{% endif %}直接向用户回答。
 """
-tools."clarify" = {}
-tools."check_order" = {}
 '''
 
 
@@ -49,7 +47,7 @@ def mock_response(request):
     if not messages:
         raise ValueError("no messages")
     last_msg = messages[-1].content
-    if '订单状态：' in last_msg and '追问：' in last_msg:
+    if '状态：' in last_msg and '追问：' in last_msg:
         return aitoolman.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
@@ -97,38 +95,33 @@ def mock_response(request):
 logger_wf = logging.getLogger(__name__ + ".workflow")
 
 
-async def print_channel_text(app: aitoolman.LLMWorkflow):
-    last_channel = None
-    try:
-        async for event in aitoolman.collect_text_channels(
-                app.channels, read_fragments=False
-        ):
-            if not event.message:
-                continue
-            if last_channel != event:
-                print("\n[%s]" % event.channel, end="")
-                last_channel = event.channel
-            print(event.message, end="", flush=True)
-    except asyncio.CancelledError:
-        pass
-
-
 class EntryTask(aitoolman.LLMTask):
     module_name = 'entry'
 
     async def pre_process(self) -> Union[aitoolman.LLMModuleRequest, aitoolman.LLMDirectRequest, None]:
         await self.workflow.channels['status'].write("当前任务：%s" % self.task_name)
-        return await super().pre_process()
+        await self.workflow.channels['status'].write(None)
+        tools = {
+            x: self.workflow.global_tools[x]
+            for x in self.workflow.vars['available_tools']
+        }
+        req = await super().pre_process()
+        return req._replace(tools=tools)
 
     async def post_process(self):
-        if self.module_result and self.module_result.status == aitoolman.FinishReason.tool_calls:
+        if not self.module_result:
+            raise RuntimeError("no module_result")
+        self.module_result.raise_for_status()
+        if self.module_result.status == aitoolman.FinishReason.tool_calls:
             await self.workflow.channels['status'].write("调用工具：%s" % ','.join(
                 map(str, self.module_result.tool_calls)))
-        logging.info("Task result: %s", self.module_result)
-        self.on_tool_call_goto(
-            clarify=ClarifyTask,
-            check_order=OrderTask
-        )
+            await self.workflow.channels['status'].write(None)
+            self.on_tool_call_goto(
+                clarify=ClarifyTask,
+                check_order=OrderTask
+            )
+        else:
+            self.output_data = self.module_result.data
 
 
 class ClarifyTask(EntryTask):
@@ -141,6 +134,7 @@ class ClarifyTask(EntryTask):
         self.workflow.vars['context'].append('')
         self.workflow.vars['context'].append('追问：' + question.strip())
         self.workflow.vars['context'].append('用户回答：' + user_answer.strip())
+        self.workflow.vars['available_tools'].discard('clarify')
         return await super().pre_process()
 
 
@@ -151,9 +145,8 @@ class OrderTask(EntryTask):
         order_id = self.input_data['order_id']
         order_status = '已发货，暂无物流信息'
         self.workflow.vars['background_info'].append('订单 %s 的状态：%s' % (order_id, order_status))
-        req = self.workflow.render_direct_request(await super().pre_process())
-        req = req._replace(tools={k: v for k, v in (req.tools or {}).items() if k != 'check_order'})
-        return req
+        self.workflow.vars['available_tools'].discard('check_order')
+        return await super().pre_process()
 
 
 def create_workflow(client: aitoolman.LLMClient, model_name: str):
@@ -162,8 +155,9 @@ def create_workflow(client: aitoolman.LLMClient, model_name: str):
 
     app = aitoolman.LLMWorkflow(
         client, config_dict=app_config,
-        channels={'status': aitoolman.TextFragmentChannel(read_fragments=False)}
+        channels={'status': aitoolman.Channel()}
     )
+    app.vars['available_tools'] = {'clarify', 'check_order'}
     app.vars['background_info'] = []
     app.vars['context'] = []
     return app
@@ -172,7 +166,11 @@ def create_workflow(client: aitoolman.LLMClient, model_name: str):
 async def run(client: aitoolman.LLMClient, model_name: str):
     async with client:
         app = create_workflow(client, model_name)
-        output_task = asyncio.create_task(print_channel_text(app))
+        channel_collector = aitoolman.DefaultTextChannelCollector({
+            k: v for k, v in app.channels.items()
+            if k in ('stdout', 'reasoning', 'status')
+        })
+        output_task = asyncio.create_task(channel_collector.start_listening())
 
         await app.channels['stdin'].write('我的订单现在什么状态？')
         await app.channels['stdin'].write('15641651')
@@ -181,12 +179,13 @@ async def run(client: aitoolman.LLMClient, model_name: str):
         await app.run(EntryTask(input_data={
             'user_question': user_question
         }))
-        output_task.cancel()
+        channel_collector.close()
+        await output_task
 
 
 if __name__ == '__main__':
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARN,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 
     parser = argparse.ArgumentParser(description="LLM server.")
