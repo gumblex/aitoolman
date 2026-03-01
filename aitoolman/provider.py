@@ -79,6 +79,10 @@ class LLMFormatStrategy(abc.ABC):
         """构建符合Provider要求的请求体"""
         pass
 
+    @classmethod
+    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
+        return Message.from_content(message)
+
     @abc.abstractmethod
     def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
         """解析非流式响应，填充LLMResponse"""
@@ -237,6 +241,15 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
+    @classmethod
+    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
+        return Message(
+            role="assistant",
+            content=message.get("content", ""),
+            reasoning_content=message.get("reasoning_content", ""),
+            raw_value=message
+        )
+
     def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
         """解析OpenAI非流式响应（含工具调用转换）"""
         choices = response_data.get("choices", [])
@@ -255,7 +268,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         usage = response_data.get("usage", {})
         response.prompt_tokens = usage.get("prompt_tokens")
         response.completion_tokens = usage.get("completion_tokens")
-        response.response_message = message
+        response.response_message = self.parse_response_message(response, message)
 
     def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
         """解析OpenAI流式响应（含工具调用增量累积）"""
@@ -511,10 +524,18 @@ class AnthropicFormat(LLMFormatStrategy):
         self.logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
+    @classmethod
+    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
+        return Message(
+            role="assistant",
+            content=response.response_text,
+            reasoning_content=response.response_reasoning,
+            raw_value=message
+        )
+
     def parse_batch_response(self, response: LLMProviderResponse,
                              response_data: Dict[str, Any]) -> None:
         """Parse non-streaming response"""
-        response.response_message = response_data
         response.response_text = ""
         response.response_reasoning = ""
 
@@ -545,6 +566,7 @@ class AnthropicFormat(LLMFormatStrategy):
             else:
                 response.finish_reason = stop_reason
 
+        response.response_message = self.parse_response_message(response, response_data)
         # Parse token usage
         usage = response_data.get("usage", {})
         response.prompt_tokens = usage.get("input_tokens")
@@ -835,7 +857,8 @@ class LLMProviderManager:
                         response.response_tool_calls = (response.response_tool_calls or []) + event.tool_calls
 
                     if event.response_message:
-                        response.response_message = event.response_message
+                        response.response_message = format_strategy.parse_response_message(
+                            response, event.response_message)
 
                     # 发送分块内容到Channel
                     if request.reasoning_channel and event.reasoning:

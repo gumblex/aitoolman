@@ -1,4 +1,5 @@
 import enum
+import json
 import typing
 import base64
 import asyncio
@@ -7,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union, Callable
 
 from .channel import TextFragmentChannel
+from .util import get_id
 
 
 class LLMError(RuntimeError):
@@ -116,6 +118,13 @@ class MediaContent(typing.NamedTuple):
         )
 
 
+class MessageRole(enum.Enum):
+    system = 'system'
+    user = 'user'
+    assistant = 'assistant'
+    tool = 'tool'
+
+
 class Message(typing.NamedTuple):
     """给LLM发送的消息"""
     role: Optional[str] = None
@@ -130,7 +139,7 @@ class Message(typing.NamedTuple):
     def from_content(
             cls,
             content: Union[str, Dict],
-            role: Optional[str] = "user",
+            role: Optional[str] = MessageRole.user.value,
             media_content: Optional[MediaContent] = None
     ):
         if isinstance(content, dict):
@@ -143,36 +152,28 @@ class Message(typing.NamedTuple):
 
     def to_dict(self) -> Dict[str, Any]:
         """将Message对象序列化为字典"""
-        # 如果存在raw_value，直接返回其副本
-        if self.raw_value is not None:
-            return {"raw_value": self.raw_value}
-        d: Dict[str, Any] = {
+        return {
             "role": self.role,
             "content": self.content,
+            "media_content": self.media_content.to_dict() if self.media_content else None,
             "reasoning_content": self.reasoning_content,
-            "tool_call_id": self.tool_call_id
+            "tool_call_id": self.tool_call_id,
+            "raw_value": self.raw_value
         }
-        if self.media_content:
-            d["media_content"] = self.media_content.to_dict()
-        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
         """从字典反序列化为Message对象"""
-        if "raw_value" in data:
-            # 如果有显式的raw_value字段，直接使用
-            return cls(content=data["raw_value"])
-
         return cls(
             role=data.get("role"),
             content=data.get("content"),
-            reasoning_content=data.get("reasoning_content"),
-            tool_call_id=data.get("tool_call_id"),
-            raw_value=None,
             media_content=(
                 MediaContent.from_dict(data["media_content"])
-                if "media_content" in data else None
-            )
+                if data.get("media_content") else None
+            ),
+            reasoning_content=data.get("reasoning_content"),
+            tool_call_id=data.get("tool_call_id"),
+            raw_value=data.get("raw_value"),
         )
 
 
@@ -183,6 +184,16 @@ class ToolCall(typing.NamedTuple):
     arguments: Optional[Dict[str, Any]]
     id: Optional[str] = None
     type: str = 'function'
+
+    @classmethod
+    def new(cls, _tool_name: str, /, **kwargs):
+        return cls(
+            name=_tool_name,
+            arguments_text=json.dumps(kwargs, ensure_ascii=False),
+            arguments=kwargs,
+            id=get_id(),
+            type='function'
+        )
 
     def __str__(self):
         return '%s(%s)' % (
@@ -221,7 +232,7 @@ class LLMProviderResponse:
     completion_tokens: Optional[int] = None
 
     # 完整请求/响应数据
-    response_message: Optional[Dict[str, Any]] = None
+    response_message: Optional[Message] = None
 
     def raise_for_status(self):
         FinishReason.raise_for_status(self.finish_reason, self.error_text)
@@ -315,6 +326,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Optional[str] = None
 
 
 class LLMModuleRequest(typing.NamedTuple):
@@ -336,9 +348,11 @@ class LLMModuleRequest(typing.NamedTuple):
 @dataclass
 class LLMModuleResult:
     """应用层（模板）请求响应"""
-    module_name: str
-    # 原始请求参数
-    request: LLMDirectRequest = None
+    model_name: str
+    module_name: Optional[str]
+    # 实际请求参数
+    request: LLMDirectRequest
+    post_processor: Optional[str] = None
     # 原始响应
     response_text: str = ""
     response_reasoning: str = ""
@@ -359,8 +373,10 @@ class LLMModuleResult:
     def from_response(cls, request: LLMDirectRequest, response: LLMProviderResponse) -> "LLMModuleResult":
         """从 LLMProviderResponse 转换为 LLMModuleResult"""
         return cls(
-            module_name='',
+            model_name=response.model_name,
+            module_name=None,
             request=request,
+            post_processor=request.post_processor,
             # 原始响应字段直接映射
             response_text=response.response_text,
             response_reasoning=response.response_reasoning,
@@ -376,34 +392,32 @@ class LLMModuleResult:
             # 错误信息直接映射
             error_text=response.error_text,
             # 原始响应消息直接映射
-            response_message=(
-                Message.from_content(response.response_message)
-                if response.response_message else None
-            )
+            response_message=response.response_message
         )
 
     def raise_for_status(self):
         FinishReason.raise_for_status(self.status.value, self.error_text)
 
-    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> List[Message]:
-        """Execute tool calls using the provided function map.
+    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> Optional[LLMDirectRequest]:
+        """Execute tool calls using the provided function map, and return next request.
 
         Args:
             self: LLMModuleResult object
             fn_map: Dictionary mapping tool names to callable functions
 
         Returns:
-            Context messages for next request.
+            LLMDirectRequest for next request.
 
         Raises:
             LLMError: raise_for_status()
             LLMResponseFormatError: tool not found
         """
         self.raise_for_status()
+        if not self.tool_calls:
+            return None
+
         context = list(self.request.messages)
         context.append(self.response_message)
-        if not self.tool_calls:
-            return context
 
         for tool_call in self.tool_calls:
             tool_name = tool_call.name
@@ -418,5 +432,20 @@ class LLMModuleResult:
                 result = func()
             if inspect.isawaitable(result):
                 result = await result
-            context.append(Message.from_content(content=str(result), role='tool'))
-        return context
+            context.append(Message(
+                role=MessageRole.tool.value,
+                content=str(result),
+                tool_call_id=tool_call.id,
+            ))
+
+        original_req = self.request
+        return LLMDirectRequest(
+            model_name=original_req.model_name,
+            messages=context,
+            tools=original_req.tools,
+            options=original_req.options,
+            stream=original_req.stream,
+            output_channel=original_req.output_channel,
+            reasoning_channel=original_req.reasoning_channel,
+            post_processor=original_req.post_processor,
+        )

@@ -3,14 +3,14 @@
 ## 1. Framework Overview
 
 ### 1.1 Design Philosophy
-aitoolman is a developer-oriented LLM application framework with the core idea of **AI as a Toolman** — treating LLM like a junior employee in an enterprise, only executing clear instructions within the rules and processes preset by developers, without autonomous decision-making power. The framework has clear role divisions:
+aitoolman is a developer-oriented LLM application framework with the core idea of **AI as a Normal Worker** — treating LLM like a junior employee in an enterprise, only executing clear instructions within the rules and processes preset by developers, without autonomous decision-making power. The framework has clear role divisions:
 - End User = Client: Proposes vague requirements
 - Application Developer = Business Owner: Defines all rules, processes, prompt templates, and holds 100% decision-making power
 - LLMWorkflow = Middle Manager: Schedules tasks according to preset workflows, switches process branches based on presets or LLM return results
 - LLM Module = Junior Employee: Only completes assigned single, clear tasks, with output strictly adhering to preset format requirements
 
 The framework emphasizes:
-- **Full User Control**: All prompts, data flows, and control flows are dominated by user code; LLM only serves as an execution tool with no hidden logic or unexpected behavior
+- **Full User Control**: All prompts, data flows, and control flows are dominated by user code; LLM only serves as an execution tool with no hidden business logic or unexpected behavior
 - **Transparent and Debuggable Workflow**: All data sent to and received from LLM can be customized and audited, facilitating problem troubleshooting and prompt optimization
 - **Vendor Agnostic**: Unified adaptation of multiple LLM providers through abstraction layer, easy model switching while fully utilizing each provider's unique features
 - **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse
@@ -19,14 +19,14 @@ The framework emphasizes:
 Whether it's simple one-time queries or complex multi-step business processes, aitoolman provides a stable, reliable, and maintainable solution. The framework encourages developers to deeply understand business logic, carefully design prompts, and seamlessly integrate AI capabilities into existing systems.
 
 ### 1.2 Differences from Traditional Agent Frameworks
-| Dimension | aitoolman | Traditional Agent Frameworks |
-|-----------|-----------|-------------------------------|
-| Positioning | LLM is a toolman, only executes preset instructions | LLM is an agent with autonomous decision-making capabilities |
-| Control | User has complete control over workflow | Framework implies control flow |
-| Prompts | Developers write all prompts, fully customizable | Comes with numerous default prompts, high adaptation cost for non-English scenarios |
-| Multi-Model Adaptation | Native support for multiple vendors and models, low switching cost | Optimized for single platform, high adaptation cost |
-| Functional Boundaries | Focuses on LLM function orchestration, no redundant dependencies | Built-in vector indexing, RAG, and other features, resulting in bloated dependency libraries |
-| Applicable Scenarios | Enterprise-grade controllable workflow orchestration, batch task processing | Open autonomous agents, exploratory applications |
+| Dimension              | aitoolman                                                        | Traditional Agent Frameworks                                              |
+|------------------------|------------------------------------------------------------------|---------------------------------------------------------------------------|
+| LLM's Role             | **LLM is a "worker", only executes predefined instructions**     | LLM is an autonomous "agent" with decision-making capabilities            |
+| Control                | User has full control over workflows                             | Framework implies hidden control flows                                    |
+| Prompts                | Developers write all prompts with full customization             | Includes many default prompts, high adaptation cost for custom scenarios  |
+| Multi-model Adaptation | Natively supports multi-vendor with low switching cost           | Optimized for single platforms, high adaptation cost                      |
+| Feature Boundaries     | Focuses on LLM function orchestration, no redundant dependencies | Bulky dependencies with built-in vector indexing, RAG, and other features |
+| Use Cases              | Controllable workflow orchestration, batch task processing       | Autonomous agents, exploratory applications                               |
 
 ### 1.3 Use Cases
 1. Professional Applications: Clear input and output scope
@@ -108,6 +108,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Optional[str] = None
 ```
 
 `LLMModuleRequest`: Sends requests based on configured template modules, automatically renders prompts, loads preset tool and model configurations, and allows overriding default configurations.
@@ -135,8 +136,10 @@ class LLMModuleRequest(typing.NamedTuple):
 @dataclass
 class LLMModuleResult:
     """Application layer (template) request response"""
-    module_name: str                    # Module name
-    request: LLMDirectRequest = None    # Original request parameters
+    model_name: str                     # Actual model name
+    module_name: Optional[str]          # Module name
+    request: LLMDirectRequest           # Actual request parameters
+    post_processor: Optional[str] = None  # Post-processor name
     response_text: str = ""             # Raw response text
     response_reasoning: str = ""        # Raw reasoning text
     text: str = ""                      # Processed text
@@ -145,13 +148,13 @@ class LLMModuleResult:
     error_text: Optional[str] = None    # Error message
     request_params: Dict[str, Any] = field(default_factory=dict)  # Original template parameters
     response_message: Optional[Message] = None  # Original response message
-    data: Any = None                    # Post-processing result
+    data: Any = None                    # Post-processed result
 
     def raise_for_status(self):
         """Raise error based on status"""
 
-    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> List[Message]:
-        """Execute tool calls and return Message context list"""
+    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> Optional[LLMDirectRequest]:
+        """Execute tool calls and return next request parameters"""
 ```
 
 
@@ -209,7 +212,7 @@ class LLMProviderResponse:
     completion_tokens: Optional[int] = None # Output token count
 
     # Raw data
-    response_message: Optional[Dict[str, Any]] = None  # Original response message
+    response_message: Optional[Message] = None  # Original response message
 ```
 
 ### Status and Error Types
@@ -353,119 +356,142 @@ LLMWorkflow extends LLMApplication, supporting dynamic workflow execution with t
 The two modes can be mixed.
 
 #### 3.2.2 Task Definition
-Inherit the `LLMTask` class and override the `pre_process()` and `post_process()` methods:
-- `pre_process()`: Prepare request data, dynamically modify inputs
-- `post_process()`: Process response results, generate next task
+`Task` is a generic task base class that supports two usage methods:
+1. Inherit `Task` and override the `run()` method
+2. Use `Task.set_func()` to specify the execution function
 
-Tool call handling:
-- `on_tool_call_goto()`: Convert tool calls to next task
-- `run_tool_calls()`: Execute tool calls and continue dialogue
+`LLMTask` is a task class specifically designed for LLM calls, handling LLM requests and responses, and supporting tool call processing.
 
 ```python
 # Task status enum
-class LLMTaskStatus(enum.Enum):
-    INIT = 0
-    WAITING = 1
-    RUNNING = 2
-    COMPLETED = 3
-    FAILED = 4
-    DEPENDENCY_FAILED = 5
+class TaskStatus(enum.Enum):
+    INIT = 0    # Initialized
+    WAITING = 1 # Pending execution
+    RUNNING = 2 # Executing
+    COMPLETED = 3  # Completed
+    FAILED = 4     # Failed
+    DEPENDENCY_FAILED = 5  # Dependency failed
+```
 
+```python
+class Task:
+    """
+    Generic task base class that executes custom functions
+    Override run() or use Task.set_func to specify the execution function
+    """
+    def __init__(
+        self,
+        input_data: Optional[Dict[str, Any]] = None,
+        workflow: Optional['LLMWorkflow'] = None
+    ): ...
 
-class LLMTask:
-    """LLM Task Base Class"""
-    module_name: ClassVar[str] = ''  # Default module name
+    # Set task execution function
+    def set_func(self, fn: Callable): ...
 
-    # Main methods (can be overridden by users)
-    async def pre_process(self) -> Union[LLMModuleRequest, LLMDirectRequest, None]:
-        """
-        Pre-processing hook: Executed before calling LLM module
+    # Task execution logic, can be overridden
+    async def run(self, **input_data):
+        raise NotImplementedError
 
-        Default implementation:
-        - input_data is LLMModuleRequest/LLMDirectRequest: Direct call
-        - input_data is dict: Used as template parameters
-        - Others: Throw error
+    # Clone task (used in tool call scenarios, etc.)
+    def clone(self): ...
+```
 
-        Users can override this method to:
-        - Dynamically modify input data
-        - Add context messages
-        - Add multimedia content
-        """
+```python
+class LLMTask(Task):
+    """LLM task class focused on LLM calls and tool call processing"""
+    def __init__(
+            self,
+            input_data: Union[_model.LLMModuleRequest, _model.LLMDirectRequest, None] = None,
+            workflow: Optional['LLMWorkflow'] = None
+    ): ...
 
-    async def post_process(self):
+    # Post-processing hook: Executed after LLM module returns result
+    async def post_process(self, module_result: _model.LLMModuleResult):
         """
         Post-processing hook: Executed after LLM module returns result
-
-        Default implementation: Assign module_result.data to output_data
-        Users can override this method to:
-        - Parse and validate output
-        - Dynamically generate next task based on results
-        - Handle tool calls
-        - Implement branch logic
+        Can be overridden to handle tool calls, generate next task, etc.
         """
+        pass
 
-    # Tool call helper methods
-    # 1. Tool call as intent recognition
-    def on_tool_call_goto(self, **kwargs: Callable[[], 'LLMTask']):
+    # Tool call processing: Convert tool calls to next task
+    def on_tool_call_goto(self, **kwargs: Callable[[], 'Task']):
         """
-        Used in post_process to convert tool calls to next LLMTask
+        Used in post_process to convert tool calls to next Task
         * Not a tool call: Return directly
-        * First call: Set next_task to corresponding LLMTask and end current task
+        * First call: Set next_task to corresponding Task and end current task
         * No matching call: Throw error
         """
 
-    # 2. Classic "tool call" mode: Add call results to context
+    # Tool call processing: Execute tool calls and continue dialogue
     async def run_tool_calls(self, **kwargs: Callable):
         """
         Used in post_process: Tool calls as function calls, generate next LLMTask and end current task
         """
+```
 
-
-class LLMTaskCompleted(Exception):
-    """
-    Early termination of LLMTask, used in LLMTask.post_process
-    """
+```python
+class TaskDependencyError(LLMWorkflowError):
+    """Dependency task execution error, containing all failed tasks"""
 ```
 
 #### 3.2.3 Workflow Interfaces
 ```python
 class LLMWorkflow(LLMApplication):
-    def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
+    # Add task to workflow
+    def add_task(self, task: Task, next_task: Optional[Task] = None):
         """
-        Add background task (not executed immediately)
-        dependent_task is the task to run before current_task
-        When current_task is None, directly add dependent_task to task list
+        Add background task task, not executed immediately
+        task is the task to run before next_task
+
+        Args:
+            task: Task to add
+            next_task: Task to execute after the added task, or None
         """
 
     # Wait for specified tasks to complete
-    async def wait_tasks(self, *tasks: LLMTask, timeout: Optional[float] = None): ...
+    async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None): ...
 
     # Run sequential workflow
-    async def run(self, start_task: LLMTask) -> LLMTask: ...
+    async def run(self, start_task: Task) -> Task: ...
 ```
 
 #### 3.2.4 Usage Examples
-```python
-# Define task class
-class TranslationTask(LLMTask):
-    module_name = 'translator'
 
-    async def post_process(self):
+**Generic Task Example**:
+```python
+# Method 1: Inherit Task and override run method
+class SimpleTask(aitoolman.Task):
+    async def run(self, x, y):
+        return x + y
+
+# Method 2: Use set_func to specify function
+def simple_func(x, y):
+    return x + y
+
+task = aitoolman.Task({"x":1, "y":2})
+task.set_func(simple_func)
+```
+
+**LLM Task Example**:
+```python
+# Define LLM task class
+class TranslationTask(aitoolman.LLMTask):
+    async def post_process(self, module_result):
         # Determine next step based on tool call
         self.on_tool_call_goto(
-            refine=self.refine_task,
-            finalize=self.finalize_task
+            refine=RefinementTask,
+            finalize=FinalizationTask
         )
 
-    def refine_task(self):
-        return RefinementTask()
-
-    def finalize_task(self):
-        return FinalizationTask()
 
 # Run workflow
-workflow = LLMWorkflow(client, config)
-start_task = TranslationTask(input_data={"text": "Hello"})
+workflow = aitoolman.LLMWorkflow(client, config)
+start_task = TranslationTask(
+    aitoolman.LLMModuleRequest(
+        module_name="translator",
+        template_params={"text": "Hello"}
+    )
+)
 final_task = await workflow.run(start_task)
 ```
 
@@ -941,7 +967,7 @@ if __name__ == "__main__":
 
 
 ### 8.4 Static Workflow: Data Analysis Pipeline
-Use Case: Known task dependencies, such as first fetching data, then analyzing, and finally generating reports
+Application Scenario: Known task dependencies, such as first fetching data, then analyzing, and finally generating reports
 
 Use `LLMWorkflow` to build a static DAG:
 - Define multiple analysis tasks
@@ -950,33 +976,54 @@ Use `LLMWorkflow` to build a static DAG:
 - Merge analysis results
 
 ```python
+import asyncio
 import aitoolman
-from src.tasks import (
-    DataFetchTask,
-    DataAnalysisTask,
-    ReportGenerationTask
-)
+
+# Define task classes
+class DataFetchTask(aitoolman.Task):
+    async def run(self, query):
+        # Simulate data fetching
+        return {"sales_data": [100, 200, 300]}
+
+class DataAnalysisTask(aitoolman.Task):
+    async def run(self, sales_data):
+        # Simulate data analysis
+        return {
+            "total": sum(sales_data),
+            "average": sum(sales_data)/len(sales_data)
+        }
+
+class ReportGenerationTask(aitoolman.Task):
+    async def run(self, format, analysis_result):
+        # Simulate report generation
+        if format == "markdown":
+            return f"""
+# Sales Data Analysis Report
+- Total Sales: {analysis_result['total']}
+- Average Sales: {analysis_result['average']}
+"""
+        return str(analysis_result)
 
 async def main():
     # Initialize workflow
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     async with aitoolman.LLMLocalClient(api_config) as client:
         workflow = aitoolman.LLMWorkflow(client, prompt_config)
-        
+
         # Create tasks
-        fetch_task = DataFetchTask(input_data={"query": "Q1 2024 sales data"})
+        fetch_task = DataFetchTask({"query": "Q1 2024 sales data"})
         analysis_task = DataAnalysisTask()
-        report_task = ReportGenerationTask(input_data={"format": "markdown"})
-        
+        report_task = ReportGenerationTask({"format": "markdown"})
+
         # Establish dependencies: fetch → analysis → report
-        workflow.add_task(analysis_task, fetch_task)
-        workflow.add_task(report_task, analysis_task)
-        
+        workflow.add_task(fetch_task, analysis_task)
+        workflow.add_task(analysis_task, report_task)
+
         # Wait for all tasks to complete
         await workflow.wait_tasks(report_task)
-        
+
         # Get results
         print("Analysis report generated successfully:")
         print(report_task.output_data)
@@ -988,12 +1035,12 @@ if __name__ == "__main__":
 ### 8.5 Dynamic Workflow: Batch Folder Analysis
 Recursively analyze folder structure:
 - Define folder analysis task to output sub-item list
-- Dynamically add sub-tasks in `pre_process()` based on analysis content
+- Dynamically add sub-tasks in `run()` based on analysis content
 - Use `add_task()` and `wait_tasks()` to manage recursive dependencies
 - Handle file content analysis, classification, and other sub-tasks
 
 ### 8.6 Sequential Workflow: Multi-step Decision Making
-Use `LLMTask.next_task` to build sequential processes:
+Use `Task.next_task` to build sequential processes:
 - Define task chain: analysis → planning → execution → verification
 - Each task determines the next step based on output
 - Use `workflow.run()` to execute the entire process
@@ -1002,53 +1049,100 @@ Use `LLMTask.next_task` to build sequential processes:
 Content Review Pipeline:
 
 ```python
+import asyncio
 import aitoolman
 
 class ContentSubmitTask(aitoolman.LLMTask):
-    module_name = "content_validator"
-    
-    async def post_process(self):
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="content_validator",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
         # Determine next step based on verification results
-        if self.output_data['status'] == "valid":
-            self.next_task = AIAuditTask(input_data={"content": self.input_data['content']})
+        if module_result.data['status'] == "valid":
+            self.next_task = AIAuditTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = RejectionTask(input_data={"reason": self.output_data['reason']})
+            self.next_task = RejectionTask({
+                "reason": module_result.data['reason']
+            })
 
 class AIAuditTask(aitoolman.LLMTask):
-    module_name = "content_auditor"
-    
-    async def post_process(self):
-        if self.output_data['risk_level'] <= 1:
-            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="content_auditor",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
+        if module_result.data['risk_level'] <= 1:
+            self.next_task = PublishTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = ManualReviewTask(input_data={"content": self.input_data['content'], "risk": self.output_data['risk_details']})
+            self.next_task = ManualReviewTask({
+                "content": self.input_data.request.template_params['content'],
+                "risk": module_result.data['risk_details']
+            })
 
 class ManualReviewTask(aitoolman.LLMTask):
-    module_name = "review_coordinator"
-    
-    async def post_process(self):
-        if self.output_data['approved']:
-            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="review_coordinator",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
+        if module_result.data['approved']:
+            self.next_task = PublishTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = RevisionTask(input_data={"content": self.input_data['content'], "feedback": self.output_data['feedback']})
+            self.next_task = RevisionTask({
+                "content": self.input_data.request.template_params['content'],
+                "feedback": module_result.data['feedback']
+            })
 
-# Other task classes: PublishTask, RevisionTask, RejectionTask...
+class PublishTask(aitoolman.Task):
+    async def run(self, content):
+        # Simulate publishing operation
+        return {"status": "published", "content": content}
 
+class RevisionTask(aitoolman.Task):
+    async def run(self, content, feedback):
+        # Simulate returning revision suggestions
+        return {"status": "revision_needed", "feedback": feedback}
+
+class RejectionTask(aitoolman.Task):
+    async def run(self, reason):
+        # Simulate rejection operation
+        return {"status": "rejected", "reason": reason}
+
+# Run workflow
 async def main():
     # Initialize workflow
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     async with aitoolman.LLMLocalClient(api_config) as client:
         workflow = aitoolman.LLMWorkflow(client, prompt_config)
-        
+
         # Start workflow
-        start_task = ContentSubmitTask(input_data={
+        start_task = ContentSubmitTask({
             "content": "Article content to be published...",
             "type": "article"
         })
         final_task = await workflow.run(start_task)
-        
+
         print(f"Process completed, final status: {final_task.task_name}")
         print(f"Result: {final_task.output_data}")
 
@@ -1133,28 +1227,28 @@ The monitor will display the following information:
 ## 10. Best Practices
 
 ### 10.1 Prompt Design
-Design prompts in "**Short Answer Question**" format:
+Design prompts using the "**Short-Answer Question**" format. The format is:
 
-1. **Reading Material**: Long text to be analyzed, reference materials, or historical dialogue context
-2. **Question Background**: Describe scenario design and main objectives, the stem of the short answer question
-3. **Task Description**: Clearly state what needs to be done, a sub-question of the short answer question
-4. **Specific Requirements**: List rules, methods, and key points to follow, which are the question type design, scoring points, and hints in parentheses
-5. Optional **Output Example**: Directly write in the format to be output
+1.  **Reading Material**: Long text to be analyzed, reference materials, or historical conversation context.
+2.  **Question Background**: Elaborate on the scenario design and main objective; this is the stem of the short-answer question.
+3.  **Task Instructions**: Clearly state what needs to be done; this is a sub-question within the short-answer question.
+4.  **Specific Requirements**: List the rules, methods, and key points to follow; this includes question type design, scoring points, and hints (in parentheses).
+5.  Optional **Output Example**: Write directly in the format that should be output.
 
-Prompt design principles:
-- **Focus on Single Task**: Let AI handle only one task or set of data at a time
-- **Coherent Structure**: The end of the prompt should naturally connect with the beginning of the AI's answer; short input content (1-2 lines) can be placed at the end of the prompt
-- **Language Consistency**: Write prompts in the main working language, with target language text placed at the end
-- **Concise and Clear**: Use concise wording, focus on writing "what to do" rather than "what not to do"; avoid exposing irrelevant content to the large model
-- **Clear Output Format**: Specify clear output formats (e.g., JSON, XML, Markdown) for easy parsing
+Principles of prompt design:
+- **Focus on a single task**: Make the AI process only one task or one set of data at a time.
+- **Seamless connection**: The end of the prompt should connect naturally to the beginning of the AI's answer; for brief (one or two lines) input content, it can be placed at the very end of the prompt.
+- **Language consistency**: Write the prompt in the primary working language; place target language text at the end.
+- **Be concise and clear**: Use concise wording, focus more on writing "what to do" and less on "what not to do"; avoid exposing the large language model to irrelevant content.
+- **Explicit output format**: Specify a clear output format (e.g., JSON, XML, Markdown) for easy parsing.
 
 ### 10.2 Module Design
 
-- **Workflow First**: Avoid letting large models perform deterministic tasks, or restrict large model behavior only with prompts
-- **Modular Design**: Split complex prompts into multiple modules and global templates, with each module having a single responsibility
-- **Template Variables**: Use `{{ variable }}` and other Jinja2 template syntax
-- **Context Control**: Minimize use of context messages, prioritize optimizing prompt quality
-- **Tool Description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools
+- **Workflow first**: Avoid having the large language model perform deterministic tasks, or restrict large model behavior only with prompts.
+- **Modular design**: Break down complex prompts into multiple modules and global templates, with each module having a single responsibility.
+- **Template variables**: Use `{{ variable }}` and other Jinja2 template syntax.
+- **Context control**: Minimize the use of context messages; prioritize optimizing prompt quality.
+- **Tool description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools.
 
 ### 10.3 Error Handling
 ```python

@@ -44,9 +44,20 @@ class LLMZmqServer:
         server_config = self.config['server']
         # 绑定ROUTER（处理请求）和PUB（审计日志）
         self.router_socket.bind(server_config['zmq_router_rpc'])
-        self.pub_socket.bind(server_config['zmq_pub_event'])
-        logger.info(f"ROUTER bound to {server_config['zmq_router_rpc']}")
-        logger.info(f"PUB bound to {server_config['zmq_pub_event']}")
+        logger.info(f"Microservice socket (ROUTER) bound to {server_config['zmq_router_rpc']}")
+        if server_config.get('zmq_pub_event'):
+            socket_type = server_config.get('zmq_pub_event_type') or 'bind'
+            if socket_type == 'connect':
+                self.pub_socket.connect(server_config['zmq_pub_event'])
+            elif socket_type == 'bind':  # bind
+                self.pub_socket.bind(server_config['zmq_pub_event'])
+            elif not socket_type:
+                pass
+            else:
+                raise ValueError("Invalid zmq_pub_event_type: %s" %  socket_type)
+            logger.info(f"Audit socket (PUB) bound to {server_config['zmq_pub_event']}")
+        else:
+            logger.info(f"Audit socket (PUB) disabled")
         # 初始化ProviderManager
         await self.provider_manager.initialize()
 
@@ -205,7 +216,7 @@ class LLMZmqServer:
                 'error_text': response.error_text,
                 'prompt_tokens': response.prompt_tokens,
                 'completion_tokens': response.completion_tokens,
-                'response_message': response.response_message
+                'response_message': response.response_message.to_dict() if response.response_message else None
             }
         }
         # logger.debug("send_msg: %s", message)

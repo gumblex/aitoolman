@@ -6,10 +6,10 @@ from typing import Any, Dict, Optional, Callable, List, Union, NamedTuple
 import jinja2
 
 from . import util
-from . import model as _model
 from . import postprocess
 from . import client as _client
 from . import channel as _channel
+from .model import LLMDirectRequest, Message, MediaContent, LLMModuleResult, LLMModuleRequest, FinishReason
 
 
 logger = logging.getLogger(__name__)
@@ -83,11 +83,11 @@ class _LLMModule(NamedTuple):
     async def __call__(
             self, *,
             _model_name: Optional[str] = None,
-            _context_messages: Optional[List[_model.Message]] = None,
-            _media_content: Optional[_model.MediaContent] = None,
+            _context_messages: Optional[List[Message]] = None,
+            _media_content: Optional[MediaContent] = None,
             **kwargs
-    ) -> _model.LLMModuleResult:
-        return await self.app.call(_model.LLMModuleRequest(
+    ) -> LLMModuleResult:
+        return await self.app.call(LLMModuleRequest(
             module_name=self.module_name,
             template_params=kwargs,
             model_name=_model_name,
@@ -228,34 +228,35 @@ class LLMApplication:
         await self.client.audit_event(self.context_id, event_type, **kwargs)
 
     def render_direct_request(
-            self, module_request: Union[_model.LLMModuleRequest, _model.LLMDirectRequest]
-    ) -> _model.LLMDirectRequest:
-        if isinstance(module_request, _model.LLMDirectRequest):
+            self, module_request: Union[LLMModuleRequest, LLMDirectRequest]
+    ) -> LLMDirectRequest:
+        if isinstance(module_request, LLMDirectRequest):
             return module_request
         messages = []
         if module_request.context_messages:
             messages.extend(module_request.context_messages)
         elif self.has_template("module/%s/system" % module_request.module_name):
-            messages.append(_model.Message.from_content(self.render_template(
+            messages.append(Message.from_content(self.render_template(
                 "module/%s/system" % module_request.module_name,
                 **module_request.template_params
             ), role='system'))
-        messages.append(_model.Message.from_content(self.render_template(
+        messages.append(Message.from_content(self.render_template(
             "module/%s/user" % module_request.module_name,
             **module_request.template_params
         ), role='user', media_content=module_request.media_content))
         config = self.module_configs[module_request.module_name]
-        return _model.LLMDirectRequest(
+        return LLMDirectRequest(
             model_name=(module_request.model_name or config.model),
             messages=messages,
             tools=(module_request.tools if module_request.tools is not None else config.tools),
             options=(module_request.options if module_request.options is not None else config.options),
             stream=(module_request.stream if module_request.stream is not None else config.stream),
             output_channel=(module_request.output_channel if module_request.output_channel is not None else config.output_channel),
-            reasoning_channel=(module_request.reasoning_channel if module_request.reasoning_channel is not None else config.reasoning_channel)
+            reasoning_channel=(module_request.reasoning_channel if module_request.reasoning_channel is not None else config.reasoning_channel),
+            post_processor=config.post_processor,
         )
 
-    async def _send_request(self, direct_request: _model.LLMDirectRequest) -> _model.LLMModuleResult:
+    async def _send_request(self, direct_request: LLMDirectRequest) -> LLMModuleResult:
         """直接发送LLM请求"""
         output_channel = (
             self.channels[direct_request.output_channel]
@@ -278,18 +279,16 @@ class LLMApplication:
             reasoning_channel=reasoning_channel
         )
         response = await request.response
-        return _model.LLMModuleResult.from_response(direct_request, response)
+        return LLMModuleResult.from_response(direct_request, response)
 
-    async def _call_module(self, module_request: _model.LLMModuleRequest) -> _model.LLMModuleResult:
-        direct_req = self.render_direct_request(module_request)
-        result = await self._send_request(direct_req)
-        result.module_name = module_request.module_name
-        result.request_params = module_request.template_params
-
-        config = self.module_configs[module_request.module_name]
-        if result.status == _model.FinishReason.stop:
-            if config.post_processor:
-                post_processor = self.processors[config.post_processor]
+    async def _post_process(
+            self, result: LLMModuleResult,
+            post_processor_name: Optional[str],
+            request: Union[LLMDirectRequest, LLMModuleRequest]
+    ):
+        if result.status == FinishReason.stop:
+            if post_processor_name:
+                post_processor = self.processors[post_processor_name]
                 try:
                     data = post_processor(result.response_text)
                     if inspect.isawaitable(data):
@@ -297,17 +296,23 @@ class LLMApplication:
                     else:
                         result.data = data
                 except Exception:
-                    logger.exception("Post-process failed: %s", module_request)
-                    result.status = _model.FinishReason.error_format
+                    logger.exception("Post-process failed: %s", request)
+                    result.status = FinishReason.error_format
             else:
                 result.data = result.response_text
         return result
 
-    async def call(self, request: Union[_model.LLMModuleRequest, _model.LLMDirectRequest]) -> _model.LLMModuleResult:
-        if isinstance(request, _model.LLMModuleRequest):
-            return await self._call_module(request)
+    async def call(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleResult:
+        if isinstance(request, LLMModuleRequest):
+            direct_req = self.render_direct_request(request)
         else:
-            return await self._send_request(request)
+            direct_req = request
+        result = await self._send_request(direct_req)
+        if isinstance(request, LLMModuleRequest):
+            result.module_name = request.module_name
+            result.request_params = request.template_params
+        result = await self._post_process(result, direct_req.post_processor, request)
+        return result
 
     @classmethod
     def factory(

@@ -6,11 +6,12 @@
 ### 1.1 [server] Section
 Configure network ports for the ZeroMQ server.
 
-| Parameter         | Type   | Default Value   | Description                                                                                                          |
-|-------------------|--------|-----------------|----------------------------------------------------------------------------------------------------------------------|
-| `zmq_router_rpc`  | String | None (Required) | Bind address for the ZeroMQ ROUTER socket, used to handle client requests. Format: `tcp://*:port` or `tcp://IP:port` |
-| `zmq_pub_event`   | String | None (Required) | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above                             |
-| `zmq_auth_token`  | String | None (Optional) | Any string for authentication                                                                                        |
+| Parameter            | Type                  | Default Value     | Description                                                                                                          |
+|----------------------|-----------------------|-------------------|----------------------------------------------------------------------------------------------------------------------|
+| `zmq_router_rpc`     | String                | None (Required)   | Bind address for the ZeroMQ ROUTER socket, used to handle client requests. Format: `tcp://*:port` or `tcp://IP:port` |
+| `zmq_pub_event`      | String                | None (Optional)   | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above                             |
+| `zmq_pub_event_type` | None/"bind"/"connect" | "bind" (Optional) | Bind method for the ZeroMQ PUB socket. Bind to a new port, or connect to an existing port                            |
+| `zmq_auth_token`     | String                | None (Optional)   | Any string for authentication                                                                                        |
 
 ### 1.2 [default] Section
 Default configuration inherited by all model configurations.

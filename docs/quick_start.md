@@ -10,7 +10,7 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **AI �
 - LLM模块 = 基层员工：仅完成分配的单一、明确的任务，输出严格符合预设的格式要求
 
 框架强调：
-- **用户完全控制**：所有提示词、数据流、控制流均由用户代码主导，LLM 仅作为执行工具，无任何隐藏逻辑、无意外行为
+- **用户完全控制**：所有提示词、数据流、控制流均由用户代码主导，LLM 仅作为执行工具，无隐藏业务逻辑、无意外行为
 - **流程透明可调试**：所有发往LLM和从LLM返回的数据均可自定义、可审计，便于排查问题和优化提示词
 - **供应商无关**：通过抽象层统一适配多种LLM提供商，轻松切换模型且充分利用各提供商的特色功能
 - **模块化设计**：组件职责单一，易于测试、替换和复用
@@ -19,14 +19,14 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **AI �
 无论是简单的单次查询，还是复杂的多步骤业务流程，aitoolman 都能提供稳定、可靠、可维护的解决方案。框架鼓励开发者深入理解业务逻辑，精心设计提示词，将 AI 能力无缝集成到现有系统中。
 
 ### 1.2 与传统 Agent 框架的区别
-| 维度 | aitoolman | 传统 Agent 框架 |
-|------|-----------|----------------|
-| 定位 | LLM是工具人，仅执行预设指令 | LLM是智能体，可自主决策 |
-| 控制权 | 用户完全控制流程 | 框架隐含控制流 |
-| 提示词 | 开发者编写所有提示词，完全自定义 | 自带大量默认提示词，适配非英语场景成本高 |
-| 多模型适配 | 原生支持多厂商、多模型，切换成本低 | 多为单一平台优化，适配成本高 |
-| 功能边界 | 专注LLM功能编排，无冗余依赖 | 内置向量索引、RAG等大量功能，依赖库臃肿 |
-| 适用场景 | 企业级可控流程编排、批量任务处理 | 开放式自主智能体、探索性应用 |
+| 维度    | aitoolman | 传统 Agent 框架           |
+|-------|-----------|-----------------------|
+| LLM角色 | **LLM是工具人，仅执行预设指令** | LLM是智能体，可自主决策         |
+| 控制权   | 用户完全控制流程 | 框架隐含控制流               |
+| 提示词   | 开发者编写所有提示词，完全自定义 | 自带大量默认提示词，适配自定义场景成本高  |
+| 多模型适配 | 原生支持多厂商、多模型，切换成本低 | 多为单一平台优化，适配成本高        |
+| 功能边界  | 专注LLM功能编排，无冗余依赖 | 内置向量索引、RAG等大量功能，依赖库臃肿 |
+| 适用场景  | 企业级可控流程编排、批量任务处理 | 开放式自主智能体、探索性应用        |
 
 ### 1.3 使用场景
 1. 专业应用：输入输出范围明确
@@ -108,6 +108,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Optional[str] = None
 ```
 
 `LLMModuleRequest`: 基于配置的模板模块发送请求，自动渲染提示词、加载预设的工具和模型配置，可覆盖默认配置。
@@ -135,8 +136,10 @@ class LLMModuleRequest(typing.NamedTuple):
 @dataclass
 class LLMModuleResult:
     """应用层（模板）请求响应"""
-    module_name: str                    # 模块名称
-    request: LLMDirectRequest = None    # 原始请求参数
+    model_name: str                     # 实际使用的模型名称
+    module_name: Optional[str]          # 模块名称
+    request: LLMDirectRequest           # 实际请求参数
+    post_processor: Optional[str] = None  # 后处理器
     response_text: str = ""             # 原始响应文本
     response_reasoning: str = ""        # 原始推理文本
     text: str = ""                      # 处理后的文本
@@ -150,8 +153,8 @@ class LLMModuleResult:
     def raise_for_status(self):
         """按照 status 状态报错"""
 
-    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> List[Message]:
-        """运行工具调用，并返回 Message 上下文列表"""
+    async def run_tool_calls(self, fn_map: Dict[str, Callable]) -> Optional[LLMDirectRequest]:
+        """运行工具调用，并返回下一次请求参数 LLMDirectRequest"""
 ```
 
 
@@ -209,7 +212,7 @@ class LLMProviderResponse:
     completion_tokens: Optional[int] = None # 输出 token 数
 
     # 原始数据
-    response_message: Optional[Dict[str, Any]] = None  # 原始响应消息
+    response_message: Optional[Message] = None  # 原始响应消息
 ```
 
 ### 状态与错误类型
@@ -353,119 +356,141 @@ LLMWorkflow 扩展自 LLMApplication，支持动态工作流执行，提供两�
 两种模式可混合使用。
 
 #### 3.2.2 任务定义
-继承 `LLMTask` 类，重写 `pre_process()` 和 `post_process()` 方法：
-- `pre_process()`: 准备请求数据，可动态修改输入
-- `post_process()`: 处理响应结果，可生成下一个任务
+`Task` 是通用任务基类，支持两种使用方式：
+1. 继承 `Task` 并重写 `run()` 方法
+2. 使用 `Task.set_func()` 指定执行函数
 
-工具调用处理：
-- `on_tool_call_goto()`: 将工具调用转为下一步任务
-- `run_tool_calls()`: 执行工具调用并继续对话
+`LLMTask` 是专门用于LLM调用的任务类，处理LLM请求和响应，支持工具调用处理。
 
 ```python
 # 任务状态枚举
-class LLMTaskStatus(enum.Enum):
-    INIT = 0
-    WAITING = 1
-    RUNNING = 2
-    COMPLETED = 3
-    FAILED = 4
-    DEPENDENCY_FAILED = 5
+class TaskStatus(enum.Enum):
+    INIT = 0    # 初始化
+    WAITING = 1 # 待执行
+    RUNNING = 2 # 执行中
+    COMPLETED = 3  # 已完成
+    FAILED = 4     # 已失败
+    DEPENDENCY_FAILED = 5  # 依赖失败
+```
 
+```python
+class Task:
+    """
+    通用任务基类，执行自定义函数
+    重写 run() 或用 Task.set_func 指定具体函数
+    """
+    def __init__(self,
+        input_data: Optional[Dict[str, Any]] = None,
+        workflow: Optional['LLMWorkflow'] = None
+    ): ...
 
-class LLMTask:
-    """LLM 任务基类"""
-    module_name: ClassVar[str] = ''  # 默认使用的模块名
+    # 设置任务执行函数
+    def set_func(self, fn: Callable): ...
 
-    # 主要方法（用户可重写）
-    async def pre_process(self) -> Union[LLMModuleRequest, LLMDirectRequest, None]:
-        """
-        前处理钩子：在调用LLM模块之前执行
+    # 任务执行逻辑，可重写
+    async def run(self, **input_data):
+        raise NotImplementedError
 
-        默认实现：
-        - input_data 为 LLMModuleRequest/LLMDirectRequest：直接调用
-        - input_data 为 dict：作为模板参数
-        - 其他：报错
+    # 克隆任务（用于工具调用等场景）
+    def clone(self): ...
+```
 
-        用户可以重写此方法以实现：
-        - 动态修改输入数据
-        - 添加上下文消息
-        - 添加多媒体内容
-        """
+```python
+class LLMTask(Task):
+    """LLM任务类，专注于LLM调用和工具调用处理"""
+    def __init__(
+            self,
+            input_data: Union[_model.LLMModuleRequest, _model.LLMDirectRequest, None] = None,
+            workflow: Optional['LLMWorkflow'] = None
+    ): ...
 
-    async def post_process(self):
+    # 后处理钩子：在LLM模块返回结果后执行
+    async def post_process(self, module_result: _model.LLMModuleResult):
         """
         后处理钩子：在LLM模块返回结果后执行
-
-        默认实现：将 module_result.data 赋值给 output_data
-        用户可以重写此方法以实现：
-        - 解析和验证输出
-        - 根据结果动态生成下一个任务
-        - 处理工具调用
-        - 实现分支逻辑
+        可重写此方法处理工具调用、生成下一个任务等
         """
+        pass
 
-    # 工具调用辅助方法
-    # 1. 工具调用作为意图识别
-    def on_tool_call_goto(self, **kwargs: Callable[[], 'LLMTask']):
+    # 工具调用处理：将工具调用转为下一步任务
+    def on_tool_call_goto(self, **kwargs: Callable[[], 'Task']):
         """
-        用于 post_process，将工具调用转为下一步的 LLMTask
+        用于 post_process，将工具调用转为下一步的 Task
         * 非工具调用，直接返回
-        * 对第一个调用，设置 next_task 为相应 LLMTask，结束当前任务
+        * 对第一个调用，设置 next_task 为相应 Task，结束当前任务
         * 无匹配的调用，报错
         """
 
-    # 2. 经典“工具调用”模式，将调用结果加入上下文
+    # 工具调用处理：执行工具调用并继续对话
     async def run_tool_calls(self, **kwargs: Callable):
         """
         用于 post_process，工具调用作为函数调用，生成下一步的 LLMTask，结束当前任务
         """
+```
 
-
-class LLMTaskCompleted(Exception):
-    """
-    提前结束LLMTask，用于 LLMTask.post_process
-    """
+```python
+class TaskDependencyError(LLMWorkflowError):
+    """依赖的任务执行错误，包含出错的所有任务"""
 ```
 
 #### 3.2.3 工作流接口
 ```python
 class LLMWorkflow(LLMApplication):
-    def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
+    # 添加任务到工作流
+    def add_task(self, task: Task, next_task: Optional[Task] = None):
         """
-        添加后台任务（不立即执行）
-        dependent_task 为 current_task 之前要运行的任务
-        current_task 为 None 时，直接将 dependent_task 加入任务列表
+        添加后台任务 task，不立即执行
+        task 为 next_task 之前要运行的任务
+
+        Args:
+            task: 要添加的任务
+            next_task: 要添加的任务之后要执行的任务，或为 None
         """
 
     # 等待指定任务完成
-    async def wait_tasks(self, *tasks: LLMTask, timeout: Optional[float] = None): ...
+    async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None): ...
 
     # 运行串行工作流
-    async def run(self, start_task: LLMTask) -> LLMTask: ...
+    async def run(self, start_task: Task) -> Task: ...
 ```
 
 #### 3.2.4 使用示例
-```python
-# 定义任务类
-class TranslationTask(LLMTask):
-    module_name = 'translator'
 
-    async def post_process(self):
+**通用任务示例**：
+```python
+# 方式1：继承Task并重写run方法
+class SimpleTask(aitoolman.Task):
+    async def run(self, x, y):
+        return x + y
+
+# 方式2：使用set_func指定函数
+def simple_func(x, y):
+    return x + y
+
+task = aitoolman.Task({"x":1, "y":2})
+task.set_func(simple_func)
+```
+
+**LLM任务示例**：
+```python
+# 定义LLM任务类
+class TranslationTask(aitoolman.LLMTask):
+    async def post_process(self, module_result):
         # 根据工具调用决定下一步
         self.on_tool_call_goto(
-            refine=self.refine_task,
-            finalize=self.finalize_task
+            refine=RefinementTask,
+            finalize=FinalizationTask
         )
 
-    def refine_task(self):
-        return RefinementTask()
-
-    def finalize_task(self):
-        return FinalizationTask()
 
 # 运行工作流
-workflow = LLMWorkflow(client, config)
-start_task = TranslationTask(input_data={"text": "Hello"})
+workflow = aitoolman.LLMWorkflow(client, config)
+start_task = TranslationTask(
+    aitoolman.LLMModuleRequest(
+        module_name="translator",
+        template_params={"text": "Hello"}
+    )
+)
 final_task = await workflow.run(start_task)
 ```
 
@@ -850,19 +875,19 @@ async def main():
     # 加载配置
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     # 创建客户端和应用
     async with aitoolman.LLMLocalClient(api_config) as client:
         app = aitoolman.LLMApplication(client, prompt_config)
         app.add_processor("extract_code", extract_code)
-        
+
         # 监听输出通道
         collector = aitoolman.DefaultTextChannelCollector({
             '思考过程': app.channels['reasoning'],
             '代码输出': app.channels['stdout']
         })
         output_task = asyncio.create_task(collector.start_listening())
-        
+
         # 调用代码编辑器模块
         result = await app['code_editor'](
             code_content=open("app.py").read(),
@@ -870,11 +895,11 @@ async def main():
             references=[{"filename": "utils.py", "content": open("utils.py").read()}]
         )
         result.raise_for_status()
-        
+
         # 保存结果
         with open("app_modified.py", "w") as f:
             f.write(result.data)
-        
+
         output_task.close()
         await output_task
 
@@ -913,7 +938,7 @@ async def main():
     # 加载配置
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     # 创建应用工厂
     async with aitoolman.LLMLocalClient(api_config) as client:
         app_factory = aitoolman.LLMApplication.factory(
@@ -923,18 +948,18 @@ async def main():
                 "classify": parse_classification
             }
         )
-        
+
         # 模拟批量工单
         tickets = [
             {"id": "1", "type": "技术支持", "content": "系统登录失败"},
             {"id": "2", "type": "业务咨询", "content": "发票如何申请"},
             # 更多工单...
         ]
-        
+
         # 并行处理
         async with asyncio.TaskGroup() as tg:
             tasks = [tg.create_task(process_ticket(app_factory, t)) for t in tickets]
-            
+
         # 收集结果
         results = [t.result() for t in tasks]
         for res in results:
@@ -955,33 +980,54 @@ if __name__ == "__main__":
 - 合并分析结果
 
 ```python
+import asyncio
 import aitoolman
-from src.tasks import (
-    DataFetchTask,
-    DataAnalysisTask,
-    ReportGenerationTask
-)
+
+# 定义任务类
+class DataFetchTask(aitoolman.Task):
+    async def run(self, query):
+        # 模拟数据获取
+        return {"sales_data": [100, 200, 300]}
+
+class DataAnalysisTask(aitoolman.Task):
+    async def run(self, sales_data):
+        # 模拟数据分析
+        return {
+            "total": sum(sales_data),
+            "average": sum(sales_data)/len(sales_data)
+        }
+
+class ReportGenerationTask(aitoolman.Task):
+    async def run(self, format, analysis_result):
+        # 模拟报告生成
+        if format == "markdown":
+            return f"""
+# 销售数据分析报告
+- 总销售额: {analysis_result['total']}
+- 平均销售额: {analysis_result['average']}
+"""
+        return str(analysis_result)
 
 async def main():
     # 初始化工作流
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     async with aitoolman.LLMLocalClient(api_config) as client:
         workflow = aitoolman.LLMWorkflow(client, prompt_config)
-        
+
         # 创建任务
-        fetch_task = DataFetchTask(input_data={"query": "2024年Q1销售数据"})
+        fetch_task = DataFetchTask({"query": "2024年Q1销售数据"})
         analysis_task = DataAnalysisTask()
-        report_task = ReportGenerationTask(input_data={"format": "markdown"})
-        
+        report_task = ReportGenerationTask({"format": "markdown"})
+
         # 建立依赖关系：fetch → analysis → report
-        workflow.add_task(analysis_task, fetch_task)
-        workflow.add_task(report_task, analysis_task)
-        
+        workflow.add_task(fetch_task, analysis_task)
+        workflow.add_task(analysis_task, report_task)
+
         # 等待所有任务完成
         await workflow.wait_tasks(report_task)
-        
+
         # 获取结果
         print("分析报告生成完成：")
         print(report_task.output_data)
@@ -993,12 +1039,12 @@ if __name__ == "__main__":
 ### 8.5 动态工作流：文件夹批量分析
 递归分析文件夹结构：
 - 定义文件夹分析任务，输出子项列表
-- 在 `pre_process()` 中根据分析内容动态添加子任务
+- 在 `run()` 中根据分析内容动态添加子任务
 - 使用 `add_task()` 和 `wait_tasks()` 管理递归依赖
 - 处理文件内容分析、分类等子任务
 
 ### 8.6 串行工作流：多步骤决策
-使用 `LLMTask.next_task` 构建串行流程：
+使用 `Task.next_task` 构建串行流程：
 - 定义任务链：分析 → 规划 → 执行 → 验证
 - 每个任务根据输出决定下一步
 - 使用 `workflow.run()` 执行整个流程
@@ -1007,53 +1053,100 @@ if __name__ == "__main__":
 内容审核流水线：
 
 ```python
+import asyncio
 import aitoolman
 
 class ContentSubmitTask(aitoolman.LLMTask):
-    module_name = "content_validator"
-    
-    async def post_process(self):
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="content_validator",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
         # 根据验证结果决定下一步
-        if self.output_data['status'] == "valid":
-            self.next_task = AIAuditTask(input_data={"content": self.input_data['content']})
+        if module_result.data['status'] == "valid":
+            self.next_task = AIAuditTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = RejectionTask(input_data={"reason": self.output_data['reason']})
+            self.next_task = RejectionTask({
+                "reason": module_result.data['reason']
+            })
 
 class AIAuditTask(aitoolman.LLMTask):
-    module_name = "content_auditor"
-    
-    async def post_process(self):
-        if self.output_data['risk_level'] <= 1:
-            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="content_auditor",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
+        if module_result.data['risk_level'] <= 1:
+            self.next_task = PublishTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = ManualReviewTask(input_data={"content": self.input_data['content'], "risk": self.output_data['risk_details']})
+            self.next_task = ManualReviewTask({
+                "content": self.input_data.request.template_params['content'],
+                "risk": module_result.data['risk_details']
+            })
 
 class ManualReviewTask(aitoolman.LLMTask):
-    module_name = "review_coordinator"
-    
-    async def post_process(self):
-        if self.output_data['approved']:
-            self.next_task = PublishTask(input_data={"content": self.input_data['content']})
+    def __init__(self, input_data):
+        super().__init__(
+            aitoolman.LLMModuleRequest(
+                module_name="review_coordinator",
+                template_params=input_data
+            )
+        )
+
+    async def post_process(self, module_result):
+        if module_result.data['approved']:
+            self.next_task = PublishTask({
+                "content": self.input_data.request.template_params['content']
+            })
         else:
-            self.next_task = RevisionTask(input_data={"content": self.input_data['content'], "feedback": self.output_data['feedback']})
+            self.next_task = RevisionTask({
+                "content": self.input_data.request.template_params['content'],
+                "feedback": module_result.data['feedback']
+            })
 
-# 其他任务类：PublishTask, RevisionTask, RejectionTask...
+class PublishTask(aitoolman.Task):
+    async def run(self, content):
+        # 模拟发布操作
+        return {"status": "published", "content": content}
 
+class RevisionTask(aitoolman.Task):
+    async def run(self, content, feedback):
+        # 模拟返回修订建议
+        return {"status": "revision_needed", "feedback": feedback}
+
+class RejectionTask(aitoolman.Task):
+    async def run(self, reason):
+        # 模拟拒绝操作
+        return {"status": "rejected", "reason": reason}
+
+# 运行工作流
 async def main():
     # 初始化工作流
     api_config = aitoolman.load_config("config/llm_config.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
-    
+
     async with aitoolman.LLMLocalClient(api_config) as client:
         workflow = aitoolman.LLMWorkflow(client, prompt_config)
-        
+
         # 启动工作流
-        start_task = ContentSubmitTask(input_data={
+        start_task = ContentSubmitTask({
             "content": "待发布的文章内容...",
             "type": "article"
         })
         final_task = await workflow.run(start_task)
-        
+
         print(f"流程完成，最终状态：{final_task.task_name}")
         print(f"结果：{final_task.output_data}")
 

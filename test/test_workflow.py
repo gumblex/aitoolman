@@ -2,219 +2,165 @@ import json
 import logging
 import asyncio
 import unittest
+import functools
+import re
 
-from aitoolman.workflow import (
-    LLMWorkflow, LLMTask, LLMTaskStatus, LLMTaskDependencyError
-)
-from aitoolman.model import (
-    LLMProviderResponse, ToolCall, FinishReason,
-    LLMProviderRequest, LLMModuleRequest)
+import aitoolman
 
-from mock_llmclient import MockLLMClient, default_llm_response, MockTextChannelCollector
-import workflow_customer_service
-
+import mock_llmclient
 
 logging.basicConfig(level="DEBUG", format="%(asctime)s - %(levelname)s - %(message)s")
 
-
-TEST_CONFIG = {
-    "module": {
-        "test_module": {
-            "model": "test_model",
-            "template": {"user": "test"},
-            "post_processor": "builtin.parse_json"
-        },
-        "test_module_with_input": {
-            "model": "test_model",
-            "template": {"user": "{{input}}"},
-            "post_processor": "builtin.parse_json"
-        }
-    }
-}
+TEST_CONFIG = aitoolman.load_config_str("""
+[module.test_module_with_input]
+model = "test_model"
+template.user = "{{input}}"
+""")
 
 
-class LLMTaskDefaultModule(LLMTask):
-    module_name = 'test_module_with_input'
-
-
-class TestLLMTask(unittest.IsolatedAsyncioTestCase):
-    """测试LLMTask的基础功能"""
+class TestTaskBasic(unittest.IsolatedAsyncioTestCase):
+    """测试Task的基础功能"""
 
     async def test_task_success(self):
         """测试任务成功执行"""
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        class SimpleTask(aitoolman.Task):
+            async def run(self, x, y):
+                return x + y
 
-        task = LLMTaskDefaultModule(
-            input_data={"input": "a"}
-        )
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        result_task = await app.run(task)
-        self.assertIs(result_task, task)
-        self.assertEqual(task.status, LLMTaskStatus.COMPLETED)
-        self.assertEqual(task.output_data, {"result": "a"})
-        self.assertEqual(len(client.requests), 1)
+        task = SimpleTask({"x": 1, "y": 2}, workflow=app)
+        await app.wait_tasks(task)
+
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 3)
 
     async def test_task_failure(self):
         """测试任务执行失败"""
-        def failure_response(request):
-            resp = default_llm_response(request)
-            resp.finish_reason = FinishReason.error_app.value
-            resp.error_text = "模拟任务失败"
-            return resp
+        def failing_func():
+            raise ValueError("Function failed")
 
-        client = MockLLMClient(failure_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        task = LLMTaskDefaultModule({"input": "a"})
+        task = aitoolman.Task({}, workflow=app)
+        task.set_func(failing_func)
 
-        with self.assertRaises(LLMTaskDependencyError) as context:
-            await app.run(task)
-        self.assertEqual(context.exception.error_tasks, [task])
-        self.assertEqual(task.status, LLMTaskStatus.FAILED)
-        self.assertIn("模拟任务失败", str(context.exception))
-        self.assertEqual(len(client.requests), 1)
+        with self.assertRaises(aitoolman.TaskDependencyError):
+            await app.wait_tasks(task)
 
-    async def test_pre_process_failure(self):
-        """测试前处理阶段失败"""
-        class PreProcessFailedTask(LLMTaskDefaultModule):
-            async def pre_process(self):
-                raise ValueError("前处理失败")
+        self.assertEqual(task.status, aitoolman.TaskStatus.FAILED)
+        self.assertIn("Function failed", str(task.error))
 
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict={})
+    async def test_inherit_task_override_run(self):
+        """测试继承Task并重写run方法"""
 
-        task = PreProcessFailedTask()
+        class CustomTask(aitoolman.Task):
+            def __init__(self, value, workflow):
+                super().__init__()
+                self.input_data = {"value": value}
+                self.workflow = workflow
 
-        with self.assertRaises(LLMTaskDependencyError) as context:
-            await app.run(task)
+            async def run(self, value):
+                return value * 2
 
-        self.assertEqual(task.status, LLMTaskStatus.FAILED)
-        self.assertIn("前处理失败", str(context.exception))
-        self.assertEqual(len(client.requests), 0)  # 没有调用LLM
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-    async def test_post_process_failure(self):
-        """测试后处理阶段失败"""
-        class PostProcessFailedTask(LLMTaskDefaultModule):
-            async def post_process(self):
-                raise ValueError("后处理失败")
+        task = CustomTask(5, workflow=app)
+        await app.wait_tasks(task)
 
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
-
-        task = PostProcessFailedTask(input_data={"input": "a"})
-
-        with self.assertRaises(LLMTaskDependencyError) as context:
-            await app.run(task)
-
-        self.assertEqual(task.status, LLMTaskStatus.FAILED)
-        self.assertIn("后处理失败", str(context.exception))
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 10)
 
 
-class TestLLMWorkflow(unittest.IsolatedAsyncioTestCase):
-    async def test_workflow_dependency_failure(self):
-        """测试调用链失败：依赖项失败导致后续任务失败"""
+class FailingTask(aitoolman.Task):
+    async def run(self):
+        raise ValueError("Dependency failed")
 
-        def failure_response(request):
-            resp = default_llm_response(request)
-            resp.finish_reason = FinishReason.error_app.value
-            resp.error_text = "模拟依赖任务失败"
-            return resp
 
-        client = MockLLMClient(failure_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+class SuccessTask(aitoolman.Task):
+    async def run(self, x):
+        return x * 2
 
-        # 依赖任务
-        class DependentTask(LLMTask):
-            module_name = "test_module_with_input"
 
-        # 根任务
-        class RootTask(LLMTask):
-            module_name = "test_module_with_input"
-            async def post_process(self):
-                # 注意：由于任务在 raise_for_status 阶段就失败了，这里的代码永远不会执行
-                self.next_task = DependentTask(
-                    input_data={"input": "依赖任务"}
-                )
+class SlowTask(aitoolman.Task):
+    async def run(self, sec):
+        await asyncio.sleep(sec)
+        return sec
 
-        start_task = RootTask(
-            input_data={"input": "根任务"}
-        )
 
-        with self.assertRaises(LLMTaskDependencyError) as context:
-            await app.run(start_task)
+class TestTaskDependency(unittest.IsolatedAsyncioTestCase):
+    """测试任务依赖功能"""
 
-        # 根任务失败
-        self.assertEqual(start_task.status, LLMTaskStatus.FAILED)
+    async def test_dependency_failure_wait_final(self):
+        """测试依赖项失败导致后续任务失败"""
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        self.assertIsNone(start_task.next_task)
-        self.assertIn("模拟依赖任务失败", str(context.exception))
-        self.assertEqual(len(client.requests), 1)
+        task_a = FailingTask({}, workflow=app)
+        task_b = SuccessTask({"x": 5}, workflow=app)
 
-    async def test_run_cannot_parallel(self):
-        """测试run方法不能并行执行"""
-        async def slow_response(request: LLMProviderRequest) -> LLMProviderResponse:
-            await asyncio.sleep(0.5)
-            return default_llm_response(request)
+        app.add_task(task_a, task_b)
 
-        client = MockLLMClient(slow_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        with self.assertRaises(aitoolman.TaskDependencyError):
+            await app.wait_tasks(task_b)
 
-        class SimpleTask(LLMTask):
-            module_name = "test_module"
+        self.assertEqual(task_a.status, aitoolman.TaskStatus.FAILED)
+        self.assertEqual(task_b.status, aitoolman.TaskStatus.DEPENDENCY_FAILED)
 
-        # 创建两个任务
-        task1 = SimpleTask(task_id="task1")
-        task2 = SimpleTask(task_id="task2")
+    async def test_dependency_failure_wait_all(self):
+        """测试依赖项失败导致后续任务失败"""
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        # 同时启动两个run
-        coro1 = app.run(task1)
-        coro2 = app.run(task2)
-        with self.assertRaises(RuntimeError):
-            await asyncio.gather(coro1, coro2)
+        task_a = FailingTask({}, workflow=app)
+        task_b = SuccessTask({"x": 5}, workflow=app)
+
+        app.add_task(task_a, task_b)
+
+        with self.assertRaises(aitoolman.TaskDependencyError):
+            await app.wait_tasks(task_a, task_b)
+
+        self.assertEqual(task_a.status, aitoolman.TaskStatus.FAILED)
+        self.assertEqual(task_b.status, aitoolman.TaskStatus.DEPENDENCY_FAILED)
 
     async def test_max_parallel_consumers(self):
         """测试并行consumer个数不超过指定值"""
         max_parallel = 2
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
 
         # 记录consumer数量变化
         consumer_counts = []
         original_start = app._start_consumers
+
         def track_consumers(task_num):
             original_start(task_num)
             consumer_counts.append(len(app._consumers))
+
         app._start_consumers = track_consumers
 
-        # 创建5个并行任务
         tasks = [
-            LLMTaskDefaultModule(
-                workflow=app,
-                task_id=f"task{i}",
-                input_data={"task": i}
-            ) for i in range(5)
+            SlowTask({"sec": 0.2}, workflow=app)
+            for i in range(5)
         ]
 
         await app.wait_tasks(*tasks)
 
         # 检查consumer数量从未超过最大值
         self.assertTrue(all(count <= max_parallel for count in consumer_counts))
-        self.assertTrue(all(t.status == LLMTaskStatus.COMPLETED for t in tasks))
-        self.assertEqual(len(client.requests), 5)
+        self.assertTrue(all(t.status == aitoolman.TaskStatus.COMPLETED for t in tasks))
 
     async def test_no_residual_tasks_after_completion(self):
         """测试任务完成后无残留的task和consumer"""
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        # 创建并执行任务
         tasks = [
-            LLMTaskDefaultModule(
-                task_id=f"task{i}",
-                input_data={'input': i}
-            ) for i in range(3)
+            SuccessTask({"x": i}, workflow=app)
+            for i in range(3)
         ]
         await app.wait_tasks(*tasks)
 
@@ -228,284 +174,83 @@ class TestLLMWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(app._graph), 0)
         self.assertEqual(len(app._reverse_graph), 0)
 
-
-class TestLLMWorkflowSerialUseCase(unittest.IsolatedAsyncioTestCase):
-    async def test_serial_workflow_customer_service(self):
-        """测试串行工作流：客服助手"""
-        client = MockLLMClient(workflow_customer_service.mock_response)
-        app = workflow_customer_service.create_workflow(client, 'test-model')
-
-        channel_collector = MockTextChannelCollector({
-            k: v for k, v in app.channels.items()
-            if k in ('stdout', 'reasoning', 'status')
-        })
-        output_task = asyncio.create_task(channel_collector.start_listening())
-
-        await app.channels['stdin'].write('我的订单现在什么状态？')
-        await app.channels['stdin'].write('15641651')
-        user_question = await app.channels['stdin'].read()
-        app.vars['user_question'] = user_question
-        result_task = await app.run(workflow_customer_service.EntryTask(input_data={
-            'user_question': user_question
-        }))
-        channel_collector.close()
-        await output_task
-
-        print(result_task)
-        self.assertEqual(result_task.status, LLMTaskStatus.COMPLETED)
-        self.assertEqual(result_task.output_data, "你的订单15641651，当前状态是已发货")
-        self.assertEqual(len(client.requests), 3)
-        print(channel_collector.events_read)
-
-
-class TestLLMWorkflowNestedUseCase(unittest.IsolatedAsyncioTestCase):
-    async def test_nested_workflow_file_scan(self):
-        """测试嵌套工作流：逐层扫描文件"""
-        def entry_response(request):
-            tool_call = ToolCall(
-                name="FolderAnalyzeTask",
-                arguments_text='{"folder_path": "root"}',
-                arguments={"folder_path": "root"}
-            )
-            resp = LLMProviderResponse(
-                client_id=request.client_id,
-                context_id=request.context_id,
-                request_id=request.request_id,
-                model_name=request.model_name,
-                stream=False,
-                finish_reason=FinishReason.tool_calls.value,
-                response_tool_calls=[tool_call],
-                response_message={"tool_calls": [tool_call._asdict()]}
-            )
-            return resp
-
-        def folder_response(request):
-            folder_path = request.messages[-1].content.split(":")[1].strip()
-            resp = LLMProviderResponse(
-                client_id=request.client_id,
-                context_id=request.context_id,
-                request_id=request.request_id,
-                model_name=request.model_name,
-                stream=False,
-                finish_reason=FinishReason.stop.value,
-                response_text=json.dumps({
-                    "result": f"{folder_path}包含file1.txt和subfolder"
-                }),
-                response_message={"content": f"{folder_path}包含file1.txt和subfolder"}
-            )
-            return resp
-
-        def file_response(request):
-            file_path = request.messages[-1].content.split(":")[1].strip()
-            resp = LLMProviderResponse(
-                client_id=request.client_id,
-                context_id=request.context_id,
-                request_id=request.request_id,
-                model_name=request.model_name,
-                stream=False,
-                finish_reason=FinishReason.stop.value,
-                response_text=json.dumps({
-                    "result": f"{file_path}内容：测试文件内容"
-                }),
-                response_message={"content": f"{file_path}内容：测试文件内容"}
-            )
-            return resp
-
-        def dynamic_response(request):
-            messages = request.messages
-            if not messages:
-                return default_llm_response(request)
-            last_msg = messages[-1].content
-            if "扫描root文件夹" in last_msg:
-                return entry_response(request)
-            elif "folder:" in last_msg:
-                return folder_response(request)
-            elif "file:" in last_msg:
-                return file_response(request)
-            return default_llm_response(request)
-
-        client = MockLLMClient(dynamic_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=2)
-
-        # 文件分析任务
-        class FileAnalyzeTask(LLMTask):
-            module_name = 'test_module_with_input'
-
-            async def pre_process(self):
-                return LLMModuleRequest(
-                    module_name=self.module_name,
-                    template_params={"input": f"file:{self.input_data['file_path']}"}
-                )
-
-            async def post_process(self):
-                if self.module_result:
-                    self.output_data = self.module_result.data
-
-        # 文件夹分析任务（递归）
-        class FolderAnalyzeTask(LLMTask):
-            module_name = 'test_module_with_input'
-            # input_data
-            # path: str
-            # is_root: bool
-
-            async def pre_process(self):
-                folder_path = self.input_data['folder_path']
-
-                # 模拟生成子任务
-                tasks = []
-                if folder_path == "root":
-                    tasks.append(FileAnalyzeTask(
-                        {"file_path": "root/file1.txt"}
-                    ))
-                    tasks.append(FolderAnalyzeTask(
-                        {"folder_path": "root/subfolder"}
-                    ))
-                elif folder_path == "root/subfolder1":
-                    tasks.append(FileAnalyzeTask(
-                        input_data={"file_path": "root/subfolder1/file2.txt"}
-                    ))
-
-                if tasks:
-                    await self.workflow.wait_tasks(*tasks)
-                    self.output_data["children"] = [t.output_data for t in tasks]
-
-                return LLMModuleRequest(
-                    module_name=self.module_name,
-                    template_params={"input": f"folder:{self.input_data['folder_path']}"}
-                )
-
-            async def post_process(self):
-                if not self.module_result:
-                    return
-
-                folder_path = self.input_data['folder_path']
-                self.output_data = {
-                    "folder": folder_path,
-                    "result": self.module_result.data
-                }
-
-
-        # 入口任务
-        class EntryTask(LLMTask):
-            module_name = "test_module_with_input"
-
-            async def post_process(self):
-                self.on_tool_call_goto(FolderAnalyzeTask=FolderAnalyzeTask)
-
-        fs = {
-            "root": ["file1.txt", "sub1/"],
-            "root/sub1": ["file2.txt", "sub2/"],
-            "root/sub1/sub2": ["file3.txt", "file4.txt"],
-        }
-        # 启动工作流
-        start_task = EntryTask(
-            task_id="entry",
-            input_data={"input": "用户提问：扫描root文件夹"}
-        )
-
-        result_task = await app.run(start_task)
-        self.assertEqual(result_task.status, LLMTaskStatus.COMPLETED)
-        self.assertEqual(result_task.output_data["folder"], "root")
-        self.assertEqual(len(result_task.output_data["children"]), 2)
-        self.assertEqual(len(client.requests), 5)  # entry + root + file1 + subfolder + file2
-
-
-class TestLLMWorkflowEdgeCases(unittest.IsolatedAsyncioTestCase):
-    """测试工作流的边界情况和高级特性"""
-
     async def test_wait_tasks_dependency_graph(self):
         """测试wait_tasks处理显式依赖图：C依赖A和B，A/B完成后C才执行"""
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        class SimpleTask(LLMTask):
-            module_name = "test_module_with_input"
+        class RecorderTask(aitoolman.Task):
+            execution_order = []
 
-        task_a = SimpleTask(workflow=app, task_id="A", input_data={"input": "A"})
-        task_b = SimpleTask(workflow=app, task_id="B", input_data={"input": "B"})
-        task_c = SimpleTask(workflow=app, task_id="C", input_data={"input": "C"})
+            async def run(self):
+                self.execution_order.append(self.task_id)
+                return self.task_id
 
-        # 构建依赖: C -> A, C -> B
-        app.add_task(task_c, task_a)
-        app.add_task(task_c, task_b)
+        task_a = RecorderTask()
+        task_a.task_id = "A"
+        task_b = RecorderTask()
+        task_b.task_id = "B"
+        task_c = RecorderTask()
+        task_c.task_id = "C"
+        task_d = RecorderTask()
+        task_d.task_id = "D"
+
+        app.add_task(task_a, task_b)
+        app.add_task(task_b, task_d)
+        app.add_task(task_c, task_d)
 
         # 等待所有任务完成
-        await app.wait_tasks(task_a, task_b, task_c)
+        await app.wait_tasks(task_d)
 
         # 检查状态
-        self.assertEqual(task_a.status, LLMTaskStatus.COMPLETED)
-        self.assertEqual(task_b.status, LLMTaskStatus.COMPLETED)
-        self.assertEqual(task_c.status, LLMTaskStatus.COMPLETED)
+        self.assertEqual(task_a.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task_b.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task_c.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task_d.status, aitoolman.TaskStatus.COMPLETED)
 
-        # 检查请求顺序：A和B必须在C之前完成（虽然A和B之间可能并行）
-        # 模板内容是 "{{input}}"，所以response_text会包含 "A", "B", "C"
-        # 我们通过client.requests中的response_text来推断顺序
-        req_contents = [r.messages[-1].content for r in client.requests]
-        # 找到 "A", "B", "C" 的索引
-        idx_a = req_contents.index("A")
-        idx_b = req_contents.index("B")
-        idx_c = req_contents.index("C")
-
-        self.assertLess(idx_a, idx_c, "Task A should finish before Task C")
-        self.assertLess(idx_b, idx_c, "Task B should finish before Task C")
+        # 检查执行顺序: A和B应该在C之前完成
+        idx = {k: i for i, k in enumerate(RecorderTask.execution_order)}
+        self.assertLess(idx['A'], idx['B'])
+        self.assertLess(idx['B'], idx['D'])
+        self.assertLess(idx['C'], idx['D'])
 
     async def test_wait_tasks_timeout(self):
         """测试wait_tasks超时机制"""
-        async def slow_response(request):
-            await asyncio.sleep(1.0)
-            return default_llm_response(request)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        client = MockLLMClient(slow_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
-
-        task = LLMTaskDefaultModule(workflow=app, task_id="slow", input_data={})
+        task = SlowTask({"sec": 1.0})
 
         with self.assertRaises(asyncio.TimeoutError):
             await app.wait_tasks(task, timeout=0.1)
 
-        # 任务可能还在运行或失败，这里主要测试wait_tasks抛出异常
-        # 由于超时，wait_tasks不会等待任务完成，任务状态可能是RUNNING或COMPLETED（如果竞态）
-        # 但我们主要关注异常抛出
-
-    async def test_wait_tasks_child_failure(self):
-        """测试wait_tasks中子任务失败导致整体失败及依赖传播"""
-        def fail_response(request):
-            resp = default_llm_response(request)
-            resp.finish_reason = FinishReason.error_app.value
-            resp.error_text = "Child failed"
-            return resp
-
-        client = MockLLMClient(fail_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
-
-        task_a = LLMTaskDefaultModule(workflow=app, task_id="A", input_data={})
-        task_b = LLMTaskDefaultModule(workflow=app, task_id="B", input_data={})
-
-        app.add_task(task_b, task_a)  # B depends on A
-
-        with self.assertRaises(LLMTaskDependencyError):
-            await app.wait_tasks(task_a, task_b)
-
-        self.assertEqual(task_a.status, LLMTaskStatus.FAILED)
-        self.assertEqual(task_b.status, LLMTaskStatus.DEPENDENCY_FAILED)
-
     async def test_task_double_execution_protection(self):
         """测试任务不会被执行两次"""
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        task = LLMTaskDefaultModule(workflow=app, task_id="double", input_data={})
+        class CounterTask(aitoolman.Task):
+            def __init__(self):
+                super().__init__()
+                self.counter = 0
+
+            async def run(self):
+                self.counter += 1
+                return self.counter
+
+        task = CounterTask()
 
         await app.wait_tasks(task)
         await app.wait_tasks(task)
 
-        self.assertEqual(len(client.requests), 1)
-        self.assertEqual(task.status, LLMTaskStatus.COMPLETED)
+        # 应该只执行一次
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.counter, 1)
 
     async def test_wait_tasks_empty_list(self):
         """测试wait_tasks传入空列表"""
-        client = MockLLMClient()
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
         # 不应抛出异常
         await app.wait_tasks()
@@ -513,30 +258,368 @@ class TestLLMWorkflowEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     async def test_complex_dependency_chain_failure(self):
         """测试复杂依赖链中的失败传播：A->B->C，A失败导致B和C都失败"""
-        def fail_response(request):
-            resp = default_llm_response(request)
-            resp.finish_reason = FinishReason.error_app.value
-            resp.error_text = "Root failed"
-            return resp
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        client = MockLLMClient(fail_response)
-        app = LLMWorkflow(client, config_dict=TEST_CONFIG)
+        task_a = FailingTask({}, workflow=app)
+        task_b = SuccessTask({"x": 5}, workflow=app)
+        task_c = SuccessTask({"x": 10}, workflow=app)
 
-        task_a = LLMTaskDefaultModule(task_id="A", input_data={})
-        task_b = LLMTaskDefaultModule(task_id="B", input_data={})
-        task_c = LLMTaskDefaultModule(task_id="C", input_data={})
+        app.add_task(task_a, task_b)  # B depends on A
+        app.add_task(task_b, task_c)  # C depends on B
 
-        app.add_task(task_b, task_a) # B depends on A
-        app.add_task(task_c, task_b) # C depends on B
-
-        with self.assertRaises(LLMTaskDependencyError):
+        with self.assertRaises(aitoolman.TaskDependencyError):
             await app.wait_tasks(task_a, task_b, task_c)
 
-        self.assertEqual(task_a.status, LLMTaskStatus.FAILED)
-        self.assertEqual(task_b.status, LLMTaskStatus.DEPENDENCY_FAILED)
-        self.assertEqual(task_c.status, LLMTaskStatus.DEPENDENCY_FAILED)
-        # 只有A被执行了
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(task_a.status, aitoolman.TaskStatus.FAILED)
+        self.assertEqual(task_b.status, aitoolman.TaskStatus.DEPENDENCY_FAILED)
+        self.assertEqual(task_c.status, aitoolman.TaskStatus.DEPENDENCY_FAILED)
+
+
+class TestLLMTaskToolSupport(unittest.IsolatedAsyncioTestCase):
+    """测试LLMTask的工具调用处理，和使用工具调用的常见用例"""
+
+    async def test_on_tool_call_goto(self):
+        """测试on_tool_call_goto跳转到下一个Task"""
+        client = mock_llmclient.MockLLMClient(lambda req: mock_llmclient.make_simple_response(
+            req, [aitoolman.ToolCall.new("next_task", x=42)]
+        ))
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
+
+        class StartTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                self.on_tool_call_goto(next_task=SuccessTask)
+
+        start_task = StartTask(aitoolman.LLMModuleRequest(
+            module_name="test_module_with_input",
+            template_params={"input": "[start_task]"}
+        ))
+
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertIsInstance(result_task, aitoolman.Task)
+        self.assertEqual(result_task.output_data, 84)
+
+    async def test_run_tool_calls_single(self):
+        """测试run_tool_calls单轮工具调用"""
+        def _response_generator(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+            last_msg = request.messages[-1]
+            if last_msg.role == aitoolman.MessageRole.user.value:
+                return mock_llmclient.make_simple_response(
+                    request, [aitoolman.ToolCall.new("test_tool", x=42)])
+            else:
+                return mock_llmclient.make_tool_call_response(request)
+
+        client = mock_llmclient.MockLLMClient(_response_generator)
+
+        app_prompt = aitoolman.load_config_str("""
+        [module.tool_call_module]
+        model = "test_model"
+        template.user = "[start_task]"
+        post_processor = "builtin.parse_json"
+
+        [module.tool_call_module.tools."test_tool"]
+        type = "function"
+        description = "Tool description"
+        param."x".type = "integer"
+        param."x".description = "x"
+        param."x".required = true
+        """)
+        app = aitoolman.LLMWorkflow(client, config_dict=app_prompt)
+
+        def test_tool(x):
+            return x * 2
+
+        class ToolTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                await self.run_tool_calls(test_tool=test_tool)
+
+        start_task = ToolTask(
+            aitoolman.LLMModuleRequest(module_name="tool_call_module", template_params={}),
+            app
+        )
+
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertIsInstance(result_task, aitoolman.LLMTask)
+        self.assertEqual(result_task.output_data[0]['result'], "84")
+
+    async def test_run_tool_calls_multiple(self):
+        """测试run_tool_calls一次调用多个工具"""
+        def _response_generator(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+            last_msg = request.messages[-1]
+            if last_msg.role == aitoolman.MessageRole.user.value:
+                return mock_llmclient.make_simple_response(request, [
+                aitoolman.ToolCall.new("multiply", x=2, y=3),
+                aitoolman.ToolCall.new("add", a=5, b=7)
+            ])
+            else:
+                return mock_llmclient.make_tool_call_response(request)
+
+        client = mock_llmclient.MockLLMClient(_response_generator)
+
+        app_prompt = aitoolman.load_config_str("""
+        [module.multi_tool_module]
+        model = "test_model"
+        template.user = "[start_task]"
+        post_processor = "builtin.parse_json"
+
+        [module.multi_tool_module.tools."multiply"]
+        type = "function"
+        description = "Multiply two numbers"
+        param."x".type = "integer"
+        param."y".type = "integer"
+        param."x".required = true
+        param."y".required = true
+
+        [module.multi_tool_module.tools."add"]
+        type = "function"
+        description = "Add two numbers"
+        param."a".type = "integer"
+        param."b".type = "integer"
+        param."a".required = true
+        param."b".required = true
+        """)
+        app = aitoolman.LLMWorkflow(client, config_dict=app_prompt)
+
+        def multiply(x, y):
+            return x * y
+
+        def add(a, b):
+            return a + b
+
+        class MultiToolTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                await self.run_tool_calls(multiply=multiply, add=add)
+
+        start_task = MultiToolTask(
+            aitoolman.LLMModuleRequest(module_name="multi_tool_module", template_params={}),
+            app
+        )
+
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertIsInstance(result_task, aitoolman.LLMTask)
+
+        # 验证工具调用结果
+        results = result_task.output_data
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]['arguments'], {'x': 2, 'y': 3})
+        self.assertEqual(results[0]['result'], "6")
+        self.assertEqual(results[1]['arguments'], {'a': 5, 'b': 7})
+        self.assertEqual(results[1]['result'], "12")
+
+
+# 模拟天气工具的实现
+def get_weather(city, date):
+    if city == "北京":
+        return f"{date}{city}的天气是：晴，20-28度"
+    elif city == "上海":
+        return f"{date}{city}的天气是：多云，22-30度"
+    return "未知天气"
+
+
+class TestLLMWorkflowToolUseCase(unittest.IsolatedAsyncioTestCase):
+    """测试LLMWorkflow+LLMTask使用工具调用的常见用例"""
+
+    async def test_tool_call_as_intent_recognition(self):
+        """用例：工具调用作为意图识别，跳转到下一个Task"""
+        def _response_generator(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+            last_msg = request.messages[-1]
+            if last_msg.role == aitoolman.MessageRole.user.value:
+                user_input = last_msg.content
+                if "你好" in user_input:
+                    return mock_llmclient.make_simple_response(request, [aitoolman.ToolCall.new("greet", name="用户")])
+                elif "计算" in user_input:
+                    match = re.search(r'计算(\d+)\+(\d+)', user_input)
+                    if match:
+                        return mock_llmclient.make_simple_response(request, [
+                            aitoolman.ToolCall.new(
+                                "calculate", a=int(match.group(1)), b=int(match.group(2)))
+                        ])
+                return mock_llmclient.make_simple_response(request, [aitoolman.ToolCall.new("unknown")])
+            else:
+                return mock_llmclient.make_tool_call_response(request)
+
+        client = mock_llmclient.MockLLMClient(_response_generator)
+
+        app_prompt = aitoolman.load_config_str("""
+        [module.intent_recognition]
+        model = "test_model"
+        template.user = "{{user_input}}"
+        """)
+        app = aitoolman.LLMWorkflow(client, config_dict=app_prompt)
+
+        # 定义不同意图的Task
+        class GreetTask(aitoolman.Task):
+            async def run(self, name):
+                return f"你好，{name}！"
+
+        class CalculateTask(aitoolman.Task):
+            async def run(self, a, b):
+                return f"结果是：{a+b}"
+
+        class UnknownTask(aitoolman.Task):
+            async def run(self):
+                return "抱歉，我不明白你的意思。"
+
+        # 起始Task：意图识别
+        class IntentTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                self.on_tool_call_goto(
+                    greet=GreetTask,
+                    calculate=CalculateTask,
+                    unknown=UnknownTask
+                )
+
+        # 测试问候意图
+        start_task = IntentTask(
+            aitoolman.LLMModuleRequest(module_name="intent_recognition", template_params={"user_input": "你好"}),
+            app
+        )
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(result_task.output_data, "你好，用户！")
+
+        # 测试计算意图
+        start_task = IntentTask(
+            aitoolman.LLMModuleRequest(module_name="intent_recognition", template_params={"user_input": "计算1+2"}),
+            app
+        )
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(result_task.output_data, "结果是：3")
+
+        # 测试未知意图
+        start_task = IntentTask(
+            aitoolman.LLMModuleRequest(module_name="intent_recognition", template_params={"user_input": "今天吃什么？"}),
+            app
+        )
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(result_task.output_data, "抱歉，我不明白你的意思。")
+
+    async def test_tool_call_pattern_multi_round(self):
+        """
+        用例：经典工具调用模式，多轮调用
+
+        user: 提问->
+        assistant: 调用工具->
+        tool: 工具回复->
+        assistant: 调用工具->
+        tool: 工具回复->
+        assistant: 最终回复
+        """
+        def _response_generator(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+            last_msg = request.messages[-1]
+            if last_msg.role == aitoolman.MessageRole.user.value:
+                return mock_llmclient.make_simple_response(request, [
+                    aitoolman.ToolCall.new("get_weather", city="北京", date="今天"),
+                ])
+            round_num = sum(1 for msg in request.messages if msg.role == aitoolman.MessageRole.assistant.value)
+            if round_num == 1:
+                return mock_llmclient.make_simple_response(request, [
+                    aitoolman.ToolCall.new("get_weather", city="北京", date="明天"),
+                ])
+            return mock_llmclient.make_tool_call_response(request)
+
+        client = mock_llmclient.MockLLMClient(_response_generator)
+
+        app_prompt = aitoolman.load_config_str("""
+        [module.weather_module]
+        model = "test_model"
+        template.user = "{{user_input}}"
+        post_processor = "builtin.parse_json"
+
+        [module.weather_module.tools."get_weather"]
+        type = "function"
+        description = "获取指定城市指定日期的天气"
+        param."city".type = "string"
+        param."date".type = "string"
+        param."city".required = true
+        param."date".required = true
+        """)
+        app = aitoolman.LLMWorkflow(client, config_dict=app_prompt)
+
+        # 定义天气查询Task
+        class WeatherQueryTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                # 如果有工具调用，执行工具调用并继续对话
+                if module_result.status == aitoolman.FinishReason.tool_calls:
+                    await self.run_tool_calls(get_weather=get_weather)
+
+        # 起始Task：用户提问
+        start_task = WeatherQueryTask(aitoolman.LLMModuleRequest(
+            module_name="weather_module",
+            template_params={"user_input": "北京今天的天气怎么样？明天呢？"}
+        ))
+
+        # 运行串行工作流
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertIsInstance(result_task.output_data, list)
+        self.assertEqual(len(result_task.output_data), 2)
+        for i, tool_call in enumerate(result_task.output_data):
+            if i == 2:
+                self.assertEqual(tool_call['arguments']['date'], '明天')
+            self.assertEqual(tool_call['result'], get_weather(**tool_call['arguments']))
+
+    async def test_tool_call_pattern_multiple_tools(self):
+        """
+        用例：经典工具调用模式，一次调用多个工具
+
+        user: 提问->
+        assistant: 调用2个工具->
+        tool: 2个工具回复->
+        assistant: 最终回复
+        """
+        def _response_generator(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+            last_msg = request.messages[-1]
+            if last_msg.role == aitoolman.MessageRole.user.value:
+                return mock_llmclient.make_simple_response(request, [
+                    aitoolman.ToolCall.new("get_weather", city="北京", date="今天"),
+                    aitoolman.ToolCall.new("get_weather", city="上海", date="今天")
+                ])
+            else:
+                return mock_llmclient.make_tool_call_response(request)
+
+        client = mock_llmclient.MockLLMClient(_response_generator)
+
+        app_prompt = aitoolman.load_config_str("""
+        [module.multi_city_weather]
+        model = "test_model"
+        template.user = "{{user_input}}"
+        post_processor = "builtin.parse_json"
+
+        [module.multi_city_weather.tools."get_weather"]
+        type = "function"
+        description = "获取指定城市指定日期的天气"
+        param."city".type = "string"
+        param."date".type = "string"
+        param."city".required = true
+        param."date".required = true
+        """)
+        app = aitoolman.LLMWorkflow(client, config_dict=app_prompt)
+
+        # 定义多城市天气查询Task
+        class MultiCityWeatherTask(aitoolman.LLMTask):
+            async def post_process(self, module_result):
+                if module_result.status == aitoolman.FinishReason.tool_calls:
+                    await self.run_tool_calls(get_weather=get_weather)
+
+        # 起始Task：用户提问
+        start_task = MultiCityWeatherTask(aitoolman.LLMModuleRequest(
+            module_name="multi_city_weather",
+            template_params={"user_input": "北京和上海今天的天气怎么样？"}
+        ))
+
+        # 运行串行工作流
+        result_task = await app.run(start_task)
+        self.assertEqual(result_task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertIsInstance(result_task.output_data, list)
+        self.assertEqual(len(result_task.output_data), 2)
+        for tool_call in result_task.output_data:
+            self.assertEqual(tool_call['result'], get_weather(**tool_call['arguments']))
 
 
 if __name__ == '__main__':

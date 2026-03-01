@@ -178,7 +178,7 @@ class LLMZmqClient(LLMClient):
             error_text=response_data['error_text'],
             prompt_tokens=response_data['prompt_tokens'],
             completion_tokens=response_data['completion_tokens'],
-            response_message=response_data['response_message']
+            response_message=Message.from_dict(response_data['response_message'])
         )
         request.response.set_result(response)
         del self.active_requests[request.request_id]

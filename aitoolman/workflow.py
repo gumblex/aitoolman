@@ -1,6 +1,9 @@
+import abc
 import enum
 import asyncio
+import inspect
 import logging
+import functools
 import contextlib
 import collections
 import dataclasses
@@ -13,8 +16,7 @@ from . import model as _model
 
 logger = logging.getLogger(__name__)
 
-
-class LLMTaskStatus(enum.Enum):
+class TaskStatus(enum.Enum):
     """任务状态枚举"""
     INIT = 0    # 初始化
     WAITING = 1    # 待执行
@@ -29,10 +31,10 @@ class LLMWorkflowError(_model.LLMApplicationError):
     pass
 
 
-class LLMTaskDependencyError(LLMWorkflowError):
+class TaskDependencyError(LLMWorkflowError):
     """依赖的任务执行错误，包含出错的所有任务"""
 
-    def __init__(self, error_tasks: List['LLMTask'], task_chain: List[List['LLMTask']], context_id=None):
+    def __init__(self, error_tasks: List['Task'], task_chain: List[List['Task']], context_id=None):
         self.error_tasks = error_tasks
         self.task_chain = task_chain
         self.first_error = error_tasks[0].error
@@ -66,6 +68,79 @@ class LLMTaskDependencyError(LLMWorkflowError):
         return "\n".join(lines)
 
 
+class Task:
+    """
+    任务基类，执行自定义函数
+    重写 run() 或用 Task.set_func 指定具体函数
+    """
+    input_data: Dict[str, Any]
+    workflow: Optional['LLMWorkflow']
+    task_id: str
+    task_name: str
+    description: str
+    status: TaskStatus
+    status_event: asyncio.Event
+    output_data: Any
+    next_task: Optional['Task']
+    error: Optional[Exception]
+    _func: Optional[Callable]
+
+    def __init__(self,
+        input_data: Optional[Dict[str, Any]] = None,
+        workflow: Optional['LLMWorkflow'] = None
+    ):
+        self.input_data = input_data or {}
+        self.workflow = workflow
+        self.task_id = util.get_id()
+        self.task_name = self.__class__.__name__
+        self.description = ''
+        self.status = TaskStatus.INIT
+        self.status_event = asyncio.Event()
+        self.output_data = None
+        self.next_task = None
+        self.error = None
+        self._func: Optional[Callable] = None
+
+    def __repr__(self):
+        return '%s(input_data=%r, task_id=%r, task_name=%r, status=%s)' % (
+            self.__class__.__name__,
+            self.input_data, self.task_id, self.task_name, self.status
+        )
+
+    def set_func(self, fn: Callable):
+        self._func = fn
+
+    async def start(self):
+        """
+        执行该任务，并设置 output_data
+        用于 LLMWorkflow 内部
+        """
+        if self._func is not None:
+            output_data = self._func(**self.input_data)
+            if inspect.isawaitable(output_data):
+                self.output_data = await output_data
+            else:
+                self.output_data = output_data
+        else:
+            self.output_data = await self.run(**self.input_data)
+
+    async def run(self, **input_data):
+        """
+        用户函数：输入 self.input_data，返回值为 self.output_data
+        """
+        raise NotImplementedError
+
+    def clone(self):
+        new_task = self.__class__()
+        new_task.input_data = self.input_data
+        new_task.workflow = self.workflow
+        new_task.task_id = self.task_id
+        new_task.task_name = self.task_name
+        new_task.description = self.description
+        new_task._func = self._func
+        return new_task
+
+
 class LLMTaskCompleted(Exception):
     """
     提前结束LLMTask，用于 LLMTask.post_process
@@ -73,82 +148,45 @@ class LLMTaskCompleted(Exception):
     pass
 
 
-@dataclasses.dataclass
-class LLMTask:
-    """
-    LLM任务基类，支持自定义前处理和后处理逻辑
-
-    用户可以通过继承此类并重写 pre_process 和 post_process 方法
-    来实现复杂的任务逻辑，如动态生成下一个任务、处理工具调用等
-    """
-    module_name: ClassVar[str] = ''
-
-    # 默认行为：
-    # Dict[str, Any] -> 调用 module_name 作为模板输入
-    # LLMDirectRequest -> 直接输入 LLM
-    # 其他 -> 需要自定义 pre_process
-    input_data: Union[Dict[str, Any], _model.LLMDirectRequest, Any] = None
-
-    task_id: str = dataclasses.field(default_factory=util.get_id)
-    _task_name: str = ''
-    description: str = ''
-
-    workflow: Optional['LLMWorkflow'] = None
+class LLMTask(Task):
+    """LLM任务类"""
+    input_data: Union[_model.LLMModuleRequest, _model.LLMDirectRequest] = None
     module_result: Optional[_model.LLMModuleResult] = None
-    output_data: Any = None
-    next_task: Optional['LLMTask'] = None
-    status: LLMTaskStatus = LLMTaskStatus.INIT
-    status_event: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
-    error: Optional[Exception] = None
 
-    @property
-    def task_name(self):
-        return self._task_name or self.__class__.__name__
+    def __init__(
+            self,
+            input_data: Union[_model.LLMModuleRequest, _model.LLMDirectRequest, None] = None,
+            workflow: Optional['LLMWorkflow'] = None
+    ):
+        super().__init__()
+        self.input_data = input_data
+        self.workflow = workflow
 
-    async def pre_process(self) -> Union[_model.LLMModuleRequest, _model.LLMDirectRequest, None]:
-        """
-        前处理钩子：在调用LLM模块之前执行
-
-        默认实现：
-        - input_data 为 LLMModuleRequest/LLMDirectRequest：直接调用
-        - input_data 为 dict：作为模板参数
-        - 其他：报错
-
-        用户可以重写此方法以实现：
-        - 动态修改输入数据
-        - 添加上下文消息
-        - 添加多媒体内容
-        """
+    async def start(self):
         if isinstance(self.input_data, (_model.LLMModuleRequest, _model.LLMDirectRequest)):
-            return self.input_data
-        if not isinstance(self.input_data, dict):
-            raise ValueError("input_data is not dict")
-        return _model.LLMModuleRequest(
-            module_name=self.module_name,
-            template_params=self.input_data,
-            context_messages=[],
-            media_content=None
-        )
-
-    async def post_process(self):
-        """
-        后处理钩子：在LLM模块返回结果后执行
-
-        默认实现：将 module_result.data 赋值给 output_data
-        用户可以重写此方法以实现：
-        - 解析和验证输出
-        - 根据结果动态生成下一个任务
-        - 处理工具调用
-        - 实现分支逻辑
-        """
+            req = self.input_data
+        else:
+            raise ValueError("input_data is not LLMModuleRequest/LLMDirectRequest")
+        self.module_result = await self.workflow.call(req)
+        self.module_result.raise_for_status()
         if self.module_result:
             self.output_data = self.module_result.data
+            try:
+                await self.post_process(self.module_result)
+            except LLMTaskCompleted:
+                pass
 
-    def on_tool_call_goto(self, **kwargs: Callable[[], 'LLMTask']):
+    async def post_process(self, module_result: _model.LLMModuleResult):
         """
-        用于 post_process，将工具调用转为下一步的 LLMTask
+        后处理钩子：在LLM模块返回结果后执行
+        """
+        pass
+
+    def on_tool_call_goto(self, **kwargs: Callable[[], 'Task']):
+        """
+        用于 post_process，将工具调用转为下一步的 Task
         * 非工具调用，直接返回
-        * 对第一个调用，设置 next_task 为相应 LLMTask，结束当前任务
+        * 对第一个调用，设置 next_task 为相应 Task，结束当前任务
         * 无匹配的调用，报错
         """
         if not self.module_result:
@@ -163,7 +201,7 @@ class LLMTask:
             raise _model.LLMResponseFormatError("tool call not supported: %s" % tool_call)
         next_task = fn()
         next_task.workflow = self.workflow
-        next_task.input_data = next_task.input_data or tool_call.arguments or {}
+        next_task.input_data = tool_call.arguments or {}
         next_task.task_id = tool_call.id
         next_task._task_name = tool_call.name
         self.next_task = next_task
@@ -179,22 +217,9 @@ class LLMTask:
             return
         if not self.module_result.tool_calls:
             raise _model.LLMResponseFormatError("tool call list is empty")
-        context = await self.module_result.run_tool_calls(kwargs)
-        original_req = self.module_result.request
-        req = _model.LLMDirectRequest(
-            model_name=original_req.model_name,
-            messages=context,
-            tools=original_req.tools,
-            options=original_req.options,
-            stream=original_req.stream,
-            output_channel=original_req.output_channel,
-            reasoning_channel=original_req.reasoning_channel
-        )
-        next_task = self.__class__()
-        next_task.workflow = self.workflow
-        next_task._task_name = self.task_name
+        req = await self.module_result.run_tool_calls(kwargs)
+        next_task = self.clone()
         next_task.input_data = req
-        next_task.description = self.description
         self.next_task = next_task
         raise LLMTaskCompleted()
 
@@ -204,7 +229,7 @@ class LLMWorkflow(LLMApplication):
     任务调度器，支持DAG（有向无环图）任务执行
 
     两种运行模式（可结合）：
-    1. 通过 run，在 LLMTask 中设置 next_task，串行执行工作流
+    1. 通过 run，在 Task 中设置 next_task，串行执行工作流
     2. 用 add_task 生成嵌套任务，用 wait_tasks 等待任务完成
     """
 
@@ -232,8 +257,8 @@ class LLMWorkflow(LLMApplication):
 
         # 内部调度状态
         # 跟踪待运行、运行时的任务，运行完成之后清除
-        self._new_tasks: Dict[str, LLMTask] = {}
-        self._queued_tasks: Dict[str, LLMTask] = {}
+        self._new_tasks: Dict[str, Task] = {}
+        self._queued_tasks: Dict[str, Task] = {}
         # task -> 被依赖项 (dependents)
         self._graph: Dict[str, Set[str]] = collections.defaultdict(set)
         # task -> 依赖项 (dependencies)
@@ -244,62 +269,48 @@ class LLMWorkflow(LLMApplication):
         self._consumers: Dict[int, asyncio.Task] = {}
         self.running: bool = False
 
-    def add_task(self, current_task: Optional[LLMTask], dependent_task: LLMTask):
+    def add_task(self, task: Task, next_task: Optional[Task] = None):
         """
-        添加后台任务，不立即执行
-        dependent_task 为 current_task 之前要运行的任务
-        current_task 为 None 时，单独添加 dependent_task
-
-        这个方法设计为在 LLMTask.pre_process 或 post_process 中调用
-        类似 asyncio.create_task，会管理任务依赖和并行度
+        添加后台任务 task，不立即执行
+        task 为 next_task 之前要运行的任务
 
         Args:
-            current_task: 当前正在执行的任务，或为 None
-            dependent_task: 要添加的依赖任务
+            task: 要添加的任务
+            next_task: 要添加的任务之后要执行的任务，或为 None
         """
-        self._new_tasks[dependent_task.task_id] = dependent_task
-        if current_task:
-            self._graph[dependent_task.task_id].add(current_task.task_id)
-            self._reverse_graph[current_task.task_id].add(dependent_task.task_id)
+        self._new_tasks[task.task_id] = task
+        if next_task:
+            self._graph[task.task_id].add(next_task.task_id)
+            self._reverse_graph[next_task.task_id].add(task.task_id)
 
-    async def run_llm_task(self, task: LLMTask):
-        task.status = LLMTaskStatus.RUNNING
+    async def run_task(self, task: Task):
+        task.status = TaskStatus.RUNNING
         task.status_event.clear()
 
         try:
-            req = await task.pre_process()
-            if req is None:
-                task.module_result = None
-            else:
-                task.module_result = await self.call(req)
-                task.module_result.raise_for_status()
-            try:
-                await task.post_process()
-            except LLMTaskCompleted:
-                pass
+            await task.start()
             if task.next_task:
-                self.add_task(None, task.next_task)
-            task.status = LLMTaskStatus.COMPLETED
+                self.add_task(task.next_task, None)
+            task.status = TaskStatus.COMPLETED
             task.status_event.set()
 
             # 检查并调度依赖的任务
             await self._queue_dependents(task)
-        except LLMTaskDependencyError as ex:
+        except TaskDependencyError as ex:
             task.error = ex
-            task.status = LLMTaskStatus.DEPENDENCY_FAILED
+            task.status = TaskStatus.DEPENDENCY_FAILED
             task.status_event.set()
             # 传播错误到依赖的任务
-            await self._fail_dependents(task, ex)
+            self._fail_dependents(task, ex)
         except Exception as ex:
-            logger.exception("Task %s(%s) failed.",
-                             task.task_name, task.task_id)
+            logger.exception("Task failed: %r", task)
             task.error = ex
-            task.status = LLMTaskStatus.FAILED
+            task.status = TaskStatus.FAILED
             task.status_event.set()
             # 传播错误到依赖的任务
-            await self._fail_dependents(task, ex)
+            self._fail_dependents(task, ex)
 
-    async def _queue_dependents(self, task: LLMTask):
+    async def _queue_dependents(self, task: Task):
         """检查并调度依赖于此任务的任务"""
         for dependent_id in self._graph.get(task.task_id, []):
             if dependent_id not in self._queued_tasks:
@@ -307,25 +318,25 @@ class LLMWorkflow(LLMApplication):
             dependent = self._queued_tasks[dependent_id]
             # 检查是否所有依赖都已完成
             if all(
-                dep_id not in self._queued_tasks or
-                self._queued_tasks[dep_id].status == LLMTaskStatus.COMPLETED
+                    dep_id not in self._queued_tasks or
+                    self._queued_tasks[dep_id].status == TaskStatus.COMPLETED
                 for dep_id in self._reverse_graph.get(dependent_id, [])
             ):
-                if dependent.status == LLMTaskStatus.INIT:
+                if dependent.status == TaskStatus.INIT:
                     await self._pending_queue.put(dependent_id)
 
-    async def _fail_dependents(self, task: LLMTask, error: Exception):
+    def _fail_dependents(self, task: Task, error: Exception):
         """将错误传播到所有依赖的任务"""
         for dependent_id in self._graph.get(task.task_id, []):
             if dependent_id not in self._queued_tasks:
                 continue
             dependent = self._queued_tasks[dependent_id]
-            if dependent.status in (LLMTaskStatus.INIT, LLMTaskStatus.WAITING):
-                dependent.status = LLMTaskStatus.DEPENDENCY_FAILED
+            if dependent.status in (TaskStatus.INIT, TaskStatus.WAITING):
+                dependent.status = TaskStatus.DEPENDENCY_FAILED
                 dependent.error = error
                 dependent.status_event.set()
                 # 递归传播
-                await self._fail_dependents(dependent, error)
+                self._fail_dependents(dependent, error)
 
     def _clear_task_by_id(self, task_id: str):
         """清除任务的跟踪状态"""
@@ -357,10 +368,10 @@ class LLMWorkflow(LLMApplication):
                                  consumer_id, task_id)
                     continue
 
-                if task.status not in (LLMTaskStatus.INIT, LLMTaskStatus.WAITING):
+                if task.status not in (TaskStatus.INIT, TaskStatus.WAITING):
                     continue
 
-                await self.run_llm_task(task)
+                await self.run_task(task)
         finally:
             with contextlib.suppress(KeyError):
                 del self._consumers[consumer_id]
@@ -414,8 +425,8 @@ class LLMWorkflow(LLMApplication):
         self._graph.clear()
         self._reverse_graph.clear()
 
-    async def _raise_dependency_error(self, failed_tasks: List[LLMTask]):
-        """Raise LLMTaskDependencyError with proper task chain"""
+    async def _raise_dependency_error(self, failed_tasks: List[Task]):
+        """Raise TaskDependencyError with proper task chain"""
         # Build task chain from dependencies
         task_chain = []
         visited = set()
@@ -439,7 +450,7 @@ class LLMWorkflow(LLMApplication):
 
         build_chain(failed_tasks)
 
-        raise LLMTaskDependencyError(
+        raise TaskDependencyError(
             error_tasks=failed_tasks,
             task_chain=task_chain,
             context_id=self.context_id
@@ -452,12 +463,12 @@ class LLMWorkflow(LLMApplication):
             tasks_to_remove = []
 
             for task_id, task in list(self._queued_tasks.items()):
-                if task.status == LLMTaskStatus.COMPLETED:
+                if task.status == TaskStatus.COMPLETED:
                     # Check if it has any dependents that are not completed
                     has_active_dependents = False
                     for dependent_id in self._graph.get(task_id, []):
                         dependent = self._queued_tasks.get(dependent_id)
-                        if dependent and dependent.status != LLMTaskStatus.COMPLETED:
+                        if dependent and dependent.status != TaskStatus.COMPLETED:
                             has_active_dependents = True
                             break
 
@@ -468,12 +479,9 @@ class LLMWorkflow(LLMApplication):
             for task_id in tasks_to_remove:
                 self._clear_task_by_id(task_id)
 
-    async def wait_tasks(self, *tasks: LLMTask, timeout: Optional[float] = None):
+    async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None):
         """
-        等待指定的任务完成
-
-        这个方法设计为在 LLMTask.pre_process 或 post_process 中调用
-        如果任务不在已有任务列表内则添加
+        等待指定的任务完成，如果任务不在已有任务列表内则添加
 
         Args:
             tasks: 要等待的任务
@@ -485,32 +493,45 @@ class LLMWorkflow(LLMApplication):
         # Register tasks if not already registered
         for task in tasks:
             if task.task_id not in self._new_tasks and task.task_id not in self._queued_tasks:
-                self.add_task(None, task)
+                self.add_task(task, None)
 
         # Check if all tasks are already completed
         all_completed = all(
-            task.status in (LLMTaskStatus.COMPLETED, LLMTaskStatus.FAILED, LLMTaskStatus.DEPENDENCY_FAILED)
+            task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)
             for task in tasks
         )
 
         if all_completed:
-            failed_tasks = [t for t in tasks if t.status in (LLMTaskStatus.FAILED, LLMTaskStatus.DEPENDENCY_FAILED)]
+            failed_tasks = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)]
             if failed_tasks:
                 await self._raise_dependency_error(failed_tasks)
             return
 
+        all_task_ids = set()
+
+        def collect_deps(task_id: str):
+            if task_id in all_task_ids:
+                return
+            all_task_ids.add(task_id)
+            # 递归收集所有上游依赖
+            for dep_id in self._reverse_graph.get(task_id, set()):
+                collect_deps(dep_id)
+
+        for task in tasks:
+            collect_deps(task.task_id)
+
         # Build dependency graph and find ready tasks
         ready_task_ids = []
         async with self._task_lock:
-            # Move tasks from _new_tasks to _queued_tasks
-            for task in tasks:
-                if task.task_id in self._new_tasks:
-                    del self._new_tasks[task.task_id]
-                    self._queued_tasks[task.task_id] = task
+            # 将所有收集到的任务从_new_tasks移到_queued_tasks
+            for task_id in all_task_ids:
+                if task_id in self._new_tasks:
+                    task = self._new_tasks.pop(task_id)
+                    self._queued_tasks[task_id] = task
 
             # Find tasks with no unmet dependencies
             for task_id, task in self._queued_tasks.items():
-                if task.status == LLMTaskStatus.INIT and not self._reverse_graph.get(task_id):
+                if task.status == TaskStatus.INIT and not self._reverse_graph.get(task_id):
                     ready_task_ids.append(task_id)
 
         # Queue ready tasks
@@ -529,14 +550,14 @@ class LLMWorkflow(LLMApplication):
             await asyncio.gather(*wait_coros)
 
         # Check for errors
-        failed_tasks = [t for t in tasks if t.status in (LLMTaskStatus.FAILED, LLMTaskStatus.DEPENDENCY_FAILED)]
+        failed_tasks = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)]
         if failed_tasks:
             await self._raise_dependency_error(failed_tasks)
 
         # Cleanup completed tasks
         await self._cleanup_completed_tasks()
 
-    async def run(self, start_task: LLMTask) -> LLMTask:
+    async def run(self, start_task: Task) -> Task:
         """
         运行工作流，从起始任务开始
 
@@ -544,7 +565,7 @@ class LLMWorkflow(LLMApplication):
             start_task: 起始任务
 
         Raises:
-            LLMTaskDependencyError: 任务失败
+            TaskDependencyError: 任务失败
         """
         # Ensure single instance
         if self.running:
