@@ -5,9 +5,10 @@
 ### 新增
 - 安全：新增 ZeroMQ 接口认证功能，支持通过配置 `zmq_auth_token` 实现客户端认证
 - 新增工作流模块（workflow）
-  - LLMTask：LLM任务基类，包装调用LLM的任务及前后处理逻辑，支持工具调用（Agent）、工具调用作为意图识别
+  - Task：任务基类
+  - LLMTask：包装调用LLM的任务及前后处理逻辑，支持工具调用（Agent）、工具调用作为意图识别
   - LLMWorkflow：任务调度器，支持DAG（有向无环图）拓扑调度、并行任务执行。两种运行模式：
-    1. 通过 run，在 LLMTask 中设置 next_task，串行执行工作流
+    1. 通过 run，在 Task 中设置 next_task，串行执行工作流
     2. 用 add_task 生成嵌套任务，用 wait_tasks 等待任务完成
 - LLMDirectRequest：应用层 LLM 实际请求对象
 - LLMApplication
@@ -27,6 +28,7 @@
 - ZeroMQ 协议优化：新增错误消息类型，优化认证流程与超时处理
 - model 中对象根据实际用途，改为 typing.NamedTuple
 - LLMModuleResult.call 改为 LLMModuleResult.run_tool_calls，改为返回所有上下文
+- LLMFormatStrategy 负责序列化/反序列化 Message 对象
 
 ### 删除
 - 原 LLMModule 实现合并至 LLMApplication，不再有单独一层 LLMModule
