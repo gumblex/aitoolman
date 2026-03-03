@@ -896,7 +896,7 @@ async def main():
         with open("app_modified.py", "w") as f:
             f.write(result.data)
         
-        output_task.close()
+        collector.close()
         await output_task
 
 if __name__ == "__main__":

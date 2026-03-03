@@ -289,25 +289,32 @@ class ChannelCollector(abc.ABC):
                 current_futures = self._pending_futures.copy()
                 done_futures = {}
                 pending_set = set()
-                if self._last_output_channel in current_futures.values():
-                    wait_futures = [
-                        fut for fut, channel_name in current_futures.items()
-                        if channel_name == self._last_output_channel
-                    ]
+                last_channel_futures = []
+                for fut, channel_name in current_futures.items():
+                    if channel_name == self._last_output_channel:
+                        last_channel_futures.append(fut)
+                if last_channel_futures:
                     _done, _pending = await asyncio.wait(
-                        wait_futures,
+                        last_channel_futures,
                         timeout=self.last_channel_timeout,
                         return_when=asyncio.FIRST_COMPLETED  # 有一个完成就返回
                     )
-                    for fut in _done:
-                        done_futures[fut] = current_futures[fut]
-                    for fut in current_futures.keys():
-                        if fut in done_futures:
-                            continue
-                        if fut.done():
-                            done_futures[fut] = current_futures[fut]
-                        else:
-                            pending_set.add(fut)
+                    if _done:
+                        # 上一个通道有数据：优先处理，压制其他通道
+                        for fut, channel_name in current_futures.items():
+                            # 将其他所有任务（无论是否完成）都放回 pending，等待下一轮
+                            # 这样可以确保只要上一个通道持续有数据，就不会被其他通道打断
+                            if channel_name == self._last_output_channel and fut.done():
+                                done_futures[fut] = current_futures[fut]
+                            else:
+                                pending_set.add(fut)
+                    else:
+                        # 超时：上一个通道暂时无数据，允许处理其他通道
+                        for fut in current_futures.keys():
+                            if fut.done():
+                                done_futures[fut] = current_futures[fut]
+                            else:
+                                pending_set.add(fut)
                 else:
                     # 等待任意future完成，或超时（返回已完成和未完成的future分组）
                     _done, _pending = await asyncio.wait(

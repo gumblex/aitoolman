@@ -49,7 +49,7 @@ async def demo_stream_client(client: _client.LLMClient, model_name: str):
         output_task = asyncio.create_task(channel_collector.start_listening())
         response = await app['user_input'](user_input=user_input)
         response.raise_for_status()
-        output_task.close()
+        channel_collector.close()
         await output_task
         logger.debug("Response: %s", response)
 
@@ -140,7 +140,7 @@ def main():
     elif args.subparser_name == 'client':
         run_zmqclient(args.router_endpoint, args.auth_token, args.model_name)
     elif args.subparser_name == 'local':
-        run_localclient(args.router_endpoint, args.model_name)
+        run_localclient(args.config, args.model_name)
     elif args.subparser_name == 'monitor':
         run_monitor(args.pub_endpoint, args.db_path)
 
