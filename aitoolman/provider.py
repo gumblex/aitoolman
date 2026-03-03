@@ -790,7 +790,7 @@ class LLMProviderManager:
             )
         except Exception as e:
             await self._end_request_with_error(
-                request, response, f"{type(e).__name__}: {str(e)}", FinishReason.error_request
+                request, response, f"{type(e).__qualname__}: {str(e)}", FinishReason.error_request
             )
             return
 
@@ -887,7 +887,7 @@ class LLMProviderManager:
         except Exception as e:
             await self._end_request_with_error(
                 request, response,
-                f"{type(e).__name__}: {str(e)}",
+                f"{type(e).__qualname__}: {str(e)}",
                 FinishReason.error_request
             )
 
@@ -990,7 +990,7 @@ class LLMProviderManager:
             self.logger.exception("[%s] API call error", request.request_id)
             await self._end_request_with_error(
                 request, response,
-                f"API call error: {type(e).__name__} - {str(e)}",
+                f"API call error: {type(e).__qualname__} - {str(e)}",
                 FinishReason.error_request
             )
         finally:
