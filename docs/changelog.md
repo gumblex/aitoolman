@@ -7,6 +7,7 @@
 
 ### 修改
 - 修复 ChannelCollector 乱序问题
+- 文档中 LLM 提供商配置文件默认名称改为 `llm_provider.toml`
 
 ## 0.2.0
 

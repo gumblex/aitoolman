@@ -48,7 +48,7 @@ aitoolman is suitable for various scenarios requiring controllable, reliable LLM
 ## Quick Start
 1. `pip install aitoolman`
 2. Refer to the [Developer Documentation](docs/quick_start.en.md) for detailed framework docs, API references, and sample code
-3. Configure LLM provider API keys and model parameters (llm_config.toml)
+3. Configure LLM provider API keys and model parameters (llm_provider.toml)
 4. Write prompt template configurations (app_prompt.toml)
 5. Build application logic using LLMApplication or LLMWorkflow
 

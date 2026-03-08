@@ -1,7 +1,7 @@
 
 # Configuration File Documentation
 
-## 1. Server Configuration (llm_config.toml)
+## 1. Server Configuration (llm_provider.toml)
 
 ### 1.1 [server] Section
 Configure network ports for the ZeroMQ server.
@@ -198,7 +198,7 @@ tools."add_task".param."content".required = true
 import aitoolman
 
 # Load server configuration
-server_config = aitoolman.load_config('llm_config.toml')
+server_config = aitoolman.load_config('llm_provider.toml')
 
 # Load application configuration
 app_config = aitoolman.load_config('app_prompt.toml')
@@ -240,7 +240,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. Notes
 
-1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_config.toml`, or an alias defined in the `[model_alias]` section.
+1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_provider.toml`, or an alias defined in the `[model_alias]` section.
 
 2. **Channel Management**: Three channels are provided by default:
    - `stdin`: Standard input (non-fragmented mode)

@@ -91,7 +91,7 @@ def main():
     subparsers = parser.add_subparsers(dest='subparser_name', required=True, help='Command')
     parser_server = subparsers.add_parser('server')
     parser_server.add_argument(
-        "-c", "--config", type=str, default='llm_config.toml',
+        "-c", "--config", type=str, default='llm_provider.toml',
         help="Path to the TOML config file"
     )
     parser_server.add_argument(
@@ -111,7 +111,7 @@ def main():
     )
     parser_local = subparsers.add_parser('local')
     parser_local.add_argument(
-        "-c", "--config", type=str, default='llm_config.toml',
+        "-c", "--config", type=str, default='llm_provider.toml',
         help="Path to the TOML config file"
     )
     parser_local.add_argument('-m', '--model-name', required=True, help='Model name to use')

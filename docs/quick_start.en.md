@@ -700,7 +700,7 @@ class ResourceManager:
 
 Refer to the [Configuration File Documentation](./config.md) for detailed configuration parameters.
 
-### 7.1 Provider Configuration File (llm_config.toml)
+### 7.1 Provider Configuration File (llm_provider.toml)
 
 ```toml
 # Server Configuration (ZeroMQ Microservice)
@@ -845,7 +845,7 @@ template.user = "{{message}}"
 ```
 my_llm_app/
 ├── config/
-│   ├── llm_config.toml          # API configuration (models, keys)
+│   ├── llm_provider.toml          # API configuration (models, keys)
 │   └── app_prompt.toml          # Prompt configuration (modules, templates)
 ├── src/
 │   ├── __init__.py
@@ -871,7 +871,7 @@ def extract_code(text: str) -> str:
 
 async def main():
     # Load configurations
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
     
     # Create client and application
@@ -934,7 +934,7 @@ async def process_ticket(app_factory, ticket):
 
 async def main():
     # Load configurations
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
     
     # Create application factory
@@ -1008,7 +1008,7 @@ class ReportGenerationTask(aitoolman.Task):
 
 async def main():
     # Initialize workflow
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
@@ -1132,7 +1132,7 @@ class RejectionTask(aitoolman.Task):
 # Run workflow
 async def main():
     # Initialize workflow
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
@@ -1175,10 +1175,10 @@ The aitoolman microservice architecture is suitable for the following scenarios:
 #### 9.3.1 Start Server
 ```bash
 # Use default configuration file
-python3 -m aitoolman server -c llm_config.toml
+python3 -m aitoolman server -c llm_provider.toml
 
 # Enable detailed logging
-python3 -m aitoolman server -c llm_config.toml -v
+python3 -m aitoolman server -c llm_provider.toml -v
 ```
 
 After starting the server, two ZeroMQ endpoints will be bound:

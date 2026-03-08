@@ -704,7 +704,7 @@ class ResourceManager:
 
 详细的配置文件参数参考《[配置文件文档](./config.md)》。
 
-### 7.1 提供商配置文件 (llm_config.toml)
+### 7.1 提供商配置文件 (llm_provider.toml)
 
 ```toml
 # 服务器配置（ZeroMQ 微服务）
@@ -849,7 +849,7 @@ template.user = "{{message}}"
 ```
 my_llm_app/
 ├── config/
-│   ├── llm_config.toml          # API 配置（模型、密钥）
+│   ├── llm_provider.toml          # API 配置（模型、密钥）
 │   └── app_prompt.toml          # 提示词配置（模块、模板）
 ├── src/
 │   ├── __init__.py
@@ -875,7 +875,7 @@ def extract_code(text: str) -> str:
 
 async def main():
     # 加载配置
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     # 创建客户端和应用
@@ -938,7 +938,7 @@ async def process_ticket(app_factory, ticket):
 
 async def main():
     # 加载配置
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     # 创建应用工厂
@@ -1012,7 +1012,7 @@ class ReportGenerationTask(aitoolman.Task):
 
 async def main():
     # 初始化工作流
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
@@ -1136,7 +1136,7 @@ class RejectionTask(aitoolman.Task):
 # 运行工作流
 async def main():
     # 初始化工作流
-    api_config = aitoolman.load_config("config/llm_config.toml")
+    api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
@@ -1179,10 +1179,10 @@ aitoolman 微服务架构适用于以下场景：
 #### 9.3.1 启动服务端
 ```bash
 # 使用默认配置文件
-python3 -m aitoolman server -c llm_config.toml
+python3 -m aitoolman server -c llm_provider.toml
 
 # 启用详细日志
-python3 -m aitoolman server -c llm_config.toml -v
+python3 -m aitoolman server -c llm_provider.toml -v
 ```
 
 服务端启动后，会绑定两个 ZeroMQ 端点：

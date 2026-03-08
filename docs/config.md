@@ -1,6 +1,6 @@
 # 配置文件文档
 
-## 1. 服务器配置 (llm_config.toml)
+## 1. 服务器配置 (llm_provider.toml)
 
 ### 1.1 [server] 部分
 配置 ZeroMQ 服务器的网络端口。
@@ -197,7 +197,7 @@ tools."add_task".param."content".required = true
 import aitoolman
 
 # 加载服务器配置
-server_config = aitoolman.load_config('llm_config.toml')
+server_config = aitoolman.load_config('llm_provider.toml')
 
 # 加载应用配置
 app_config = aitoolman.load_config('app_prompt.toml')
@@ -234,7 +234,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. 注意事项
 
-1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_config.toml` 的 `[api]` 部分的模型名称，也可以是 `[model_alias]` 部分定义的别名。
+1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_provider.toml` 的 `[api]` 部分的模型名称，也可以是 `[model_alias]` 部分定义的别名。
 
 2. **通道管理**：默认提供三个通道：
    - `stdin`：标准输入（非片段模式）

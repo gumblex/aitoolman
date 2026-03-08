@@ -210,13 +210,13 @@ if __name__ == "__main__":
         epilog="""
 使用示例:
 # 基本用法（交互模式）
-python3 llm_code_edit.py -i input.py -o output.py --llm-config llm_config.toml
+python3 llm_code_edit.py -i input.py -o output.py --llm-config llm_provider.toml
 
 # 使用参考文件
-python3 llm_code_edit.py -i input.py -o output.py --reference api.py utils.py --llm-config llm_config.toml
+python3 llm_code_edit.py -i input.py -o output.py --reference api.py utils.py --llm-config llm_provider.toml
 
 # 批处理模式（不实时显示）
-python3 llm_code_edit.py -i input.py -o output.py --batch --model Kimi-K2 --llm-config llm_config.toml
+python3 llm_code_edit.py -i input.py -o output.py --batch --model Kimi-K2 --llm-config llm_provider.toml
 
 # 使用远程ZMQ服务
 python3 llm_code_edit.py -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --auth TOKEN

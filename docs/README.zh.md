@@ -45,7 +45,7 @@ aitoolman 适用于多种需要可控、可靠 LLM 集成的场景：
 ## 快速开始
 1. `pip install aitoolman`
 2. 参考《[开发者文档](quick_start.md)》查看详细框架文档、API说明和示例代码
-3. 配置LLM提供商API密钥和模型参数 (llm_config.toml)
+3. 配置LLM提供商API密钥和模型参数 (llm_provider.toml)
 4. 编写提示词模板配置 (app_prompt.toml)
 5. 通过 LLMApplication 或 LLMWorkflow 构建应用逻辑
 
