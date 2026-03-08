@@ -520,6 +520,8 @@ class TextFragmentChannel(Channel[Optional[str]]):
     文本片段通道
     None 为一整条消息的结束符
     """
+    # 写入一条完整消息
+    async def write_whole_message(self, message: str): ...
     # 读取所有片段，并合并为一条完整消息
     async def read_whole_message(self) -> str: ...
 ```

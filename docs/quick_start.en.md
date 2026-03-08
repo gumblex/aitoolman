@@ -518,6 +518,8 @@ class TextFragmentChannel(Channel[Optional[str]]):
     Text fragment channel
     None indicates end of a complete message
     """
+    # Write a complete message
+    async def write_whole_message(self, message: str): ...
     # Read all fragments and merge into a complete message
     async def read_whole_message(self) -> str: ...
 ```

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+### 新增
+- TextFragmentChannel.write_whole_message
+
+### 修改
+- 修复 ChannelCollector 乱序问题
+
 ## 0.2.0
 
 ### 新增

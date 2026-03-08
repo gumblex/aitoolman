@@ -38,6 +38,10 @@ class TextFragmentChannel(Channel[Optional[str]]):
     None 为一整条消息的结束符
     """
 
+    async def write_whole_message(self, message: str):
+        await self.write(message)
+        await self.write(None)
+
     async def read_whole_message(self) -> str:
         """读取完整消息"""
         buffer = []
