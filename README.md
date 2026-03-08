@@ -55,11 +55,11 @@ aitoolman is suitable for various scenarios requiring controllable, reliable LLM
 ## Best Practices
 
 ### Prompt Design
-Design prompts using the "**Short-Answer Question**" format. The format is:
+Design prompts using the "**Case-study Question**" format in exam papers. The format is:
 
 1.  **Reading Material**: Long text to be analyzed, reference materials, or historical conversation context.
-2.  **Question Background**: Elaborate on the scenario design and main objective; this is the stem of the short-answer question.
-3.  **Task Instructions**: Clearly state what needs to be done; this is a sub-question within the short-answer question.
+2.  **Question Background**: Elaborate on the scenario design and main objective; this is the stem of the question.
+3.  **Task Instructions**: Clearly state what needs to be done; this is a sub-question within the question.
 4.  **Specific Requirements**: List the rules, methods, and key points to follow; this includes question type design, scoring points, and hints (in parentheses).
 5.  Optional **Output Example**: Write directly in the format that should be output.
 
