@@ -29,15 +29,15 @@
 ### 1.3 [api."模型名称"] 部分
 每个模型的具体配置，模型名称可以自定义。
 
-| 参数             | 类型  | 默认值                          | 说明                                     |
-|----------------|-----|------------------------------|----------------------------------------|
-| `url`          | 字符串 | 无（必须配置）                      | API 端点 URL                             |
-| `type`         | 字符串 | 继承自 `[default].api_type`     | API 类型，可选值："openai"、"anthropic"        |
-| `model`        | 字符串 | 无（必须配置）                      | 提供商侧的模型标识符                             |
-| `parallel`     | 整数  | 继承自 `[default].parallel`     | 该模型的并行处理能力                             |
-| `headers`      | 字典  | 继承自 `[default].headers`      | 该模型特定的 HTTP 请求头                        |
-| `timeout`      | 整数  | 继承自 `[default].timeout`      | 该模型特定的超时时间                             |
-| `body_options` | 字典  | 继承自 `[default].body_options` | 该模型默认的请求选项，如 max_tokens, temperature 等 |
+| 参数             | 类型  | 默认值                          | 说明                              |
+|----------------|-----|------------------------------|---------------------------------|
+| `url`          | 字符串 | 无（必须配置）                      | API 端点 URL                      |
+| `type`         | 字符串 | 继承自 `[default].api_type`     | API 类型，可选值："openai"、"anthropic" |
+| `model`        | 字符串 | 无（必须配置）                      | 提供商侧的模型标识符                      |
+| `parallel`     | 整数  | 继承自 `[default].parallel`     | 该模型的并行处理能力                      |
+| `headers`      | 字典  | 继承自 `[default].headers`      | 该模型特定的 HTTP 请求头                 |
+| `timeout`      | 整数  | 继承自 `[default].timeout`      | 该模型特定的超时时间                      |
+| `body_options` | 字典  | 继承自 `[default].body_options` | 该模型默认的请求选项，覆盖 default 中的所有选项    |
 
 ### 1.4 [model_alias] 部分
 模型别名配置，用于简化模型名称的使用，方便在应用配置中使用更友好的名称。

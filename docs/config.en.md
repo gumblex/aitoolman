@@ -30,15 +30,15 @@ Default configuration inherited by all model configurations.
 ### 1.3 [api."Model Name"] Section
 Specific configuration for each model, model names can be customized.
 
-| Parameter         | Type    | Default Value                          | Description                                                                 |
-|-------------------|---------|----------------------------------------|-----------------------------------------------------------------------------|
-| `url`             | String  | None (Required)                        | API endpoint URL                                                            |
-| `type`            | String  | Inherited from `[default].api_type`    | API type, available options: "openai", "anthropic"                          |
-| `model`           | String  | None (Required)                        | Model identifier on the provider's side                                     |
-| `parallel`        | Integer | Inherited from `[default].parallel`    | Parallel processing capacity for this model                                  |
-| `headers`         | Dict    | Inherited from `[default].headers`     | Model-specific HTTP request headers                                         |
-| `timeout`         | Integer | Inherited from `[default].timeout`     | Model-specific timeout duration                                             |
-| `body_options`    | Dict    | Inherited from `[default].body_options` | Default request options for this model, such as max_tokens, temperature, etc. |
+| Parameter         | Type    | Default Value                          | Description                                                                           |
+|-------------------|---------|----------------------------------------|---------------------------------------------------------------------------------------|
+| `url`             | String  | None (Required)                        | API endpoint URL                                                                      |
+| `type`            | String  | Inherited from `[default].api_type`    | API type, available options: "openai", "anthropic"                                    |
+| `model`           | String  | None (Required)                        | Model identifier on the provider's side                                               |
+| `parallel`        | Integer | Inherited from `[default].parallel`    | Parallel processing capacity for this model                                           |
+| `headers`         | Dict    | Inherited from `[default].headers`     | Model-specific HTTP request headers                                                   |
+| `timeout`         | Integer | Inherited from `[default].timeout`     | Model-specific timeout duration                                                       |
+| `body_options`    | Dict    | Inherited from `[default].body_options` | Default request options for this model, overrides all options in `[default]`. |
 
 ### 1.4 [model_alias] Section
 Model alias configuration to simplify model name usage and enable friendly names in application configurations.

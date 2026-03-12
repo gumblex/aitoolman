@@ -253,7 +253,7 @@ class LLMApplication:
             stream=(module_request.stream if module_request.stream is not None else config.stream),
             output_channel=(module_request.output_channel if module_request.output_channel is not None else config.output_channel),
             reasoning_channel=(module_request.reasoning_channel if module_request.reasoning_channel is not None else config.reasoning_channel),
-            post_processor=config.post_processor,
+            post_processor=(module_request.post_processor if module_request.post_processor is not None else config.post_processor),
         )
 
     async def _send_request(self, direct_request: LLMDirectRequest) -> LLMModuleResult:
@@ -283,14 +283,17 @@ class LLMApplication:
 
     async def _post_process(
             self, result: LLMModuleResult,
-            post_processor_name: Optional[str],
+            post_processor: Union[str, Callable[[str], Any], None],
             request: Union[LLMDirectRequest, LLMModuleRequest]
     ):
         if result.status == FinishReason.stop:
-            if post_processor_name:
-                post_processor = self.processors[post_processor_name]
+            if post_processor is not None:
+                if isinstance(post_processor, str):
+                    post_processor_fn = self.processors[post_processor]
+                else:
+                    post_processor_fn = post_processor
                 try:
-                    data = post_processor(result.response_text)
+                    data = post_processor_fn(result.response_text)
                     if inspect.isawaitable(data):
                         result.data = await data
                     else:

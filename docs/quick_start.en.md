@@ -108,7 +108,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
-    post_processor: Optional[str] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
 `LLMModuleRequest`: Sends requests based on configured template modules, automatically renders prompts, loads preset tool and model configurations, and allows overriding default configurations.
@@ -128,6 +128,7 @@ class LLMModuleRequest(typing.NamedTuple):
     stream: Optional[bool] = None
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
 `LLMModuleResult`: Unified encapsulation of all results returned by LLM, including raw responses, processed text, tool calls, status information, etc.

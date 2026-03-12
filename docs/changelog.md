@@ -4,9 +4,13 @@
 
 ### 新增
 - TextFragmentChannel.write_whole_message
+- LLMModuleRequest.post_processor
 
 ### 修改
+- 配置文件：api.name.body_options 覆盖 default.body_options 所有选项
+- LLMDirectRequest/LLMModuleRequest.post_processor 支持直接传入（同步/异步）函数
 - 修复 ChannelCollector 乱序问题
+- 提高 API 兼容性
 - 文档中 LLM 提供商配置文件默认名称改为 `llm_provider.toml`
 
 ## 0.2.0

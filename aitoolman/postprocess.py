@@ -10,7 +10,7 @@ def parse_json(s):
     return json_repair.loads(s, skip_json_loads=True)
 
 
-def get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]:
+def get_xml_tag_content(s: str, root: str, with_tag: bool = False, cdata: bool = False) -> Optional[str]:
     """
     从LLM输出的文本中找到 <root> 标签内的内容，忽略属性和一切其他XML格式。
 
@@ -18,11 +18,14 @@ def get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[s
         s: 包含XML的文本字符串
         root: 期望的XML根标签名
         with_tag: 是否包含根标签
+        cdata: 是否识别 <![CDATA[...]]> 标签
 
     Returns:
         解析后的文本
     """
     start_pattern = rf'<{root}(\s+[^>]*)?>'
+    if cdata:
+        start_pattern += r'<!\[CDATA\['
     start_match = re.search(start_pattern, s, re.DOTALL)
 
     if not start_match:
@@ -33,6 +36,8 @@ def get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[s
 
     # 从字符串末尾向前搜索结束标签
     end_tag = f'</{root}>'
+    if cdata:
+        end_tag = ']]>' + end_tag
     end_pos = s.rfind(end_tag)
     # including end_pos == -1
     if end_pos < start_tag_end:
@@ -42,13 +47,14 @@ def get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[s
     return s[start_pos:end_pos]
 
 
-def parse_xml(s: str, root: str) -> Optional[Dict]:
+def parse_xml(s: str, root: str, force_list=None) -> Optional[Dict]:
     """
     从LLM输出的文本中解析XML
 
     Args:
         s: 包含XML的文本字符串
         root: 期望的XML根标签名
+        force_list: 用于 xmltodict，将标签作为列表
 
     Returns:
         解析后的字典，如果无法解析则返回None
@@ -70,7 +76,8 @@ def parse_xml(s: str, root: str) -> Optional[Dict]:
         result = xmltodict.parse(
             fixed_xml,
             process_namespaces=False,
-            disable_entities=True
+            disable_entities=True,
+            force_list=force_list
         )
 
         return result

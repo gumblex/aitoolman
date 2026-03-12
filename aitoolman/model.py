@@ -326,7 +326,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
-    post_processor: Optional[str] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 
 
 class LLMModuleRequest(typing.NamedTuple):
@@ -343,6 +343,7 @@ class LLMModuleRequest(typing.NamedTuple):
     stream: Optional[bool] = None
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 
 
 @dataclass
@@ -376,7 +377,7 @@ class LLMModuleResult:
             model_name=response.model_name,
             module_name=None,
             request=request,
-            post_processor=request.post_processor,
+            post_processor=(str(request.post_processor) if request.post_processor is not None else None),
             # 原始响应字段直接映射
             response_text=response.response_text,
             response_reasoning=response.response_reasoning,

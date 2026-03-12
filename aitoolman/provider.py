@@ -341,8 +341,8 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             for key, value in fn_delta.items():
                 fn_item[key] = fn_item.get(key, '') + value
 
-        content_delta = delta.get("content", "")
-        reasoning_delta = delta.get("reasoning_content", "")
+        content_delta = delta.get("content") or ''
+        reasoning_delta = delta.get("reasoning_content") or ''
 
         if content_delta:
             self.stream_content_buffer += content_delta
@@ -647,19 +647,19 @@ class AnthropicFormat(LLMFormatStrategy):
             delta_type = delta.get("type")
 
             if delta_type == "text_delta":
-                text = delta.get("text", "")
+                text = delta.get("text") or ''
                 delta_text = text
                 self.stream_content_buffer += text
 
             elif delta_type == "thinking_delta":
-                thinking = delta.get("thinking", "")
+                thinking = delta.get("thinking") or ''
                 delta_reasoning = thinking
                 self.stream_reasoning_buffer += thinking
 
             elif delta_type == "input_json_delta":
                 # Update current tool call's input
                 if self.current_tool_index >= 0 and self.stream_tool_buffers:
-                    partial_json = delta.get("partial_json", "")
+                    partial_json = delta.get("partial_json") or ''
                     current_tool = self.stream_tool_buffers[
                         self.current_tool_index]
                     # Accumulate partial JSON (simplified approach)
@@ -789,6 +789,7 @@ class LLMProviderManager:
                 timeout=model_config.get("timeout", self.timeout)
             )
         except Exception as e:
+            logger.warning("_handle_batch_request error.", exc_info=True)
             await self._end_request_with_error(
                 request, response, f"{type(e).__qualname__}: {str(e)}", FinishReason.error_request
             )
@@ -844,6 +845,7 @@ class LLMProviderManager:
                     if request.is_cancelled:
                         break
                     event = format_strategy.parse_stream_event(response, sse_event)
+                    # logger.debug("Event: %s", event)
 
                     # 记录首次响应时间（TTFT）
                     if not first_token_received and (event.content or event.reasoning):
@@ -885,6 +887,7 @@ class LLMProviderManager:
                 await request.output_channel.write(None)
 
         except Exception as e:
+            logger.warning("_handle_stream_request error.", exc_info=True)
             await self._end_request_with_error(
                 request, response,
                 f"{type(e).__qualname__}: {str(e)}",
@@ -917,11 +920,8 @@ class LLMProviderManager:
             self.logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
             return
 
-        body_options = self.default_config.get('body_options')
-        if body_options:
-            model_options = body_options.copy()
-            model_options.update(model_config.get('body_options', {}))
-            model_config['body_options'] = model_options
+        if model_config.get('body_options') is None:
+            model_config['body_options'] = self.default_config.get('body_options') or {}
 
         format_strategy = self.format_strategies[api_type](model_config)
 

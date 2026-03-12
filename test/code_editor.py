@@ -13,6 +13,7 @@ from pathlib import Path
 import aitoolman
 import aitoolman.cli
 import aitoolman.zmqclient
+import aitoolman.postprocess
 
 # 日志配置
 logging.basicConfig(
@@ -30,9 +31,9 @@ def extract_code_block(text: str) -> str:
     从LLM输出中提取 <output></output> 包围的代码块
     如果没有找到，返回原始文本（可能LLM直接输出了代码）
     """
-    match = re.search(r'<output><!\[CDATA\[(.*)]]></output>', text, re.DOTALL)
-    if match:
-        return match.group(1)
+    result = aitoolman.postprocess.get_xml_tag_content(text, 'output', with_tag=False, cdata=True)
+    if result:
+        return result
     # 如果没有找到标签，可能LLM直接输出了代码
     logger.warning("未找到 <output> 标签，返回原始文本")
     return text
@@ -90,7 +91,8 @@ async def process_single_file(
         output: str,
         input_language: str,
         batch_mode: bool,
-        use_system: bool = True
+        use_system: bool = True,
+        no_input: bool = False
 ) -> None:
     """处理单个文件"""
     logger.info(f"使用模型: {model_name}")
@@ -109,12 +111,13 @@ async def process_single_file(
         })
 
     language = input_language or ''
+    input_content = ''
     if input_file:
         with open(input_file, 'r', encoding='utf-8') as f:
             input_content = f.read()
         if not input_language:
             language = detect_file_language(input_file)
-    else:
+    elif not no_input:
         input_content = read_user_input("请输入原始代码")
 
     user_instruction = None
@@ -199,7 +202,8 @@ async def main(args):
             output=args.output,
             input_language=args.language,
             batch_mode=args.batch,
-            use_system=(not args.no_system)
+            use_system=(not args.no_system),
+            no_input=args.no_input
         )
 
 
@@ -263,6 +267,12 @@ python3 llm_code_edit.py -i input.py -o output.py --zmq-endpoint tcp://localhost
         "--no-system",
         action="store_true",
         help="不使用系统提示词"
+    )
+
+    parser.add_argument(
+        "--no-input",
+        action="store_true",
+        help="无输入文件"
     )
 
     parser.add_argument(

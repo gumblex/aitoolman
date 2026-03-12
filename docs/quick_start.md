@@ -108,7 +108,7 @@ class LLMDirectRequest(typing.NamedTuple):
     stream: bool = False
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
-    post_processor: Optional[str] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
 `LLMModuleRequest`: 基于配置的模板模块发送请求，自动渲染提示词、加载预设的工具和模型配置，可覆盖默认配置。
@@ -128,6 +128,7 @@ class LLMModuleRequest(typing.NamedTuple):
     stream: Optional[bool] = None
     output_channel: Union[str, TextFragmentChannel, None] = None
     reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
 `LLMModuleResult`: 统一封装LLM返回的所有结果，包含原始响应、处理后的文本、工具调用、状态信息等。

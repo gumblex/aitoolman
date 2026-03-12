@@ -270,6 +270,21 @@ class TestGetXmlTagContent(unittest.TestCase):
         result = get_xml_tag_content(text, "item", with_tag=True)
         self.assertEqual(result, "<item class='product featured' price='99.99'>商品</item>")
 
+    def test_cdata_tag(self):
+        """测试CDATA"""
+        text = "前置<file><![CDATA[文件内容]]></file>后置"
+        result = get_xml_tag_content(text, "file", cdata=True)
+        self.assertEqual(result, "文件内容")
+        text = "前置<file><![CDATA[<file><![CDATA[文件内容]]></file>]]></file>后置"
+        result = get_xml_tag_content(text, "file", cdata=True)
+        self.assertEqual(result, "<file><![CDATA[文件内容]]></file>")
+        text = "前置<file><![CDATA[文件内容"
+        result = get_xml_tag_content(text, "file", cdata=True)
+        self.assertEqual(result, "文件内容")
+        text = "文件内容"
+        result = get_xml_tag_content(text, "file", cdata=True)
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     # 运行所有测试

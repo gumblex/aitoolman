@@ -1,12 +1,9 @@
-import abc
 import enum
 import asyncio
 import inspect
 import logging
-import functools
 import contextlib
 import collections
-import dataclasses
 from typing import Any, Dict, List, Optional, Set, Callable, Union, ClassVar
 
 from .app import LLMApplication
@@ -278,6 +275,7 @@ class LLMWorkflow(LLMApplication):
             task: 要添加的任务
             next_task: 要添加的任务之后要执行的任务，或为 None
         """
+        task.workflow = self
         self._new_tasks[task.task_id] = task
         if next_task:
             self._graph[task.task_id].add(next_task.task_id)
