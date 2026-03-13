@@ -129,7 +129,7 @@ class Message(typing.NamedTuple):
     """给LLM发送的消息"""
     role: Optional[str] = None
     content: Optional[str] = None
-    media_content: Optional[MediaContent] = None
+    media_content: Optional[List[MediaContent]] = None
     reasoning_content: Optional[str] = None
     tool_call_id: Optional[str] = None
     # 跟提供商有关的原始值，忽略所有上述字段
@@ -140,7 +140,7 @@ class Message(typing.NamedTuple):
             cls,
             content: Union[str, Dict],
             role: Optional[str] = MessageRole.user.value,
-            media_content: Optional[MediaContent] = None
+            media_content: Optional[List[MediaContent]] = None
     ):
         if isinstance(content, dict):
             return cls(raw_value=content)
@@ -155,7 +155,7 @@ class Message(typing.NamedTuple):
         return {
             "role": self.role,
             "content": self.content,
-            "media_content": self.media_content.to_dict() if self.media_content else None,
+            "media_content": [m.to_dict() for m in self.media_content] if self.media_content else None,
             "reasoning_content": self.reasoning_content,
             "tool_call_id": self.tool_call_id,
             "raw_value": self.raw_value
@@ -168,7 +168,7 @@ class Message(typing.NamedTuple):
             role=data.get("role"),
             content=data.get("content"),
             media_content=(
-                MediaContent.from_dict(data["media_content"])
+                [MediaContent.from_dict(m) for m in data["media_content"]]
                 if data.get("media_content") else None
             ),
             reasoning_content=data.get("reasoning_content"),
@@ -335,7 +335,7 @@ class LLMModuleRequest(typing.NamedTuple):
     template_params: Dict[str, Any]
     model_name: Optional[str] = None
     context_messages: List[Message] = []
-    media_content: Optional[MediaContent] = None
+    media_content: Optional[List[MediaContent]] = None
 
     # 覆盖原始配置
     tools: Optional[Dict[str, Dict[str, Any]]] = None

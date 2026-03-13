@@ -168,7 +168,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
         result: Dict[str, Any] = {"role": message.role}
 
-        if message.media_content is not None:
+        if message.media_content:
             # 多媒体内容
             content_list = []
 
@@ -179,40 +179,41 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                     "text": message.content
                 })
 
-            if message.media_content.raw_value:
-                content_list.append(message.media_content.raw_value)
-            else:
-                # 添加多媒体部分
-                media_item = {}
-                # 确定URL或数据
-                url = None
-                if message.media_content.url:
-                    url = message.media_content.url
-                elif message.media_content.data and message.media_content.mime_type:
-                    # 生成data URL
-                    url = util.generate_data_url(
-                        message.media_content.data,
-                        message.media_content.mime_type
-                    )
-                elif message.media_content.filename:
-                    # 从文件读取并生成data URL
-                    mime_type = util.get_mime_type(message.media_content.filename)
-                    with open(message.media_content.filename, 'rb') as f:
-                        data = f.read()
-                    url = util.generate_data_url(data, mime_type)
-                if not url:
-                    raise ValueError("No media content")
+            for media in message.media_content:
+                if media.raw_value:
+                    content_list.append(media.raw_value)
+                else:
+                    # 添加多媒体部分
+                    media_item = {}
+                    # 确定URL或数据
+                    url = None
+                    if media.url:
+                        url = media.url
+                    elif media.data and media.mime_type:
+                        # 生成data URL
+                        url = util.generate_data_url(
+                            media.data,
+                            media.mime_type
+                        )
+                    elif media.filename:
+                        # 从文件读取并生成data URL
+                        mime_type = util.get_mime_type(media.filename)
+                        with open(media.filename, 'rb') as f:
+                            data = f.read()
+                        url = util.generate_data_url(data, mime_type)
+                    if not url:
+                        raise ValueError("No media content")
 
-                # 根据媒体类型构建不同的结构
-                if message.media_content.media_type in ("image", "video"):
-                    url_type = message.media_content.media_type + "_url"
-                    media_item["type"] = url_type
-                    image_url_obj = {"url": url}
-                    if message.media_content.options:
-                        image_url_obj.update(message.media_content.options)
-                    media_item[url_type] = image_url_obj
+                    # 根据媒体类型构建不同的结构
+                    if media.media_type in ("image", "video"):
+                        url_type = media.media_type + "_url"
+                        media_item["type"] = url_type
+                        image_url_obj = {"url": url}
+                        if media.options:
+                            image_url_obj.update(media.options)
+                        media_item[url_type] = image_url_obj
 
-                content_list.append(media_item)
+                    content_list.append(media_item)
             result["content"] = content_list
         elif message.content is not None:
             result["content"] = message.content
@@ -440,24 +441,24 @@ class AnthropicFormat(LLMFormatStrategy):
             })
 
         # Add image content (base64 data URLs only)
-        if message.media_content:
+        for media in (message.media_content or ()):
             url = None
-            if message.media_content.url:
-                url = message.media_content.url
-            elif message.media_content.data and message.media_content.mime_type:
+            if media.url:
+                url = media.url
+            elif media.data and media.mime_type:
                 url = util.generate_data_url(
-                    message.media_content.data,
-                    message.media_content.mime_type
+                    media.data,
+                    media.mime_type
                 )
-            elif message.media_content.filename:
-                mime_type = util.get_mime_type(message.media_content.filename)
-                with open(message.media_content.filename, 'rb') as f:
+            elif media.filename:
+                mime_type = util.get_mime_type(media.filename)
+                with open(media.filename, 'rb') as f:
                     data = f.read()
                 url = util.generate_data_url(data, mime_type)
 
             if url and url.startswith("data:"):
                 base64_data = url.split(",", 1)[1] if "," in url else url
-                media_type = message.media_content.mime_type or "image/jpeg"
+                media_type = media.mime_type or "image/jpeg"
 
                 content_blocks.append({
                     "type": "image",

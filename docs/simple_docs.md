@@ -49,7 +49,7 @@ class Message(typing.NamedTuple):
     """发送给 LLM 的消息"""
     role: Optional[str] = None                # 角色：system/user/assistant/tool
     content: Optional[str] = None             # 文本内容
-    media_content: Optional[MediaContent] = None  # 多媒体内容
+    media_content: Optional[List[MediaContent]] = None  # 多媒体内容
     reasoning_content: Optional[str] = None   # assistant 的推理内容
     tool_call_id: Optional[str] = None        # 工具调用 ID（用于 tool 角色）
     raw_value: Optional[Dict] = None          # 提供商原始消息（忽略以上所有字段）
@@ -71,7 +71,7 @@ class LLMModuleRequest(typing.NamedTuple):
     template_params: Dict[str, Any]     # 模板参数
     model_name: Optional[str] = None    # 覆盖模块默认模型
     context_messages: List[Message] = []  # 上下文消息
-    media_content: Optional[MediaContent] = None  # 多媒体内容
+    media_content: Optional[List[MediaContent]] = None  # 多媒体内容
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: Optional[bool] = None

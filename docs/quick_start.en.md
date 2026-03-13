@@ -57,7 +57,7 @@ class Message(typing.NamedTuple):
     """Message sent to LLM"""
     role: Optional[str] = None                # Role: system/user/assistant/tool
     content: Optional[str] = None             # Text content
-    media_content: Optional[MediaContent] = None  # Multimedia content
+    media_content: Optional[List[MediaContent]] = None  # Multimedia content
     reasoning_content: Optional[str] = None   # Assistant's reasoning content
     tool_call_id: Optional[str] = None        # Tool call ID (for tool role)
     raw_value: Optional[Dict] = None          # Provider's raw message (ignores all above fields)
@@ -120,7 +120,7 @@ class LLMModuleRequest(typing.NamedTuple):
     template_params: Dict[str, Any]     # Template parameters
     model_name: Optional[str] = None    # Override module's default model
     context_messages: List[Message] = []  # Context messages
-    media_content: Optional[MediaContent] = None  # Multimedia content
+    media_content: Optional[List[MediaContent]] = None  # Multimedia content
 
     # Override original configuration
     tools: Optional[Dict[str, Dict[str, Any]]] = None

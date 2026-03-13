@@ -84,7 +84,7 @@ class _LLMModule(NamedTuple):
             self, *,
             _model_name: Optional[str] = None,
             _context_messages: Optional[List[Message]] = None,
-            _media_content: Optional[MediaContent] = None,
+            _media_content: Optional[List[MediaContent]] = None,
             **kwargs
     ) -> LLMModuleResult:
         return await self.app.call(LLMModuleRequest(

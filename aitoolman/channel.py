@@ -367,7 +367,7 @@ class ChannelCollector(abc.ABC):
 
 class DefaultTextChannelCollector(ChannelCollector):
     async def on_channel_start(self, channel_name: str):
-        print('[%s]' % channel_name)
+        print('===== %s =====' % channel_name)
 
     async def on_channel_read(self, channel_name: str, message):
         if message is None:

@@ -8,6 +8,8 @@
 
 ### 修改
 - 配置文件：api.name.body_options 覆盖 default.body_options 所有选项
+- 示例客户端（python -maitoolman client）参数修改
+- Message.media_content 改为传入 `Optional[List[MediaContent]]`
 - LLMDirectRequest/LLMModuleRequest.post_processor 支持直接传入（同步/异步）函数
 - 修复 ChannelCollector 乱序问题
 - 提高 API 兼容性
