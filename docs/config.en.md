@@ -45,9 +45,9 @@ Model alias configuration to simplify model name usage and enable friendly names
 
 | Parameter | Type    | Default Value | Description                                                                 |
 |-----------|---------|---------------|-----------------------------------------------------------------------------|
-| `Alias`   | String  | None          | Maps to the actual model name (must have corresponding configuration in [api] section) |
+| (Alias)   | String  | None          | Maps to the actual model name (must have corresponding configuration in [api] section) |
 
-### Configuration Example
+### 1.5 Configuration Example
 ```toml
 [server]
 zmq_router_rpc = "tcp://*:5555"
@@ -120,7 +120,14 @@ Global templates, can be rendered using `LLMApplication.render_template`.
 "Template2" = "Template content {{text2}}"
 ```
 
-### 2.4 Template Syntax
+### 2.4 [model_alias] Section
+Application-layer model alias configuration, which is used for flexible configuration of specific models.
+
+| Parameter | Type   | Default Value | Description                   |
+|-----------|--------|---------------|-------------------------------|
+| (Alias)   | String | None          | Maps to the actual model name |
+
+### 2.5 Template Syntax
 Templates use Jinja2 syntax, supporting variable substitution and basic control structures.
 
 **Available Variables:**
@@ -133,7 +140,7 @@ Article Title: {{title}}
 Article Content: <article>{{content}}</article>
 ```
 
-### 2.5 Tool Call Configuration Format
+### 2.6 Tool Call Configuration Format
 Tool configuration uses nested TOML structure:
 
 ```toml
@@ -146,7 +153,7 @@ tools."Tool Name".param."Parameter Name".description = "Parameter description"
 tools."Tool Name".param."Parameter Name".required = true   # Whether the parameter is required
 ```
 
-### Configuration Example
+### 2.7 Configuration Example
 ```toml
 [module_default]
 model = "Fast-Model"  # Using model alias

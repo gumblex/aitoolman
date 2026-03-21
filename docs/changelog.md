@@ -5,6 +5,7 @@
 ### 新增
 - TextFragmentChannel.write_whole_message
 - LLMModuleRequest.post_processor
+- `app_prompt.toml` 支持应用层的模型别名
 
 ### 修改
 - 配置文件：api.name.body_options 覆盖 default.body_options 所有选项

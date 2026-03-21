@@ -122,6 +122,9 @@ class LLMApplication:
         self.config.setdefault('template', {})
         self.config.setdefault('tools', {})
 
+        # 加载应用层模型别名配置
+        self.model_alias: Dict[str, str] = self.config.get('model_alias', {})
+
         # 加载全局工具
         self.global_tools = self.config.get('tools', {})
 
@@ -268,8 +271,11 @@ class LLMApplication:
             if isinstance(direct_request.reasoning_channel, str)
             else direct_request.reasoning_channel
         )
+        model_name = direct_request.model_name
+        if model_name in self.model_alias:
+            model_name = self.model_alias[model_name]
         request = await self.client.request(
-            model_name=direct_request.model_name,
+            model_name=model_name,
             messages=direct_request.messages,
             tools=direct_request.tools,
             options=direct_request.options,
