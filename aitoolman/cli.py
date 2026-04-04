@@ -4,24 +4,17 @@ import json
 import logging
 import asyncio
 import argparse
+import mimetypes
 from typing import Optional, List
 
 from . import app as _app
 from . import util
 from . import client as _client
 from . import channel as _channel
+from . import code_editor
 from .model import Message, MediaContent, LLMDirectRequest
 
 logger = logging.getLogger(__name__)
-
-
-def _get_media_type(filename: str) -> str:
-    """Simple heuristic to determine media type from filename extension."""
-    ext = os.path.splitext(filename)[1].lower()
-    video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv'}
-    if ext in video_extensions:
-        return 'video'
-    return 'image'
 
 
 async def stream_stdout(channel):
@@ -84,8 +77,16 @@ async def run_client_session(
         media_content_list = []
         if media_files:
             for f in media_files:
-                m_type = _get_media_type(f)
-                media_content_list.append(MediaContent(media_type=m_type, filename=f))
+                with open(f, 'rb') as file:
+                    file_data = file.read()
+                mime_type, _ = mimetypes.guess_type(f)
+                if not mime_type:
+                    raise ValueError("Unknown file type: " + f)
+                media_content_list.append(MediaContent(
+                    media_type=mime_type.split('/', 1)[0],
+                    data=file_data,
+                    mime_type=mime_type
+                ))
 
         # 4. Prepare Options
         options = {}
@@ -144,6 +145,37 @@ async def run_client_session(
                 f.write(response.text)
 
 
+async def run_code_editor(args):
+    if args.config:
+        api_config = util.load_config(args.config)
+        client = _client.LLMLocalClient(api_config)
+    elif args.zmq_endpoint:
+        from .zmqclient import LLMZmqClient
+        client = LLMZmqClient(args.zmq_endpoint, args.auth)
+    else:
+        # Should be caught by argparse, but just in case
+        raise ValueError("Either --config or --zmq-endpoint must be provided.")
+
+    async with client:
+        # 初始化应用
+        app_config = util.load_config_str(code_editor.APP_CONFIG)
+        llm_app = _app.LLMApplication(client, app_config)
+        llm_app.add_processor("extract_code_blocks", code_editor.extract_code_blocks)
+
+        # 处理文件
+        await code_editor.process_files(
+            llm_app=llm_app,
+            model_name=args.model,
+            reference_files=args.reference,
+            input_files=args.input,
+            prompt_file=args.prompt,
+            output_arg=args.output,
+            batch_mode=args.batch,
+            overwrite=args.overwrite,
+            use_system=(not args.no_system)
+        )
+
+
 def run_zmqserver(config_file):
     from . import zmqserver
     config = util.load_config(config_file)
@@ -166,6 +198,11 @@ def main():
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 
     parser = argparse.ArgumentParser(description="LLM client/server toolkit.")
+    parser.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
+
     subparsers = parser.add_subparsers(dest='subparser_name', required=True, help='Command')
 
     # --- Server Command ---
@@ -173,10 +210,6 @@ def main():
     parser_server.add_argument(
         "-c", "--config", type=str, default='llm_provider.toml',
         help="Path to the TOML config file"
-    )
-    parser_server.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Print debug log"
     )
 
     # --- Client Command (Merged local and zmq) ---
@@ -189,7 +222,7 @@ def main():
         help="Path to the TOML config file (for Local Client)"
     )
     connection_group.add_argument(
-        '-r', '--zmq-endpoint', type=str,
+        '-z', '--zmq-endpoint', type=str,
         help='ZeroMQ ROUTER endpoint (e.g., tcp://localhost:5555) (for ZMQ Client)'
     )
 
@@ -226,9 +259,79 @@ def main():
         '-o', '--output', type=str,
         help='Path to output text file'
     )
-    parser_client.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Print debug log"
+
+    parser_code_edit = subparsers.add_parser(
+        'code-edit',
+        description="LLM代码修改工具 - 使用AI助手修改代码文件",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+    使用示例:
+    # 单文件处理
+    python3 -m aitoolman code-edit -i input.py -o output.py --llm-config llm_provider.toml
+
+    # 多文件处理（输出到目录）
+    python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir --llm-config llm_provider.toml
+
+    # 使用参考文件
+    python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py --llm-config llm_provider.toml
+
+    # 批处理模式（不实时显示思考过程）
+    python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 --llm-config llm_provider.toml
+
+    # 覆盖现有文件
+    python3 -m aitoolman code-edit -i input.py -o input.py --overwrite --llm-config llm_provider.toml
+
+    # 使用远程ZMQ服务
+    python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --auth TOKEN --model Code-Model  
+            """.strip()
+    )
+
+    # LLM客户端配置（二选一）
+    group = parser_code_edit.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "-c", "--config", type=str,
+        help="LLM客户端配置文件路径（TOML格式）"
+    )
+    group.add_argument(
+        "-z", "--zmq-endpoint", type=str,
+        help="ZeroMQ服务端点（如: tcp://localhost:5555）"
+    )
+    parser_code_edit.add_argument(
+        "-a", "--auth", type=str,
+        help="ZeroMQ认证令牌"
+    )
+    parser_code_edit.add_argument(
+        "-m", "--model", type=str, default='DeepSeek-v3.2-251201',
+        help="指定模型名称（如: Kimi-K2, DeepSeek-v3）"
+    )
+
+    parser_code_edit.add_argument(
+        "-r", "--reference", type=str, nargs='+', default=[],
+        help="参考文件路径（提供上下文，可多个）"
+    )
+    parser_code_edit.add_argument(
+        "-i", "--input", type=str, nargs='+', default=[],
+        help="输入文件路径（支持多个文件，如：-i file.py file2.py）"
+    )
+    parser_code_edit.add_argument(
+        "-o", "--output", type=str, required=False,
+        help="输出路径：可以是单个文件名或目录路径"
+    )
+    parser_code_edit.add_argument(
+        "-p", "--prompt", type=str, required=False,
+        help="提示词文件路径"
+    )
+    parser_code_edit.add_argument(
+        "--batch", action="store_true",
+        help="批处理模式（不实时显示思考过程）"
+    )
+    parser_code_edit.add_argument(
+        "--no-system", action="store_true",
+        help="不使用系统提示词"
+    )
+    parser_code_edit.add_argument(
+        "--overwrite", action="store_true",
+        help="覆盖现有文件（默认情况下会生成.new后缀的文件）"
     )
 
     # --- Monitor Command ---
@@ -239,10 +342,6 @@ def main():
     parser_monitor.add_argument(
         '--db-path',
         help='SQLite database path for DB monitor')
-    parser_monitor.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Print debug log"
-    )
 
     args = parser.parse_args()
     if args.verbose:
@@ -263,6 +362,8 @@ def main():
             batch_mode=args.batch,
             output=args.output
         ))
+    elif args.subparser_name == 'code-edit':
+        asyncio.run(run_code_editor(args))
     elif args.subparser_name == 'monitor':
         run_monitor(args.pub_endpoint, args.db_path)
 
