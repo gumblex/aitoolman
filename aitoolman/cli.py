@@ -198,15 +198,14 @@ def main():
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 
     parser = argparse.ArgumentParser(description="LLM client/server toolkit.")
-    parser.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Print debug log"
-    )
-
     subparsers = parser.add_subparsers(dest='subparser_name', required=True, help='Command')
 
     # --- Server Command ---
     parser_server = subparsers.add_parser('server')
+    parser_server.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
     parser_server.add_argument(
         "-c", "--config", type=str, default='llm_provider.toml',
         help="Path to the TOML config file"
@@ -214,6 +213,10 @@ def main():
 
     # --- Client Command (Merged local and zmq) ---
     parser_client = subparsers.add_parser('client')
+    parser_client.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
 
     # Connection: Mutually exclusive
     connection_group = parser_client.add_mutually_exclusive_group(required=True)
@@ -285,6 +288,10 @@ def main():
     python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --auth TOKEN --model Code-Model  
             """.strip()
     )
+    parser_code_edit.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
 
     # LLM客户端配置（二选一）
     group = parser_code_edit.add_mutually_exclusive_group(required=True)
@@ -336,6 +343,10 @@ def main():
 
     # --- Monitor Command ---
     parser_monitor = subparsers.add_parser('monitor')
+    parser_monitor.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Print debug log"
+    )
     parser_monitor.add_argument(
         '--pub-endpoint', default='tcp://localhost:5556',
         help='ZeroMQ PUB endpoint (e.g., tcp://localhost:5556)')
