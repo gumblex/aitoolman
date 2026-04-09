@@ -89,7 +89,9 @@ post_processor = "extract_code_blocks"
 # ------------------------------
 # 输出路径处理函数
 # ------------------------------
-def get_output_path(output_arg: str, filename: str, input_files: List[str]) -> Path:
+def get_output_path(
+    output_arg: str, filename: str, input_files: List[str], result_num: int
+) -> Path:
     """根据输出参数和文件名确定最终输出路径"""
     output_path = Path(output_arg)
 
@@ -101,6 +103,8 @@ def get_output_path(output_arg: str, filename: str, input_files: List[str]) -> P
         else:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             return output_path / f"output_{timestamp}.md"
+    elif result_num > 1:
+        return output_path.parent / filename
     else:
         return output_path
 
@@ -202,14 +206,18 @@ async def process_files(
     await output_task
 
     # 处理输出文件
+    file_results: List[Dict] = result.data
+    if use_system and not output_arg and file_results:
+        output_arg = '.'
     if output_arg:
-        file_results: List[Dict] = result.data
         for file_item in file_results:
             filename = file_item['filename']
             content = file_item['content']
             output_path = None
             try:
-                output_path = get_output_path(output_arg, filename, input_files)
+                output_path = get_output_path(
+                    output_arg, filename, input_files, len(file_results)
+                )
                 output_path = handle_existing_file(output_path, overwrite)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
 
