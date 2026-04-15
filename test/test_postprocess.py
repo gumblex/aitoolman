@@ -1,3 +1,4 @@
+import textwrap
 import unittest
 from aitoolman.postprocess import parse_xml, get_xml_tag_content
 
@@ -284,6 +285,15 @@ class TestGetXmlTagContent(unittest.TestCase):
         text = "文件内容"
         result = get_xml_tag_content(text, "file", cdata=True)
         self.assertIsNone(result)
+
+    def test_nested_cdata(self):
+        text = textwrap.dedent("""
+        前置<file><![CDATA[
+        <file><![CDATA[aaaa]]></file>
+        ]]></file>后置
+        """)
+        result = get_xml_tag_content(text, "file", cdata=True)
+        self.assertEqual(result.strip(), "<file><![CDATA[aaaa]]></file>")
 
 
 if __name__ == "__main__":

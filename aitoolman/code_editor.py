@@ -72,7 +72,7 @@ template.user = """{% if references %}
 # 要求
 {{user_instruction}}
 {% if use_system -%}
-输出用 XML 格式：
+用 XML 格式输出新增或修改后的文件内容（代码/文本文件本身，不是指可能用代码输出的文件）：
 <output>
 {% if input_files|length == 1 -%}
 <file name="{{ input_files[0].filename }}"><![CDATA[文件内容]]></file>
