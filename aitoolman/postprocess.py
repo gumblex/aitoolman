@@ -1,4 +1,5 @@
 import re
+import bisect
 from typing import Optional, Dict
 
 import xmltodict
@@ -8,6 +9,10 @@ from bs4 import BeautifulSoup
 
 def parse_json(s):
     return json_repair.loads(s, skip_json_loads=True)
+
+
+CDATA_START = '<![CDATA['
+CDATA_END = ']]>'
 
 
 def get_xml_tag_content(s: str, root: str, with_tag: bool = False, cdata: bool = False) -> Optional[str]:
@@ -37,7 +42,7 @@ def get_xml_tag_content(s: str, root: str, with_tag: bool = False, cdata: bool =
     # 从字符串末尾向前搜索结束标签
     end_tag = f'</{root}>'
     if cdata:
-        end_tag = ']]>' + end_tag
+        end_tag = CDATA_END + end_tag
     end_pos = s.rfind(end_tag)
     # including end_pos == -1
     if end_pos < start_tag_end:
@@ -63,28 +68,118 @@ def parse_xml(s: str, root: str, force_list=None) -> Optional[Dict]:
     if not xml_str:
         return None
     try:
-        # 2. 使用bs4修复XML结构
-        # 使用xml解析器来修复XML
-        soup = BeautifulSoup(xml_str, 'xml')
-
-        # 获取修复后的XML字符串
-        fixed_xml = str(soup)
-
-        # 3. 用xmltodict解析XML为Dict
-        # 设置disable_entities=True以避免XXE攻击
-        # 不处理命名空间，原样输出
-        result = xmltodict.parse(
-            fixed_xml,
+        return xmltodict.parse(
+            xml_str,
             process_namespaces=False,
             disable_entities=True,
             force_list=force_list
         )
+    except Exception:
+        if xml_str.count(CDATA_START) > 1:
+            xml_str = escape_nested_cdata(xml_str)
+        try:
+            soup = BeautifulSoup(xml_str, 'xml')
+            fixed_xml = str(soup)
+            return xmltodict.parse(
+                fixed_xml,
+                process_namespaces=False,
+                disable_entities=True,
+                force_list=force_list
+            )
+        except Exception as e:
+            # 如果解析过程中出现任何异常，返回None
+            return None
 
-        return result
 
-    except Exception as e:
-        # 如果解析过程中出现任何异常，返回None
-        return None
+def escape_nested_cdata(s: str) -> str:
+    """
+    修复XML中，有嵌套CDATA块的问题。
+
+    规则：
+    1. 只有当嵌套的CDATA块有对应的结束标记时，才进行转义。
+       即：`<![CDATA[外层<![CDATA[内层]]>外层]]>` 会被转义为 `<![CDATA[外层<![CDATA[内层]]]]><![CDATA[>外层]]>`。
+       但：`<![CDATA[外层<![CDATA[内层]]>` 不会被转义，因为内层的 `]]>` 实际上关闭了外层。
+    2. 已经转义过的 `]]]]><![CDATA[` 序列会被视为普通文本，不会被再次转义。
+    """
+    ESCAPED_CDATA_END = ']]]]><![CDATA[>'
+
+    # 1. 标记化
+    # 将字符串分解为标记：TEXT, START, END
+    # 注意：ESCAPED_CDATA_END 包含 CDATA_END，所以必须优先匹配
+    tokens = []
+    n = len(s)
+    i = 0
+
+    while i < n:
+        if s.startswith(ESCAPED_CDATA_END, i):
+            # 视为普通文本，不作为结构性的结束标记
+            tokens.append(('TEXT', ESCAPED_CDATA_END))
+            i += len(ESCAPED_CDATA_END)
+        elif s.startswith(CDATA_START, i):
+            tokens.append(('START', CDATA_START))
+            i += len(CDATA_START)
+        elif s.startswith(CDATA_END, i):
+            tokens.append(('END', CDATA_END))
+            i += len(CDATA_END)
+        else:
+            # 普通文本
+            j = i
+            while j < n:
+                if s.startswith(ESCAPED_CDATA_END, j) or \
+                        s.startswith(CDATA_START, j) or \
+                        s.startswith(CDATA_END, j):
+                    break
+                j += 1
+            tokens.append(('TEXT', s[i:j]))
+            i = j
+
+    # 2. 预处理
+    # 收集所有 END 标记的索引，用于快速查找
+    end_indices = [idx for idx, (t, _) in enumerate(tokens) if t == 'END']
+
+    # 3. 重建字符串
+    res = []
+    stack = 0  # 当前嵌套深度
+
+    for idx, (t, v) in enumerate(tokens):
+        if t == 'START':
+            if stack == 0:
+                # 顶层 CDATA 开始
+                res.append(v)
+                stack += 1
+            else:
+                # 在 CDATA 内部遇到新的开始标记
+                # 检查是否有足够的结束标记来支持嵌套
+                # 我们需要至少 2 个结束标记：一个关闭内层，一个关闭外层
+                # 查找当前索引之后有多少个结束标记
+                next_end_pos = bisect.bisect_right(end_indices, idx)
+                remaining_ends = len(end_indices) - next_end_pos
+
+                if remaining_ends >= 2:
+                    # 确认是有效的嵌套
+                    res.append(v)
+                    stack += 1
+                else:
+                    # 不是有效的嵌套，视为普通文本
+                    res.append(v)
+
+        elif t == 'END':
+            if stack > 0:
+                stack -= 1
+                if stack == 0:
+                    # 回到顶层，使用原始结束标记
+                    res.append(CDATA_END)
+                else:
+                    # 仍在嵌套中，使用转义后的结束标记
+                    res.append(ESCAPED_CDATA_END)
+            else:
+                # 不在 CDATA 中，视为普通文本
+                res.append(v)
+
+        elif t == 'TEXT':
+            res.append(v)
+
+    return ''.join(res)
 
 
 DEFAULT_PROCESSORS = {

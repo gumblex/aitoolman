@@ -1,6 +1,6 @@
 import textwrap
 import unittest
-from aitoolman.postprocess import parse_xml, get_xml_tag_content
+from aitoolman.postprocess import parse_xml, get_xml_tag_content, escape_nested_cdata
 
 class TestParseXML(unittest.TestCase):
     """测试parse_xml函数的单元测试类"""
@@ -182,23 +182,34 @@ class TestParseXML(unittest.TestCase):
         # 注意：由于我们的函数只提取第一个完整的根标签结构，
         # 所以第二个根标签不会被包含在结果中
 
-    def test_root_tag_with_special_characters(self):
-        """测试根标签包含特殊字符"""
+    def test_force_list(self):
+        """测试列表标签"""
         test_xml = """
         <root-tag special="true">
             <sub-tag>内容</sub-tag>
         </root-tag>
         """
 
-        result = parse_xml(test_xml, "root-tag")
+        result = parse_xml(test_xml, "root-tag", force_list=['sub-tag'])
+        expected = {'root-tag': {
+            '@special': 'true',
+            'sub-tag': ['内容']
+        }}
+        self.assertEqual(result, expected)
 
-        # 验证结果不为None
-        self.assertIsNotNone(result)
-
-        # 验证特殊字符的标签名被正确解析
-        self.assertIn("root-tag", result)
-        self.assertEqual(result["root-tag"]["@special"], "true")
-        self.assertEqual(result["root-tag"]["sub-tag"], "内容")
+    def test_nested_cdata(self):
+        test_xml = """
+        begin
+        <result>
+        <file name="a.xml"><![CDATA[<result><![CDATA[inside1]]></result>]]></file>
+        </result>
+        end
+        """
+        result = parse_xml(test_xml, 'result', force_list=['file'])
+        expected = {'result': {'file': [
+            {'@name': 'a.xml', '#text': '<result><![CDATA[inside1]]></result>'}
+        ]}}
+        self.assertEqual(result, expected)
 
 
 class TestGetXmlTagContent(unittest.TestCase):
@@ -286,14 +297,68 @@ class TestGetXmlTagContent(unittest.TestCase):
         result = get_xml_tag_content(text, "file", cdata=True)
         self.assertIsNone(result)
 
-    def test_nested_cdata(self):
-        text = textwrap.dedent("""
-        前置<file><![CDATA[
-        <file><![CDATA[aaaa]]></file>
-        ]]></file>后置
-        """)
-        result = get_xml_tag_content(text, "file", cdata=True)
-        self.assertEqual(result.strip(), "<file><![CDATA[aaaa]]></file>")
+
+class TestEscapeNestedCdata(unittest.TestCase):
+    """测试escape_nested_cdata函数的单元测试类"""
+
+    def test_no_cdata(self):
+        """测试没有CDATA的普通文本"""
+        input_str = "这是<b>普通文本</b>，不包含任何CDATA标签"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_single_cdata(self):
+        """测试单层无嵌套CDATA"""
+        input_str = "<a>前缀<![CDATA[普通CDATA内容]]>后缀</a>"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_empty_cdata(self):
+        """测试空CDATA"""
+        input_str = "<![CDATA[]]>"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_already_escaped(self):
+        """测试两层嵌套CDATA"""
+        input_str = "<![CDATA[外层内容<![CDATA[内层内容]]]]><![CDATA[>外层内容]]>"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_two_level_nested_cdata(self):
+        """测试两层嵌套CDATA"""
+        input_str = "<![CDATA[外层内容<![CDATA[内层内容]]>外层内容]]>"
+        expected = "<![CDATA[外层内容<![CDATA[内层内容]]]]><![CDATA[>外层内容]]>"
+        self.assertEqual(escape_nested_cdata(input_str), expected)
+
+    def test_multi_level_nested_cdata(self):
+        """测试多层（三层）嵌套CDATA"""
+        input_str = "<![CDATA[第一层<![CDATA[第二层<![CDATA[第三层]]>第二层]]>第一层]]>"
+        expected = "<![CDATA[第一层<![CDATA[第二层<![CDATA[第三层]]]]><![CDATA[>第二层]]]]><![CDATA[>第一层]]>"
+        self.assertEqual(escape_nested_cdata(input_str), expected)
+
+    def test_multiple_independent_cdata(self):
+        """测试多个独立不嵌套的CDATA"""
+        input_str = "第一个<![CDATA[CDATA1]]>中间<![CDATA[CDATA2]]>最后"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_unclosed_inner_cdata(self):
+        """测试内层CDATA缺少结束标签的不匹配情况"""
+        input_str = "<![CDATA[外层<![CDATA[内层只有起始标签]]>"
+        expected = "<![CDATA[外层<![CDATA[内层只有起始标签]]>"
+        self.assertEqual(escape_nested_cdata(input_str), expected)
+
+    def test_extra_inner_cdata_end(self):
+        """测试内层多出来的CDATA结束标签的不匹配情况"""
+        input_str = "<![CDATA[外层内容]]>多余结束标签]]>]]>"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_unclosed_root_cdata(self):
+        """测试顶层CDATA缺少结束标签的情况"""
+        input_str = "<![CDATA[整个CDATA都没有结束标记"
+        self.assertEqual(escape_nested_cdata(input_str), input_str)
+
+    def test_cdata_with_special_characters(self):
+        """测试CDATA内容包含特殊字符的情况"""
+        input_str = "<![CDATA[内容包含<>!@#$%^&*()<![CDATA[内层内容]]>特殊字符]]>"
+        expected = "<![CDATA[内容包含<>!@#$%^&*()<![CDATA[内层内容]]]]><![CDATA[>特殊字符]]>"
+        self.assertEqual(escape_nested_cdata(input_str), expected)
 
 
 if __name__ == "__main__":

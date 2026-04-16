@@ -163,7 +163,7 @@ async def run_code_editor(args):
         llm_app.add_processor("extract_code_blocks", code_editor.extract_code_blocks)
 
         # 处理文件
-        await code_editor.process_files(
+        result = await code_editor.process_files(
             llm_app=llm_app,
             model_name=args.model,
             reference_files=args.reference,
@@ -174,6 +174,9 @@ async def run_code_editor(args):
             overwrite=args.overwrite,
             use_system=(not args.no_system)
         )
+        if args.raw_output:
+            with open(args.raw_output, 'w', encoding='utf-8') as f:
+                f.write(result.text)
 
 
 def run_zmqserver(config_file):
@@ -322,7 +325,11 @@ def main():
     )
     parser_code_edit.add_argument(
         "-o", "--output", type=str, required=False,
-        help="输出路径：可以是单个文件名或目录路径"
+        help="输出文件路径：可以是单个文件名（单文件）或目录路径（多文件）"
+    )
+    parser_code_edit.add_argument(
+        "-O", "--raw-output", type=str, required=False,
+        help="原始输出内容保存文件名"
     )
     parser_code_edit.add_argument(
         "-p", "--prompt", type=str, required=False,

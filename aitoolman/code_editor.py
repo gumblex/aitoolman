@@ -104,7 +104,10 @@ def get_output_path(
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             return output_path / f"output_{timestamp}.md"
     elif result_num > 1:
-        return output_path.parent / filename
+        if output_path.is_file():
+            return output_path.parent / filename
+        else:
+            return output_path / filename
     else:
         return output_path
 
@@ -223,7 +226,10 @@ async def process_files(
 
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(content)
-                logger.info(f"写入文件: {output_path}")
+                if filename != output_path:
+                    logger.info(f"写入文件: {output_path}（原名 {filename}）")
+                else:
+                    logger.info(f"写入文件: {output_path}")
             except Exception as e:
                 logger.exception(f"写入文件失败: {output_path or filename}")
     return result
