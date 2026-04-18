@@ -232,12 +232,11 @@ class MockLLMClient(aitoolman.LLMClient):
         options: Dict[str, Any] = None,
         stream: bool = False,
         context_id: str = None,
-        output_channel: Any = None,
-        reasoning_channel: Any = None
+        output_channel: Any = None
     ) -> aitoolman.LLMProviderRequest:
         request = self.make_request(
             model_name, messages, tools, options, stream,
-            context_id, output_channel, reasoning_channel
+            context_id, output_channel
         )
         self.requests.append(request)
         response = self.response_generator(request)
@@ -251,25 +250,3 @@ class MockLLMClient(aitoolman.LLMClient):
 
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         self.events.append(AuditEvent(context_id, event_type, kwargs))
-
-
-class MockTextChannelCollector(aitoolman.ChannelCollector):
-    def __init__(self, channels):
-        super().__init__(channels)
-        self.events_start: List[str] = []
-        self.events_read: List[Tuple[str, Any]] = []
-        self.events_end: List[str] = []
-        self.events_eof: List[str] = []
-
-    async def on_channel_start(self, channel_name: str):
-        self.events_start.append(channel_name)
-
-    async def on_channel_read(self, channel_name: str, message):
-        self.events_read.append((channel_name, message))
-
-    async def on_channel_end(self, channel_name: str):
-        self.events_end.append(channel_name)
-
-    async def on_channel_eof(self, channel_name: str):
-        self.events_eof.append(channel_name)
-

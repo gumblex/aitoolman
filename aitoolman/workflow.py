@@ -235,7 +235,6 @@ class LLMWorkflow(LLMApplication):
         client: Any,
         config_dict: Optional[Dict[str, Any]] = None,
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-        channels: Optional[Dict[str, Any]] = None,
         context_id: Optional[str] = None,
         max_parallel_tasks: int = 5  # 默认最大并行任务数
     ):
@@ -244,7 +243,6 @@ class LLMWorkflow(LLMApplication):
             client=client,
             config_dict=config_dict,
             processors=processors,
-            channels=channels,
             context_id=context_id
         )
         self.max_parallel_tasks = max_parallel_tasks
