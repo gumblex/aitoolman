@@ -106,8 +106,7 @@ class LLMDirectRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: bool = False
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None  # Output channel for receiving streaming responses
     post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
@@ -126,8 +125,7 @@ class LLMModuleRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: Optional[bool] = None
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None  # Output channel for receiving streaming responses
     post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
@@ -163,6 +161,7 @@ class LLMModuleResult:
 Used for interacting with LLM providers, no need for upper-layer applications to关注.
 
 `LLMProviderRequest`: Request sent to model provider, containing complete request data and channel configurations.
+> LLMClient outputs fixed topics to the channel: `reasoning` for model reasoning content, `response` for actual model response content.
 
 ```python
 @dataclass
@@ -176,8 +175,7 @@ class LLMProviderRequest:
     tools: Dict[str, Dict[str, Any]]  # Tool definitions
     options: Dict[str, Any]           # Provider-specific options
     stream: bool = False              # Whether to use streaming response
-    output_channel: Optional[TextFragmentChannel]  # Output channel
-    reasoning_channel: Optional[TextFragmentChannel]  # Reasoning channel
+    output_channel: ChannelWriter = field(default_factory=NullChannel) # Output channel
     is_cancelled: bool = False        # Whether cancelled
     response: asyncio.Future[LLMProviderResponse]  # Response Future
 ```
@@ -254,17 +252,17 @@ class GenericError(LLMError): ...             # General error
 ## 3. Application Layer
 
 ### 3.1 LLMApplication Class
-LLMApplication is the core entry class of the framework, responsible for managing configurations, template rendering, LLM calls, channels, and post-processors, serving as the basic carrier for all LLM applications.
+LLMApplication is the core entry class of the framework, responsible for managing configurations, template rendering, LLM calls, and post-processors, serving as the basic carrier for all LLM applications.
 
 #### 3.1.1 Core Features
 LLMApplication is the main entry point of the framework, responsible for:
 - Loading and managing modules in configuration files
 - Rendering prompt templates
 - Calling LLM and processing responses
-- Managing context variables and channels
+- Managing context variables
 
 #### 3.1.2 Initialization
-Create an LLM application instance, bind client, load configurations, register post-processors and channels. Each application instance corresponds to an independent context.
+Create an LLM application instance, bind client, load configurations, register post-processors. Each application instance corresponds to an independent context.
 
 ```python
 class LLMApplication:
@@ -273,16 +271,18 @@ class LLMApplication:
         client: LLMClient,                     # LLM client
         config_dict: Optional[Dict[str, Any]] = None,  # Configuration file dictionary
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # Post-processors
-        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # Custom channels
         context_id: Optional[str] = None       # Context ID (for client tracking, debugging, and auditing)
     ): ...
 ```
 
 #### 3.1.3 Main Interfaces
-Quickly retrieve callable module objects by module name, and complete LLM calls directly by passing template parameters.
+Quickly retrieve callable module objects by module name, and complete LLM calls directly by passing template parameters. If you need real-time streaming output, you can pass a self-created Channel instance via the `output_channel` parameter.
 ```python
 # Access module via subscript (returns callable object)
-result: LLMModuleResult = await app['module_name'](template_param1='value1', ...)
+result: LLMModuleResult = await app['module_name'](
+    template_param1='value1',
+    _output_channel=your_channel  # Optional, pass custom channel to receive real-time output
+)
 ```
 
 General request entry, supports passing module requests or direct requests, suitable for dynamically constructing requests.
@@ -306,12 +306,6 @@ Register custom post-processors for parsing specific format content returned by 
 def add_processor(self, name: str, processor: Callable): ...
 ```
 
-Register custom channels for receiving streaming responses, reasoning content, etc., enabling real-time output to front-end, files, and other custom scenarios.
-```python
-# Add custom channel
-def add_channel(self, name: str, channel: TextFragmentChannel): ...
-```
-
 Send custom audit events for recording business-level operations, facilitating subsequent problem troubleshooting and business data statistics. Received and unified processed by LLMClient backend.
 ```python
 # Trigger audit event
@@ -327,7 +321,6 @@ def factory(
         client: _client.LLMClient,
         config_dict: Optional[Dict[str, Any]] = None,
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-        channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None,
 ) -> Callable[..., 'LLMApplication']: ...
 ```
 
@@ -499,73 +492,51 @@ final_task = await workflow.run(start_task)
 ## 4. Transport Layer
 
 ### 4.1 Channel System
-The channel system is used for asynchronous transmission of streaming responses, reasoning content, etc., enabling real-time output.
-
-#### 4.1.1 Basic Channels
-Channel is a general asynchronous message channel for asynchronous communication between different components.
-
-TextFragmentChannel is specifically used for transmitting text fragments, supporting streaming reception of LLM output fragments.
+The channel system is used for asynchronous transmission of streaming responses, reasoning content, etc., enabling real-time output. LLMClient outputs fixed topics to the channel: `reasoning` for model reasoning content, `response` for actual model response content.
 
 ```python
-class Channel(Generic[T]):
-    """General channel base class"""
-    async def read(self) -> T: ...
-    async def write(self, message: T): ...
-    # Mark channel write completion, EOF
+# Channel event containing topic and data
+class ChannelEvent(NamedTuple):
+    topic: str
+    data: Any
+
+class Channel:
+    """General channel class supporting read/write ChannelEvent"""
+    async def read(self) -> ChannelEvent: ...
+    async def write(self, message: ChannelEvent): ...
+    # Mark end of writes, EOF
     async def write_complete(self): ...
 
-class TextFragmentChannel(Channel[Optional[str]]):
-    """
-    Text fragment channel
-    None indicates end of a complete message
-    """
-    # Write a complete message
-    async def write_whole_message(self, message: str): ...
-    # Read all fragments and merge into a complete message
-    async def read_whole_message(self) -> str: ...
+class NullChannel(Channel):
+    """Null channel, discards all written content, used by default"""
 ```
 
-#### 4.1.2 Channel Collectors
-Mainly used in application development to listen to multiple channels simultaneously and unify processing of outputs from different sources.
-
+The framework provides a utility function to print channel content directly to the console:
 ```python
-class ChannelCollector(abc.ABC):
-    """Multi-channel collector base class"""
-    async def start_listening(self): ...
-    def close(self): ...
-
-    @abc.abstractmethod
-    async def on_channel_start(self, channel_name: str):
-        """Channel starts current output"""
-
-    @abc.abstractmethod
-    async def on_channel_read(self, channel_name: str, message):
-        """Channel outputs content"""
-
-    @abc.abstractmethod
-    async def on_channel_end(self, channel_name: str):
-        """Channel ends current output"""
-
-    @abc.abstractmethod
-    async def on_channel_eof(self, channel_name: str):
-        """Channel ends all outputs"""
-
-class DefaultTextChannelCollector(ChannelCollector):
-    """Default text channel collector (prints to console)"""
+async def print_channel_output(
+    channel: ChannelReader,
+    topic_names: Dict[str, str],
+    header: bool = False
+):
+    """
+    Print Channel content directly to stdout
+    :param channel: Channel to listen to
+    :param topic_names: Mapping of topic name to display name, e.g. {'reasoning': 'Reasoning Process', 'response': 'Output Content'}
+    :param header: Whether to print topic name header
+    """
 ```
 
-#### 4.1.3 XML Tag Filters
-BaseXmlTagFilter automatically identifies XML tags from streaming text, mainly used when LLM outputs single-layer XML tags representing different types of text, which are then output to different channels. For example: output current status, output to users, processing results to applications.
+#### 4.1.1 XML Tag Filters
+BaseXmlTagFilter automatically identifies XML tags from streaming text, mainly used when LLM outputs single-layer XML tags representing different types of text, which are then output to different topics. For example: output current status, output to users, processing results to applications.
 
 ```python
-class BaseXmlTagFilter(abc.ABC):
+class BaseXmlTagFilter(ChannelWriter):
     """XML tag filter base class"""
-    async def write(self, message: Optional[str]) -> None: ...
+    async def write(self, message: ChannelEvent) -> None: ...
 
 class XmlTagToChannelFilter(BaseXmlTagFilter):
-    """Distribute XML tags to different channels"""
-    def __init__(self, default_channel: TextFragmentChannel,
-                 channel_map: Dict[str, TextFragmentChannel]): ...
+    """Distribute XML tags to different topics"""
+    def __init__(self, output_channel: ChannelWriter, tags: Set[str], input_topic: str = 'response'): ...
 ```
 
 ### 4.2 LLMClient Abstraction
@@ -583,8 +554,7 @@ class LLMClient(abc.ABC):
         options: Optional[Dict[str, Any]] = None,
         stream: bool = False,
         context_id: Optional[str] = None,
-        output_channel: Optional[TextFragmentChannel] = None,
-        reasoning_channel: Optional[TextFragmentChannel] = None
+        output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest
 
     async def cancel(self, request_id: str): ...
@@ -734,7 +704,7 @@ model = "ep-xxx"
 headers = { Authorization = "Bearer YOUR_API_KEY" }
 
 [api."GPT-4"]
-url = "https://api.openai.com/v1/chat/completions"
+url = "https://api.openai.com/v3/chat/completions"
 type = "openai"
 model = "gpt-4"
 headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
@@ -747,8 +717,6 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 [module_default]
 model = "Fast-Model"         # Default to fast inference model
 stream = false
-output_channel = "stdout"
-reasoning_channel = "reasoning"
 options = { max_tokens = 4000 }
 
 # Global Templates (can be referenced by modules)
@@ -860,7 +828,7 @@ my_llm_app/
 Implement a code modification tool:
 - Load configuration files and prompt templates
 - Create client and application instances
-- Call code editing module to process user input
+- Create custom Channel to receive real-time output, pass to module call
 - Use post-processor to extract code blocks
 
 ```python
@@ -880,27 +848,29 @@ async def main():
         app = aitoolman.LLMApplication(client, prompt_config)
         app.add_processor("extract_code", extract_code)
         
-        # Monitor output channels
-        collector = aitoolman.DefaultTextChannelCollector({
-            'Reasoning Process': app.channels['reasoning'],
-            'Code Output': app.channels['stdout']
-        })
-        output_task = asyncio.create_task(collector.start_listening())
+        # Create channel to monitor output
+        output_channel = aitoolman.Channel()
+        output_task = asyncio.create_task(aitoolman.print_channel_output(
+            output_channel,
+            topic_names={'reasoning': 'Reasoning Process', 'response': 'Code Output'},
+            header=True
+        ))
         
-        # Call code editor module
+        # Call code editor module, pass output channel
         result = await app['code_editor'](
             code_content=open("app.py").read(),
             instruction="Add error handling logic",
-            references=[{"filename": "utils.py", "content": open("utils.py").read()}]
+            references=[{"filename": "utils.py", "content": open("utils.py").read()}],
+            _output_channel=output_channel
         )
         result.raise_for_status()
+        
+        # Wait for output task to complete
+        await output_task
         
         # Save results
         with open("app_modified.py", "w") as f:
             f.write(result.data)
-        
-        collector.close()
-        await output_task
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -1278,7 +1248,7 @@ except LLMResponseFormatError as e:
 - **Caching Strategy**: Implement result caching for repeated queries
 
 ### 10.5 Debugging Tips
-- **Channel Monitoring**: Use `ChannelCollector` to view LLM output in real-time
+- **Channel Monitoring**: Create custom Channel and pass it to the request, use `print_channel_output` to view LLM output in real-time
 - **Audit Logs**: Enable monitor to record all requests and responses
 - **Step-by-Step Execution**: Test individual tasks first for complex workflows
 - **Provider Logs**: Enable `logging.DEBUG` to view raw API interactions

@@ -10,7 +10,7 @@ import zmq.asyncio
 
 from . import util
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, ToolCall, Message
-from .channel import TextFragmentChannel
+from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -134,21 +134,13 @@ class LLMZmqClient(LLMClient):
 
     async def handle_channel_write(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理channel写入消息"""
-        channel_type = json_data['channel']
-        # mode = json_data['mode']
+        channel_name = json_data['channel']
         text = json_data['text']
 
-        channel = None
-        if channel_type == 'response':
-            channel = request.output_channel
-        elif channel_type == 'reasoning':
-            channel = request.reasoning_channel
-
-        if not channel:
-            logger.debug(f"Request {request.request_id} has no {channel_type} channel")
-            return
-
-        await channel.write(text)
+        await request.output_channel.write(ChannelEvent(
+            topic=channel_name,
+            data=text
+        ))
 
     async def handle_response(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理完整响应"""
@@ -156,10 +148,8 @@ class LLMZmqClient(LLMClient):
         # 构造LLMResponse
         finish_reason = FinishReason(response_data['finish_reason']) if response_data['finish_reason'] in FinishReason.__members__ else response_data['finish_reason']
         if not response_data['response_text'] and not response_data['response_reasoning']:
-            if request.reasoning_channel:
-                await request.reasoning_channel.write(None)
-            if request.output_channel:
-                await request.output_channel.write(None)
+            await request.output_channel.write(ChannelEvent('reasoning', 'end', None))
+            await request.output_channel.write(ChannelEvent('response', 'end', None))
         response = LLMProviderResponse(
             client_id=response_data['client_id'],
             context_id=response_data['context_id'],
@@ -197,8 +187,7 @@ class LLMZmqClient(LLMClient):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            output_channel: Optional[TextFragmentChannel] = None,
-            reasoning_channel: Optional[TextFragmentChannel] = None
+            output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest:
         """发送LLM请求（实现LLMClient抽象方法）"""
         if not self.connected:
@@ -207,7 +196,7 @@ class LLMZmqClient(LLMClient):
         # 构造LLMRequest
         request = self.make_request(
             model_name, messages, tools, options, stream,
-            context_id, output_channel, reasoning_channel
+            context_id, output_channel
         )
         self.active_requests[request.request_id] = request
 
@@ -249,6 +238,7 @@ class LLMZmqClient(LLMClient):
             b'',
             util.encode_message(cancel_msg)
         ])
+        await request.output_channel.write_complete()
 
     async def cancel_all(self, context_id: Optional[str] = None):
         """取消当前客户端的所有请求"""
@@ -264,6 +254,12 @@ class LLMZmqClient(LLMClient):
             b'',
             util.encode_message(cancel_msg)
         ])
+        for req in self.active_requests.values():
+            try:
+                await req.output_channel.write_complete()
+            except asyncio.TimeoutError:
+                continue
+
 
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         if not self.connected:

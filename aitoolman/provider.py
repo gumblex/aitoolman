@@ -7,6 +7,7 @@ import typing
 from typing import Optional, Dict, Any, List, Callable
 
 from . import postprocess, util
+from .channel import ChannelEvent
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall
 from .resmanager import ResourceManager
 
@@ -25,7 +26,7 @@ def _get_retry_after(response: httpx.Response) -> Optional[int]:
     return None
 
 
-class StreamEvent(typing.NamedTuple):
+class ProviderStreamEvent(typing.NamedTuple):
     is_end: bool
     content: str
     reasoning: str
@@ -89,7 +90,7 @@ class LLMFormatStrategy(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
         """
         解析流式响应的单个chunk
         返回值：(是否结束, 内容片段, 推理片段, 工具调用列表)
@@ -271,12 +272,12 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         response.completion_tokens = usage.get("completion_tokens")
         response.response_message = self.parse_response_message(response, message)
 
-    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> StreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
         """解析OpenAI流式响应（含工具调用增量累积）"""
         # 1. 处理空行
         line = event.data.strip()
         if not line:
-            return StreamEvent.empty()
+            return ProviderStreamEvent.empty()
 
         # 2. 处理流式结束标记（统一返回工具调用）
         if line == "[DONE]":
@@ -296,14 +297,14 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             # 设置结束标记并返回完整工具调用
             if not response.finish_reason:
                 response.finish_reason = FinishReason.stop.value
-            return StreamEvent(True, "", "", final_tool_calls, response_message)
+            return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
 
         # 3. 解析JSON格式的chunk
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
             self.logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
-            return StreamEvent.empty()
+            return ProviderStreamEvent.empty()
 
         self.logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
 
@@ -316,7 +317,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         # 5. 提取delta内容
         choices = chunk_data.get("choices", [])
         if not choices:
-            return StreamEvent.empty()
+            return ProviderStreamEvent.empty()
         choice = choices[0]
         delta = choice.get("delta", {})
 
@@ -351,7 +352,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             self.stream_reasoning_buffer += reasoning_delta
 
         # 8. 返回当前chunk的内容（工具调用暂不返回）
-        return StreamEvent(
+        return ProviderStreamEvent(
             False,
             content_delta,
             reasoning_delta,
@@ -574,7 +575,7 @@ class AnthropicFormat(LLMFormatStrategy):
         response.completion_tokens = usage.get("output_tokens")
 
     def parse_stream_event(self, response: LLMProviderResponse,
-                           event: httpx_sse.ServerSentEvent) -> StreamEvent:
+                           event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
         """Parse streaming response chunk"""
         self.logger.debug('[%s] stream event: %s', response.request_id, event)
         # Handle event type
@@ -585,7 +586,7 @@ class AnthropicFormat(LLMFormatStrategy):
             response.error_text = line
             self.logger.error("[%s: Anthropic] Stream error: %s",
                          response.request_id, line)
-            return StreamEvent(True, "", "", [], None)
+            return ProviderStreamEvent(True, "", "", [], None)
 
         # Handle stream end
         if line == "[DONE]" or event_type == "message_stop":
@@ -607,17 +608,17 @@ class AnthropicFormat(LLMFormatStrategy):
             if not response.finish_reason:
                 response.finish_reason = FinishReason.stop.value
 
-            return StreamEvent(True, "", "", final_tool_calls, response_message)
+            return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
 
         if not line:
-            return StreamEvent.empty()
+            return ProviderStreamEvent.empty()
 
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
             self.logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
                            response.request_id, line)
-            return StreamEvent.empty()
+            return ProviderStreamEvent.empty()
 
         # Handle token usage
         usage = chunk_data.get("usage")
@@ -672,7 +673,7 @@ class AnthropicFormat(LLMFormatStrategy):
                         # Append to existing partial JSON string
                         current_tool["input"] = current_input + partial_json
 
-        return StreamEvent(
+        return ProviderStreamEvent(
             False,
             delta_text,
             delta_reasoning,
@@ -731,10 +732,8 @@ class LLMProviderManager:
     ):
         response.error_text = error_text
         response.finish_reason = finish_reason.value
-        if request.reasoning_channel:
-            await request.reasoning_channel.write(None)
-        if request.output_channel:
-            await request.output_channel.write(None)
+        await request.output_channel.write(ChannelEvent('reasoning', None))
+        await request.output_channel.write(ChannelEvent('response', None))
 
     async def _async_post_with_retry(self, request: LLMProviderRequest, url: str, **kwargs) -> Dict:
         """带重试的HTTP POST请求（处理限流、超时等异常）"""
@@ -812,10 +811,12 @@ class LLMProviderManager:
             return
 
         # 发送完整响应到Channel
-        if request.reasoning_channel and response.response_reasoning:
-            await request.reasoning_channel.write(response.response_reasoning)
-        if request.output_channel:
-            await request.output_channel.write(response.response_text)
+        await request.output_channel.write(ChannelEvent(
+            'reasoning', response.response_reasoning))
+        await request.output_channel.write(ChannelEvent('reasoning', None))
+        await request.output_channel.write(ChannelEvent(
+            'response', response.response_text))
+        await request.output_channel.write(ChannelEvent('response', None))
 
     async def _handle_stream_request(
             self, request: LLMProviderRequest, response: LLMProviderResponse,
@@ -864,17 +865,20 @@ class LLMProviderManager:
                             response, event.response_message)
 
                     # 发送分块内容到Channel
-                    if request.reasoning_channel and event.reasoning:
-                        await request.reasoning_channel.write(event.reasoning)
+                    if event.reasoning:
+                        await request.output_channel.write(ChannelEvent(
+                            'reasoning', event.reasoning
+                        ))
                     if not thinking_end and event.content:
-                        if request.reasoning_channel:
-                            await request.reasoning_channel.write(None)
+                        await request.output_channel.write(
+                            ChannelEvent('reasoning', None))
                         thinking_end = True
                     elif thinking_end and event.reasoning:
                         # reasoning after content
                         thinking_end = False
                     if request.output_channel and event.content:
-                        await request.output_channel.write(event.content)
+                        await request.output_channel.write(
+                            ChannelEvent('response', event.content))
                     if event.is_end:
                         break
 
@@ -882,10 +886,9 @@ class LLMProviderManager:
             response.total_response_time = time.monotonic() - start_time
 
             # 发送结束标记到Channel
-            if request.reasoning_channel and not thinking_end:
-                await request.reasoning_channel.write(None)
-            if request.output_channel:
-                await request.output_channel.write(None)
+            if not thinking_end:
+                await request.output_channel.write(ChannelEvent('reasoning', None))
+            await request.output_channel.write(ChannelEvent('response', None))
 
         except Exception as e:
             logger.warning("_handle_stream_request error.", exc_info=True)

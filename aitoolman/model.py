@@ -7,7 +7,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union, Callable
 
-from .channel import TextFragmentChannel
+from .channel import ChannelWriter, NullChannel
 from .util import get_id
 
 
@@ -249,8 +249,7 @@ class LLMProviderRequest:
     tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     options: Dict[str, Any] = field(default_factory=dict)
     stream: bool = False
-    output_channel: Optional[TextFragmentChannel] = field(default_factory=TextFragmentChannel)
-    reasoning_channel: Optional[TextFragmentChannel] = None
+    output_channel: ChannelWriter = field(default_factory=NullChannel)
     is_cancelled: bool = False
     response: asyncio.Future[LLMProviderResponse] = field(default_factory=asyncio.Future)
 
@@ -324,8 +323,7 @@ class LLMDirectRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: bool = False
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None
     post_processor: Union[str, Callable[[str], Any], None] = None
 
 
@@ -341,8 +339,7 @@ class LLMModuleRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: Optional[bool] = None
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None
     post_processor: Union[str, Callable[[str], Any], None] = None
 
 
@@ -447,6 +444,5 @@ class LLMModuleResult:
             options=original_req.options,
             stream=original_req.stream,
             output_channel=original_req.output_channel,
-            reasoning_channel=original_req.reasoning_channel,
             post_processor=original_req.post_processor,
         )

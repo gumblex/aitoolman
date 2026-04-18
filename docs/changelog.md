@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+### 新增
+- 原测试中的代码编辑功能集成到命令行工具子命令 code-edit
+- XML 解析支持（不规范的）嵌套 CDATA 块
+
+### 修改
+- Channel 类重构，从多通道改为单通道，用 topic='reasoning'/'response' 标识推理、回复内容
+- LLMApplication 不再管理通道，如需LLM实时输出需传入 ChannelWriter 实例
+- 统一命令行工具中的参数名称
+
 ## 0.2.1
 
 ### 新增

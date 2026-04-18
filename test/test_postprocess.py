@@ -187,7 +187,8 @@ class TestParseXML(unittest.TestCase):
         test_xml = """
         <root-tag special="true">
             <sub-tag>内容</sub-tag>
-        </root-tag>
+        </root-tag>#from .channel_old import TextFragmentChannel
+
         """
 
         result = parse_xml(test_xml, "root-tag", force_list=['sub-tag'])

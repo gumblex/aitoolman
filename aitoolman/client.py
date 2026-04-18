@@ -3,7 +3,7 @@ import logging
 from typing import Optional, List, Dict, Any, Callable
 
 from . import util
-from .channel import TextFragmentChannel
+from .channel import ChannelWriter
 from .model import LLMProviderRequest, Message
 from .provider import LLMProviderManager
 
@@ -37,15 +37,14 @@ class LLMClient(abc.ABC):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            output_channel: Optional[TextFragmentChannel] = None,
-            reasoning_channel: Optional[TextFragmentChannel] = None
+            output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest:
         """新建 LLMProviderRequest 对象"""
         return LLMProviderRequest(
             self.client_id, context_id,
             util.get_id(),
             model_name, messages, tools or [], options or {},
-            stream, output_channel, reasoning_channel
+            stream, output_channel
         )
 
     @abc.abstractmethod
@@ -57,8 +56,7 @@ class LLMClient(abc.ABC):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            output_channel: Optional[TextFragmentChannel] = None,
-            reasoning_channel: Optional[TextFragmentChannel] = None
+            output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest:
         """实际调用 LLM"""
         pass
@@ -88,12 +86,11 @@ class LLMLocalClient(LLMClient):
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
-            output_channel: Optional[TextFragmentChannel] = None,
-            reasoning_channel: Optional[TextFragmentChannel] = None
+            output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest:
         request = self.make_request(
             model_name, messages, tools, options, stream,
-            context_id, output_channel, reasoning_channel
+            context_id, output_channel
         )
         self.provider_manager.process_request(request)
         return request

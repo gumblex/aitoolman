@@ -8,8 +8,9 @@ from datetime import datetime
 from typing import List, Dict
 from pathlib import Path
 
-from . import util, app, client, postprocess, channel, zmqclient
+from . import app, postprocess
 from .model import LLMModuleRequest
+from .channel import Channel, print_channel_output
 
 # 日志配置
 logging.basicConfig(
@@ -186,11 +187,12 @@ async def process_files(
         user_instruction = read_user_input("请输入修改指令")
 
     # 启动通道收集器
-    channel_collector = channel.DefaultTextChannelCollector({
-        'Thinking': llm_app.channels['reasoning'],
-        'Response': llm_app.channels['stdout']
-    })
-    output_task = asyncio.create_task(channel_collector.start_listening())
+    output_channel = Channel()
+    output_task = asyncio.create_task(print_channel_output(
+        output_channel,
+        topic_names={'reasoning': 'Thinking', 'response': 'Response'},
+        header=True
+    ))
 
     template_params = {
         'user_instruction': user_instruction,
@@ -202,10 +204,10 @@ async def process_files(
         module_name='code_edit',
         template_params=template_params,
         model_name=model_name,
-        stream=(not batch_mode)
+        stream=(not batch_mode),
+        output_channel=output_channel
     ))
     result.raise_for_status()
-    channel_collector.close()
     await output_task
 
     # 处理输出文件

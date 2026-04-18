@@ -1,63 +1,136 @@
-import re
 import abc
+import re
+import sys
 import asyncio
-import logging
-from typing import Optional, Dict, Set, Generic, TypeVar
-
-logger = logging.getLogger(__name__)
+from typing import Any, Optional, NamedTuple, Protocol, Set, Dict
 
 
-T = TypeVar("T")
+class ChannelEvent(NamedTuple):
+    topic: str
+    data: Any
 
 
-_EOF = object()
+class ChannelReader(Protocol):
+    async def read(self) -> ChannelEvent:
+        ...
 
 
-class Channel(Generic[T]):
+class ChannelWriter(Protocol):
+    async def write(self, message: ChannelEvent):
+        ...
 
+    async def write_complete(self):
+        ...
+
+
+class Channel:
     def __init__(self):
-        self._message_queue = asyncio.Queue()
+        self._message_queue: asyncio.Queue[Optional[ChannelEvent]] = asyncio.Queue()
+        self._eof_received = False
 
-    async def read(self) -> T:
-        result = await self._message_queue.get()
-        if result == _EOF:
-            raise EOFError
-        return result
+    async def read(self) -> ChannelEvent:
+        if self._eof_received:
+            raise EOFError("Channel has been closed by peer")
 
-    async def write(self, message: T):
+        item = await self._message_queue.get()
+        if item is None:
+            self._eof_received = True
+            raise EOFError("Channel has been closed by peer")
+        return item
+
+    async def write(self, message: ChannelEvent):
         await self._message_queue.put(message)
 
     async def write_complete(self):
-        await self._message_queue.put(_EOF)
+        await self._message_queue.put(None)
 
 
-class TextFragmentChannel(Channel[Optional[str]]):
+class TopicWriter(ChannelWriter):
+    def __init__(self, topics: Set[str]):
+        self._message_queues: Dict[str, asyncio.Queue[Optional[ChannelEvent]]] = {
+            t: asyncio.Queue() for t in topics}
+
+    @classmethod
+    def default(cls):
+        return TopicWriter({'reasoning', 'response'})
+
+    async def write(self, message: ChannelEvent):
+        queue = self._message_queues.get(message.topic)
+        if queue is None:
+            raise ValueError("topic not defined: " + message.topic)
+        await queue.put(message)
+
+    async def write_complete(self):
+        for queue in self._message_queues.values():
+            await queue.put(None)
+
+    def reader(self, topic: str):
+        return TopicReader(topic, self._message_queues[topic])
+
+
+class TopicReader(ChannelReader):
+    def __init__(self, topic: str, queue: asyncio.Queue[Optional[ChannelEvent]]):
+        self.topic = topic
+        self._message_queue = queue
+        self._eof_received = False
+
+    async def read(self) -> ChannelEvent:
+        if self._eof_received:
+            raise EOFError("Channel has been closed by peer")
+
+        item = await self._message_queue.get()
+        if item is None:
+            self._eof_received = True
+            raise EOFError("Channel has been closed by peer")
+        return item
+
+
+class NullChannel(Channel):
+
+    async def read(self) -> ChannelEvent:
+        raise EOFError()
+
+    async def write(self, item: ChannelEvent):
+        pass
+
+    async def write_complete(self):
+        pass
+
+
+
+async def print_channel_output(channel: ChannelReader, topic_names: Dict[str, str], header: bool = False):
     """
-    文本片段通道，支持按文本片段读写
+    将Channel内容直接打印到stdout
 
-    None 为一整条消息的结束符
+    :param channel: 监听的 Channel
+    :param topic_names: topic 名称和显示名称
+    :param header: 是否打印 topic 名称
     """
+    current_topic = None
+    available_topics = set(topic_names.keys())
+    while available_topics:
+        try:
+            event = await channel.read()
+        except EOFError:
+            break
+        if event.topic not in topic_names:
+            continue
+        if event.data is None:
+            sys.stdout.write('\n')
+            available_topics.discard(event.topic)
+            continue
+        if event.topic != current_topic:
+            if header:
+                print('===== %s =====' % topic_names[event.topic])
+            current_topic = event.topic
+        sys.stdout.write(event.data)
+        sys.stdout.flush()
 
-    async def write_whole_message(self, message: str):
-        await self.write(message)
-        await self.write(None)
 
-    async def read_whole_message(self) -> str:
-        """读取完整消息"""
-        buffer = []
-        while True:
-            result = await self._message_queue.get()
-            if result is None:
-                break
-            elif result == _EOF:
-                raise EOFError
-            buffer.append(result)
-        return ''.join(buffer)
-
-
-class BaseXmlTagFilter(abc.ABC):
-    def __init__(self, tags: Set[str]):
+class BaseXmlTagFilter(ChannelWriter):
+    def __init__(self, tags: Set[str], input_topic: str = 'response'):
         self.tags = tags
+        self.input_topic = input_topic
         self.current_tag: Optional[str] = None  # 当前激活的指定标签
         self.current_content: list[str] = []  # 当前标签的内容缓冲区
         self.pending_text: str = ""  # 跨片段的不完整标签缓冲区
@@ -73,16 +146,19 @@ class BaseXmlTagFilter(abc.ABC):
         """处理消息片段的标签内容回调"""
         pass
 
-    async def write(self, message: Optional[str]) -> None:
-        if message is None:
+    async def write(self, message: ChannelEvent):
+        if message.topic != self.input_topic:
+            return
+        if message.data is None:
             await self._finalize_fragment()
             return
-        if not message:
-            return
 
-        full_text = self.pending_text + message
+        full_text = self.pending_text + message.data
         remaining = await self._parse_content(full_text, end=False)
         self.pending_text = remaining
+
+    async def write_complete(self):
+        pass
 
     def _reset_state(self) -> None:
         """重置所有解析状态"""
@@ -218,166 +294,18 @@ class BaseXmlTagFilter(abc.ABC):
 
 
 class XmlTagToChannelFilter(BaseXmlTagFilter):
-    def __init__(self, default_channel: 'TextFragmentChannel', channel_map: Dict[str, 'TextFragmentChannel']):
-        tags = set(channel_map.keys())
-        super().__init__(tags)
-        self.default_channel = default_channel
-        self.channel_map = channel_map
+    def __init__(self, output_channel: ChannelWriter, tags: Set[str], input_topic: str = 'response'):
+        super().__init__(tags, input_topic)
+        self.output_channel = output_channel
 
     async def on_tag(self, tag: Optional[str], text: str, end: bool):
-        """将消息片段分发到对应通道"""
-        if tag and tag in self.channel_map:
-            await self.channel_map[tag].write(text)
-            if end:
-                await self.channel_map[tag].write(None)
-        else:
-            await self.default_channel.write(text)
-            if end:
-                await self.default_channel.write(None)
+        """将消息片段分发到对应主题"""
+        if text:
+            await self.output_channel.write(ChannelEvent(tag, text))
+        if end:
+            await self.output_channel.write(ChannelEvent(tag, None))
 
+    async def write_complete(self):
+        await self.output_channel.write_complete()
 
-class ChannelCollector(abc.ABC):
-    def __init__(self, channels: Dict[str, Channel]):
-        self.channels = channels
-        self.running = True
-        self.last_channel_timeout = 0.1
-
-        self._pending_futures: Dict[asyncio.Future, str] = {}  # future -> 通道名称
-        self._last_output_channel: Optional[str] = None
-
-    @abc.abstractmethod
-    async def on_channel_start(self, channel_name: str):
-        """通道开始本次输出"""
-        ...
-
-    @abc.abstractmethod
-    async def on_channel_read(self, channel_name: str, message):
-        """通道输出内容"""
-        ...
-
-    @abc.abstractmethod
-    async def on_channel_end(self, channel_name: str):
-        """通道结束本次输出"""
-        ...
-
-    @abc.abstractmethod
-    async def on_channel_eof(self, channel_name: str):
-        """通道结束所有输出"""
-        ...
-
-    async def _channel_read(self, channel_name: str, message):
-        if channel_name != self._last_output_channel:
-            if self._last_output_channel is not None:
-                await self.on_channel_end(self._last_output_channel)
-            await self.on_channel_start(channel_name)
-        if message is None:
-            if self._last_output_channel is not None:
-                await self.on_channel_end(channel_name)
-                self._last_output_channel = None
-            return
-        await self.on_channel_read(channel_name, message)
-        self._last_output_channel = channel_name
-
-    def close(self):
-        self.running = False
-
-    async def start_listening(self):
-        for channel_name, channel in self.channels.items():
-            # 根据读取模式选择对应的读取方法
-            fut = asyncio.create_task(channel.read())
-            self._pending_futures[fut] = channel_name
-
-        try:
-            while self._pending_futures and self.running:
-                # 保存当前未完成的future映射（避免wait后pending_futures被覆盖）
-                current_futures = self._pending_futures.copy()
-                done_futures = {}
-                pending_set = set()
-                last_channel_futures = []
-                for fut, channel_name in current_futures.items():
-                    if channel_name == self._last_output_channel:
-                        last_channel_futures.append(fut)
-                if last_channel_futures:
-                    _done, _pending = await asyncio.wait(
-                        last_channel_futures,
-                        timeout=self.last_channel_timeout,
-                        return_when=asyncio.FIRST_COMPLETED  # 有一个完成就返回
-                    )
-                    if _done:
-                        # 上一个通道有数据：优先处理，压制其他通道
-                        for fut, channel_name in current_futures.items():
-                            # 将其他所有任务（无论是否完成）都放回 pending，等待下一轮
-                            # 这样可以确保只要上一个通道持续有数据，就不会被其他通道打断
-                            if channel_name == self._last_output_channel and fut.done():
-                                done_futures[fut] = current_futures[fut]
-                            else:
-                                pending_set.add(fut)
-                    else:
-                        # 超时：上一个通道暂时无数据，允许处理其他通道
-                        for fut in current_futures.keys():
-                            if fut.done():
-                                done_futures[fut] = current_futures[fut]
-                            else:
-                                pending_set.add(fut)
-                else:
-                    # 等待任意future完成，或超时（返回已完成和未完成的future分组）
-                    _done, _pending = await asyncio.wait(
-                        current_futures.keys(),
-                        timeout=self.last_channel_timeout,
-                        return_when=asyncio.FIRST_COMPLETED  # 有一个完成就返回
-                    )
-                    for fut in _done:
-                        done_futures[fut] = current_futures[fut]
-                    pending_set = _pending
-
-                # 更新pending_futures为未完成的任务（后续继续等待）
-                self._pending_futures = {fut: current_futures[fut] for fut in pending_set}
-
-                # 处理已完成的future
-                for fut, channel_name in done_futures.items():
-                    channel = self.channels[channel_name]
-
-                    try:
-                        result = fut.result()  # 获取读取结果（可能抛出异常）
-                    except EOFError:
-                        await self.on_channel_eof(channel_name)
-                        continue
-                    except Exception:
-                        logger.exception("Failed to read from channel: " + channel_name)
-                        await self.on_channel_eof(channel_name)
-                        continue
-
-                    await self._channel_read(channel_name, result)
-
-                    next_fut = asyncio.create_task(channel.read())
-                    self._pending_futures[next_fut] = channel_name
-            if self._last_output_channel is not None:
-                await self.on_channel_end(self._last_output_channel)
-                await self.on_channel_eof(self._last_output_channel)
-                self._last_output_channel = None
-        except asyncio.CancelledError:
-            pass
-        finally:
-            # 清理资源：取消所有未完成的读取任务
-            for fut in self._pending_futures:
-                fut.cancel()
-            # 等待所有任务取消完成（避免资源泄漏）
-            await asyncio.gather(*self._pending_futures.keys(), return_exceptions=True)
-
-
-class DefaultTextChannelCollector(ChannelCollector):
-    async def on_channel_start(self, channel_name: str):
-        print('===== %s =====' % channel_name)
-
-    async def on_channel_read(self, channel_name: str, message):
-        if message is None:
-            print('')
-        elif message:
-            print(message, end='', flush=True)
-
-    async def on_channel_end(self, channel_name: str):
-        print('\n', flush=True)
-
-    async def on_channel_eof(self, channel_name: str):
-        print('=' * 30)
 

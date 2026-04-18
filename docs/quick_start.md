@@ -106,8 +106,7 @@ class LLMDirectRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: bool = False
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None  # 输出通道，用于接收流式响应
     post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
@@ -126,8 +125,7 @@ class LLMModuleRequest(typing.NamedTuple):
     tools: Optional[Dict[str, Dict[str, Any]]] = None
     options: Optional[Dict[str, Any]] = None
     stream: Optional[bool] = None
-    output_channel: Union[str, TextFragmentChannel, None] = None
-    reasoning_channel: Union[str, TextFragmentChannel, None] = None
+    output_channel: Optional[ChannelWriter] = None  # 输出通道，用于接收流式响应
     post_processor: Union[str, Callable[[str], Any], None] = None
 ```
 
@@ -163,6 +161,8 @@ class LLMModuleResult:
 用于与LLM提供商交互，上层应用无需关注。
 
 `LLMProviderRequest`：发送给模型提供商的请求，包含完整的请求数据和通道配置。
+> LLMClient 输出的通道内容固定使用两个 topic：`reasoning` 表示模型的思考推理内容，`response` 表示模
+型的实际响应内容。
 
 ```python
 @dataclass
@@ -176,8 +176,7 @@ class LLMProviderRequest:
     tools: Dict[str, Dict[str, Any]]  # 工具定义
     options: Dict[str, Any]           # 提供商特定选项
     stream: bool = False              # 是否流式响应
-    output_channel: Optional[TextFragmentChannel]  # 输出通道
-    reasoning_channel: Optional[TextFragmentChannel]  # 推理通道
+    output_channel: ChannelWriter = field(default_factory=NullChannel) # 输出通道
     is_cancelled: bool = False        # 是否已取消
     response: asyncio.Future[LLMProviderResponse]  # 响应 Future
 ```
@@ -254,17 +253,17 @@ class GenericError(LLMError): ...             # 通用错误
 ## 3. 应用层
 
 ### 3.1 LLMApplication 类
-LLMApplication 是框架的核心入口类，负责管理配置、模板渲染、LLM调用、通道和后处理器，是所有LLM应用的基础载体。
+LLMApplication 是框架的核心入口类，负责管理配置、模板渲染、LLM调用和后处理器，是所有LLM应用的基础载体。
 
 #### 3.1.1 核心功能
 LLMApplication 是框架的主要入口，负责：
 - 加载和管理配置文件中的模块
 - 渲染提示词模板
 - 调用 LLM 并处理响应
-- 管理上下文变量和通道
+- 管理上下文变量
 
 #### 3.1.2 初始化
-创建LLM应用实例，绑定客户端、加载配置、注册后处理器和通道，每个应用实例对应一个独立的上下文。
+创建LLM应用实例，绑定客户端、加载配置、注册后处理器，每个应用实例对应一个独立的上下文。
 
 ```python
 class LLMApplication:
@@ -273,16 +272,18 @@ class LLMApplication:
         client: LLMClient,                     # LLM 客户端
         config_dict: Optional[Dict[str, Any]] = None,  # 配置文件字典
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,  # 后处理器
-        channels: Optional[Dict[str, TextFragmentChannel]] = None,  # 自定义通道
         context_id: Optional[str] = None       # 上下文 ID（用于追踪客户端、调试审计）
     ): ...
 ```
 
 #### 3.1.3 主要接口
-通过模块名快速获取可调用的模块对象，直接传入模板参数即可完成LLM调用。
+通过模块名快速获取可调用的模块对象，直接传入模板参数即可完成LLM调用。如果需要实时流式输出，可通过`output_channel`参数传入自行创建的Channel实例。
 ```python
 # 通过下标访问模块（返回可调用对象）
-result: LLMModuleResult = await app['module_name'](template_param1='value1', ...)
+result: LLMModuleResult = await app['module_name'](
+    template_param1='value1',
+    _output_channel=your_channel  # 可选，传入自定义通道接收实时输出
+)
 ```
 
 通用请求入口，支持传入模块请求或直接请求，适合需要动态构造请求的场景。
@@ -306,12 +307,6 @@ def render_template(self, template_name: str, **kwargs) -> str: ...
 def add_processor(self, name: str, processor: Callable): ...
 ```
 
-注册自定义通道，用于接收流式响应、推理内容等，实现实时输出到前端、文件等自定义场景。
-```python
-# 添加自定义通道
-def add_channel(self, name: str, channel: TextFragmentChannel): ...
-```
-
 发送自定义审计事件，用于记录业务层面的操作，便于后续排查问题和统计业务数据。LLMClient 后端接收，统一处理。
 ```python
 # 触发审计事件
@@ -327,7 +322,6 @@ def factory(
         client: _client.LLMClient,
         config_dict: Optional[Dict[str, Any]] = None,
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-        channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None,
 ) -> Callable[..., 'LLMApplication']: ...
 ```
 
@@ -501,73 +495,53 @@ final_task = await workflow.run(start_task)
 
 ### 4.1 Channel 通道系统
 
-通道系统用于异步传输流式响应、推理内容等，用于实现实时输出。
-
-#### 4.1.1 基础通道
-Channel是通用的异步消息通道，用于不同组件之间的异步通信。
-
-TextFragmentChannel专门用于传输文本片段的通道，支持流式接收LLM的输出片段。
+通道系统用于异步传输流式响应、推理内容等，用于实现实时输出。LLMClient 输出的通道内容固定使用两个 topic：`reasoning`表示模型的思考推理内容，`response`表示模型的实际响应内容。
 
 ```python
-class Channel(Generic[T]):
-    """通用通道基类"""
-    async def read(self) -> T: ...
-    async def write(self, message: T): ...
+# 通道事件，包含topic和数据
+class ChannelEvent(NamedTuple):
+    topic: str
+    data: Any
+
+class Channel:
+    """通用通道类，支持读写ChannelEvent"""
+    async def read(self) -> ChannelEvent: ...
+    async def write(self, message: ChannelEvent): ...
     # 标记通道写入结束，EOF
     async def write_complete(self): ...
 
-class TextFragmentChannel(Channel[Optional[str]]):
-    """
-    文本片段通道
-    None 为一整条消息的结束符
-    """
-    # 写入一条完整消息
-    async def write_whole_message(self, message: str): ...
-    # 读取所有片段，并合并为一条完整消息
-    async def read_whole_message(self) -> str: ...
+class NullChannel(Channel):
+    """空通道，丢弃所有写入内容，默认使用"""
 ```
 
-#### 4.1.2 通道收集器
-主要用于编写应用时，同时监听多个通道，将不同来源的输出统一处理。
-
+框架提供便捷函数直接打印通道内容到控制台：
 ```python
-class ChannelCollector(abc.ABC):
-    """多通道收集器基类"""
-    async def start_listening(self): ...
-    def close(self): ...
-
-    @abc.abstractmethod
-    async def on_channel_start(self, channel_name: str):
-        """通道开始本次输出"""
-
-    @abc.abstractmethod
-    async def on_channel_read(self, channel_name: str, message):
-        """通道输出内容"""
-
-    @abc.abstractmethod
-    async def on_channel_end(self, channel_name: str):
-        """通道结束本次输出"""
-
-    @abc.abstractmethod
-    async def on_channel_eof(self, channel_name: str):
-        """通道结束所有输出"""
-
-class DefaultTextChannelCollector(ChannelCollector):
-    """默认文本通道收集器（打印到控制台）"""
+async def print_channel_output(
+    channel: ChannelReader,
+    topic_names: Dict[str, str],
+    header: bool = False
+):
+    """
+    将Channel内容直接打印到stdout
+    :param channel: 监听的 Channel
+    :param topic_names: topic 名称和显示名称映射，比如 {'reasoning': '思考过程', 'response': '输出内
+容'}
+    :param header: 是否打印 topic 名称标题
+    """
 ```
 
-#### 4.1.3 XML 标签过滤器
-BaseXmlTagFilter从流式文本中自动识别XML标签，主要用于LLM输出单层XML标签，表示不同类型的文本，输出到不同通道。例如：输出当前状态、给用户的输出、给应用程序的处理结果。
+#### 4.1.1 XML 标签过滤器
+BaseXmlTagFilter从流式文本中自动识别XML标签，主要用于LLM输出单层XML标签，表示不同类型的文本，输出到不同主题。例如：输出当前状态、给用户的输出、给应用程序的处理结果。
 
 ```python
-class BaseXmlTagFilter(abc.ABC):
+class BaseXmlTagFilter(ChannelWriter):
     """XML 标签过滤基类"""
-    async def write(self, message: Optional[str]) -> None: ...
+    async def write(self, message: ChannelEvent) -> None: ...
 
 class XmlTagToChannelFilter(BaseXmlTagFilter):
-    """XML 标签分发到不同通道"""
-    def __init__(self, default_channel: TextFragmentChannel,
-                 channel_map: Dict[str, TextFragmentChannel]): ...
+    """XML 标签分发到不同主题"""
+    def __init__(self, output_channel: ChannelWriter, tags: Set[str], input_topic: str = 'response')
+: ...
 ```
 
 ### 4.2 LLMClient 客户端抽象
@@ -586,8 +560,7 @@ class LLMClient(abc.ABC):
         options: Optional[Dict[str, Any]] = None,
         stream: bool = False,
         context_id: Optional[str] = None,
-        output_channel: Optional[TextFragmentChannel] = None,
-        reasoning_channel: Optional[TextFragmentChannel] = None
+        output_channel: Optional[ChannelWriter] = None
     ) -> LLMProviderRequest
 
     async def cancel(self, request_id: str): ...
@@ -738,7 +711,7 @@ model = "ep-xxx"
 headers = { Authorization = "Bearer YOUR_API_KEY" }
 
 [api."GPT-4"]
-url = "https://api.openai.com/v1/chat/completions"
+url = "https://api.openai.com/v3/chat/completions"
 type = "openai"
 model = "gpt-4"
 headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
@@ -751,8 +724,6 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 [module_default]
 model = "Fast-Model"         # 默认使用快速推理模型
 stream = false
-output_channel = "stdout"
-reasoning_channel = "reasoning"
 options = { max_tokens = 4000 }
 
 # 全局模板（可被模块引用）
@@ -864,7 +835,7 @@ my_llm_app/
 实现代码修改工具：
 - 加载配置文件和提示词模板
 - 创建客户端和应用实例
-- 调用代码编辑模块，处理用户输入
+- 创建自定义Channel接收实时输出，传入模块调用
 - 使用后处理器提取代码块
 
 ```python
@@ -884,27 +855,29 @@ async def main():
         app = aitoolman.LLMApplication(client, prompt_config)
         app.add_processor("extract_code", extract_code)
 
-        # 监听输出通道
-        collector = aitoolman.DefaultTextChannelCollector({
-            '思考过程': app.channels['reasoning'],
-            '代码输出': app.channels['stdout']
-        })
-        output_task = asyncio.create_task(collector.start_listening())
+        # 创建通道，监听输出
+        output_channel = aitoolman.Channel()
+        output_task = asyncio.create_task(aitoolman.print_channel_output(
+            output_channel,
+            topic_names={'reasoning': '思考过程', 'response': '代码输出'},
+            header=True
+        ))
 
-        # 调用代码编辑器模块
+        # 调用代码编辑器模块，传入输出通道
         result = await app['code_editor'](
             code_content=open("app.py").read(),
             instruction="添加错误处理逻辑",
-            references=[{"filename": "utils.py", "content": open("utils.py").read()}]
+            references=[{"filename": "utils.py", "content": open("utils.py").read()}],
+            _output_channel=output_channel
         )
         result.raise_for_status()
+
+        # 等待输出任务完成
+        await output_task
 
         # 保存结果
         with open("app_modified.py", "w") as f:
             f.write(result.data)
-
-        collector.close()
-        await output_task
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -1282,7 +1255,7 @@ except LLMResponseFormatError as e:
 - **缓存策略**：对重复查询实现结果缓存
 
 ### 10.5 调试技巧
-- **通道监听**：使用 `ChannelCollector` 实时查看 LLM 输出
+- **通道监听**：创建自定义Channel并传入请求，使用 `print_channel_output` 实时查看 LLM 输出
 - **审计日志**：启用监控器记录所有请求和响应
 - **逐步执行**：复杂工作流可先测试单个任务
 - **提供商日志**：启用 `logging.DEBUG` 查看原始 API 交互

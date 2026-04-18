@@ -23,8 +23,6 @@ class ModuleConfig(NamedTuple):
     templates: Dict[str, str] = {}
     tools: Dict[str, Dict[str, Any]] = {}
     stream: bool = False
-    output_channel: Optional[_channel.TextFragmentChannel] = None
-    reasoning_channel: Optional[_channel.TextFragmentChannel] = None
     post_processor: Optional[str] = None
     options: Dict[str, Any] = {}
 
@@ -85,6 +83,7 @@ class _LLMModule(NamedTuple):
             _model_name: Optional[str] = None,
             _context_messages: Optional[List[Message]] = None,
             _media_content: Optional[List[MediaContent]] = None,
+            _output_channel: Optional[_channel.ChannelWriter] = None,
             **kwargs
     ) -> LLMModuleResult:
         return await self.app.call(LLMModuleRequest(
@@ -92,7 +91,8 @@ class _LLMModule(NamedTuple):
             template_params=kwargs,
             model_name=_model_name,
             context_messages=_context_messages,
-            media_content=_media_content
+            media_content=_media_content,
+            output_channel=_output_channel
         ))
 
 
@@ -104,13 +104,11 @@ class LLMApplication:
         client: _client.LLMClient,
         config_dict: Optional[Dict[str, Any]] = None,
         processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-        channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None,
         context_id: Optional[str] = None
     ):
         self.client: _client.LLMClient = client
         self.context_id: str = context_id or util.get_id()
         self.vars: Dict[str, Any] = {}
-        self.channels: Dict[str, _channel.Channel] = {}
         self.processors: Dict[str, Callable[[str], Any]] = postprocess.DEFAULT_PROCESSORS.copy()
 
         # 加载全局工具定义
@@ -138,15 +136,6 @@ class LLMApplication:
         if processors:
             self.processors.update(processors)
 
-        if channels:
-            self.channels.update(channels)
-        if 'stdin' not in self.channels:
-            self.channels['stdin'] = _channel.Channel()
-        if 'stdout' not in self.channels:
-            self.channels['stdout'] = _channel.TextFragmentChannel()
-        if 'reasoning' not in self.channels:
-            self.channels['reasoning'] = _channel.TextFragmentChannel()
-
         self.module_default: ModuleConfig = self._parse_module_config(
             '', self.config.get('module_default', {}))
         self.module_configs: Dict[str, ModuleConfig] = {}
@@ -169,12 +158,6 @@ class LLMApplication:
                 # 使用模块自定义配置（覆盖全局配置）
                 resolved_tools[tool_name] = tool_config
 
-        # 解析通道配置
-        channel_name = config.get('output_channel')
-        output_channel = self.channels[channel_name] if channel_name else None
-        channel_name = config.get('reasoning_channel')
-        reasoning_channel = self.channels[channel_name] if channel_name else None
-
         # 创建模块配置对象
         return ModuleConfig(
             name=module_name,
@@ -183,8 +166,6 @@ class LLMApplication:
             templates=config.get('template', {}),
             tools=resolved_tools,
             stream=config.get('stream', False),
-            output_channel=output_channel,
-            reasoning_channel=reasoning_channel,
             post_processor=config.get('post_processor'),
             options=config.get('options', {})
         )
@@ -218,10 +199,6 @@ class LLMApplication:
         all_vars = {**self.vars, **kwargs}
         return self.jinja_env.get_template(template_name).render(**all_vars)
 
-    def add_channel(self, name: str, channel: _channel.TextFragmentChannel):
-        """添加自定义通道"""
-        self.channels[name] = channel
-
     def add_module(self, module_config: ModuleConfig):
         """添加LLM模块"""
         self.module_configs[module_config.name] = module_config
@@ -248,29 +225,26 @@ class LLMApplication:
             **module_request.template_params
         ), role='user', media_content=module_request.media_content))
         config = self.module_configs[module_request.module_name]
+        if module_request.output_channel is not None:
+            output_channel = module_request.output_channel
+        else:
+            output_channel = _channel.NullChannel()
         return LLMDirectRequest(
             model_name=(module_request.model_name or config.model),
             messages=messages,
             tools=(module_request.tools if module_request.tools is not None else config.tools),
             options=(module_request.options if module_request.options is not None else config.options),
             stream=(module_request.stream if module_request.stream is not None else config.stream),
-            output_channel=(module_request.output_channel if module_request.output_channel is not None else config.output_channel),
-            reasoning_channel=(module_request.reasoning_channel if module_request.reasoning_channel is not None else config.reasoning_channel),
+            output_channel=output_channel,
             post_processor=(module_request.post_processor if module_request.post_processor is not None else config.post_processor),
         )
 
     async def _send_request(self, direct_request: LLMDirectRequest) -> LLMModuleResult:
         """直接发送LLM请求"""
-        output_channel = (
-            self.channels[direct_request.output_channel]
-            if isinstance(direct_request.output_channel, str)
-            else direct_request.output_channel
-        )
-        reasoning_channel = (
-            self.channels[direct_request.reasoning_channel]
-            if isinstance(direct_request.reasoning_channel, str)
-            else direct_request.reasoning_channel
-        )
+        if direct_request.output_channel is not None:
+            output_channel = direct_request.output_channel
+        else:
+            output_channel = _channel.NullChannel()
         model_name = direct_request.model_name
         if model_name in self.model_alias:
             model_name = self.model_alias[model_name]
@@ -281,8 +255,7 @@ class LLMApplication:
             options=direct_request.options,
             stream=direct_request.stream,
             context_id=self.context_id,
-            output_channel=output_channel,
-            reasoning_channel=reasoning_channel
+            output_channel=output_channel
         )
         response = await request.response
         return LLMModuleResult.from_response(direct_request, response)
@@ -328,15 +301,13 @@ class LLMApplication:
             cls,
             client: _client.LLMClient,
             config_dict: Optional[Dict[str, Any]] = None,
-            processors: Optional[Dict[str, Callable[[str], Any]]] = None,
-            channels: Optional[Dict[str, _channel.TextFragmentChannel]] = None,
+            processors: Optional[Dict[str, Callable[[str], Any]]] = None
     ) -> Callable[..., 'LLMApplication']:
         """创建应用工厂函数"""
         return functools.partial(
             cls,
             client=client,
             config_dict=config_dict,
-            processors=processors,
-            channels=channels
+            processors=processors
         )
 

@@ -1,4 +1,3 @@
-import os
 import sys
 import json
 import logging
@@ -15,15 +14,6 @@ from . import code_editor
 from .model import Message, MediaContent, LLMDirectRequest
 
 logger = logging.getLogger(__name__)
-
-
-async def stream_stdout(channel):
-    while True:
-        chunk = await channel.read()
-        if chunk is None:  # EOF
-            break
-        sys.stdout.write(chunk)
-        sys.stdout.flush()
 
 
 async def run_client_session(
@@ -97,6 +87,7 @@ async def run_client_session(
                 raise ValueError(f"Invalid JSON for --body: " + body_json)
 
         # 5. Construct LLMDirectRequest
+        output_channel = _channel.Channel()
         direct_request = LLMDirectRequest(
             model_name=model_name,
             messages=[Message(
@@ -106,31 +97,26 @@ async def run_client_session(
             )],
             options=options,
             stream=not batch_mode,
-            output_channel="stdout",
-            reasoning_channel=None if no_think else "reasoning"
+            output_channel=output_channel,
         )
 
         # 6. Handle Output
         output_task = None
-        collector = None
 
         if not no_think:
-            # Use DefaultTextChannelCollector for full output (Thinking + Response)
-            collector = _channel.DefaultTextChannelCollector({
-                'Thinking': app.channels['reasoning'],
-                'Response': app.channels['stdout']
-            })
-            output_task = asyncio.create_task(collector.start_listening())
+            output_task = asyncio.create_task(_channel.print_channel_output(
+                output_channel,
+                topic_names={'reasoning': 'Thinking', 'response': 'Response'},
+                header=True
+            ))
         elif not batch_mode:
-            # Stream mode + no-think: Only output stdout channel directly
-            output_task = asyncio.create_task(stream_stdout(app.channels['stdout']))
+            output_task = asyncio.create_task(_channel.print_channel_output(
+                output_channel, {'response': 'response'}))
 
         # 7. Execute Request
         response = await app.call(direct_request)
 
         # 8. Cleanup
-        if collector:
-            collector.close()
         if output_task:
             await output_task
         response.raise_for_status()

@@ -10,21 +10,23 @@ import zmq.asyncio
 from . import util
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message
 from .provider import LLMProviderManager
-from .channel import TextFragmentChannel
+from .channel import ChannelWriter, ChannelEvent
 
 logger = logging.getLogger(__name__)
 
 
-class ZmqTextChannel(TextFragmentChannel):
-    """适配ZeroMQ的TextChannel，写入时触发Server发送channel_write消息"""
-    def __init__(self, server: 'LLMZmqServer', request_id: str, channel_type: str):
-        super().__init__()
+class ZmqServerChannel(ChannelWriter):
+    """适配ZeroMQ的Channel"""
+    def __init__(self, server: 'LLMZmqServer', request_id: str):
         self.server = server
         self.request_id = request_id
-        self.channel_type = channel_type  # "response" 或 "reasoning"
 
-    async def write(self, message: Optional[str]):
-        await self.server.send_channel_write(self.request_id, self.channel_type, "fragment", message)
+    async def write(self, item: ChannelEvent, timeout: Optional[float] = None) -> None:
+        await self.server.send_channel_write(
+            self.request_id, item.topic, 'fragment', item.data)
+
+    async def write_eof(self, timeout: Optional[float] = None) -> None:
+        pass
 
 
 class LLMZmqServer:
@@ -120,8 +122,7 @@ class LLMZmqServer:
         context_id = json_data.get('context_id')
 
         # 创建ZmqTextChannel（捕获channel写入并推送）
-        output_channel = ZmqTextChannel(self, request_id, 'response')
-        reasoning_channel = ZmqTextChannel(self, request_id, 'reasoning')
+        output_channel = ZmqServerChannel(self, request_id)
 
         # 初始化LLMRequest
         request = LLMProviderRequest(
@@ -133,8 +134,7 @@ class LLMZmqServer:
             tools=tools,
             options=options,
             stream=stream,
-            output_channel=output_channel,
-            reasoning_channel=reasoning_channel
+            output_channel=output_channel
         )
         self.active_requests[request_id] = request
         logger.info("[%s] Start request. model: %s, stream: %s", request_id, model_name, stream)
