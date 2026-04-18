@@ -91,8 +91,6 @@ headers = {Authorization = "Bearer xxx"}
 |---------------------|-----|-------------|-----------------------------------|
 | `model`             | 字符串 | 无（建议配置）     | 默认使用的模型名称或别名                      |
 | `stream`            | 布尔值 | false       | 是否使用流式输出                          |
-| `output_channel`    | 字符串 | "stdout"    | 默认输出通道名称                          |
-| `reasoning_channel` | 字符串 | "reasoning" | 默认推理通道名称                          |
 | `post_processor`    | 字符串 | 无           | 后处理器名称，需在应用中注册                    |
 | `options`           | 字典  | `{}`        | 默认请求选项，如 temperature、max_tokens 等 |
 
@@ -104,8 +102,6 @@ headers = {Authorization = "Bearer xxx"}
 | `description`       | 字符串 | `''`                                     | 该模块的描述文本                             |
 | `model`             | 字符串 | 继承自 `[module_default].model`             | 该模块使用的模型名称或别名                        |
 | `stream`            | 布尔值 | 继承自 `[module_default].stream`            | 该模块是否使用流式输出                          |
-| `output_channel`    | 字符串 | 继承自 `[module_default].output_channel`    | 该模块的输出通道                             |
-| `reasoning_channel` | 字符串 | 继承自 `[module_default].reasoning_channel` | 该模块的推理通道                             |
 | `post_processor`    | 字符串 | 继承自 `[module_default].post_processor`    | 该模块的后处理器                             |
 | `options`           | 字典  | 继承自 `[module_default].options`           | 该模块的请求选项                             |
 | `template`          | 字典  | `{}`                                     | 模板配置，必须包含 `user` 模板，可选包含 `system` 模板 |
@@ -157,7 +153,6 @@ tools."工具名称".param."参数名".required = true   # 是否必需
 [module_default]
 model = "Fast-Model"  # 使用模型别名
 stream = false
-output_channel = "stdout"
 
 [module.raw]
 template.user = """{{content}}"""
@@ -243,15 +238,10 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_provider.toml` 的 `[api]` 部分的模型名称，也可以是 `[model_alias]` 部分定义的别名。
 
-2. **通道管理**：默认提供三个通道：
-   - `stdin`：标准输入（非片段模式）
-   - `stdout`：标准输出（片段模式）
-   - `reasoning`：推理输出（片段模式）
+2. **模板变量**：模板中使用的变量必须在调用时提供，否则会渲染失败。
 
-3. **模板变量**：模板中使用的变量必须在调用时提供，否则会渲染失败。
+3. **流式输出**：当 `stream=true` 时，输出会通过通道的 `write` 方法分片发送。
 
-4. **流式输出**：当 `stream=true` 时，输出会通过通道的 `write_fragment` 方法分片发送。
+4. **工具调用**：工具配置必须包含完整的参数定义，否则可能无法正确解析。
 
-5. **工具调用**：工具配置必须包含完整的参数定义，否则可能无法正确解析。
-
-6. **模型别名映射**：`[model_alias]` 中的别名必须映射到 `[api]` 部分已定义的模型名称。建议在 app_prompt.toml 中指定别名，以方便最终用户替换模型。
+5. **模型别名映射**：`[model_alias]` 中的别名必须映射到 `[api]` 部分已定义的模型名称。建议在 app_prompt.toml 中指定别名，以方便最终用户替换模型。

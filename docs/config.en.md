@@ -92,8 +92,6 @@ Default module configuration inherited by all modules.
 |---------------------|---------|---------------------|-----------------------------------------------------------------------------|
 | `model`             | String  | None (Recommended)  | Default model name or alias to use                                          |
 | `stream`            | Boolean | false               | Whether to use streaming output                                             |
-| `output_channel`    | String  | "stdout"            | Default output channel name                                                 |
-| `reasoning_channel` | String  | "reasoning"         | Default reasoning channel name                                              |
 | `post_processor`    | String  | None                | Post-processor name, must be registered in the application                  |
 | `options`           | Dict    | `{}`                | Default request options such as temperature, max_tokens, etc.               |
 
@@ -105,8 +103,6 @@ Specific configuration for each module, module names can be customized.
 | `description`       | String  | `''`                                                | Description text for this module                                                       |
 | `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module                                                |
 | `stream`            | Boolean | Inherited from `[module_default].stream`            | Whether this module uses streaming output                                              |
-| `output_channel`    | String  | Inherited from `[module_default].output_channel`    | Output channel for this module                                                         |
-| `reasoning_channel` | String  | Inherited from `[module_default].reasoning_channel` | Reasoning channel for this module                                                      |
 | `post_processor`    | String  | Inherited from `[module_default].post_processor`    | Post-processor for this module                                                         |
 | `options`           | Dict    | Inherited from `[module_default].options`           | Request options for this module                                                        |
 | `template`          | Dict    | `{}`                                                | Template configuration, must include a `user` template, optionally a `system` template |
@@ -158,7 +154,6 @@ tools."Tool Name".param."Parameter Name".required = true   # Whether the paramet
 [module_default]
 model = "Fast-Model"  # Using model alias
 stream = false
-output_channel = "stdout"
 
 [module.raw]
 template.user = """{{content}}"""
@@ -249,15 +244,10 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_provider.toml`, or an alias defined in the `[model_alias]` section.
 
-2. **Channel Management**: Three channels are provided by default:
-   - `stdin`: Standard input (non-fragmented mode)
-   - `stdout`: Standard output (fragmented mode)
-   - `reasoning`: Reasoning output (fragmented mode)
+2. **Template Variables**: Variables used in templates must be provided during invocation, otherwise rendering will fail.
 
-3. **Template Variables**: Variables used in templates must be provided during invocation, otherwise rendering will fail.
+3. **Streaming Output**: When `stream=true`, output will be sent in fragments via the channel's `write` method.
 
-4. **Streaming Output**: When `stream=true`, output will be sent in fragments via the channel's `write_fragment` method.
+4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
-
-6. **Model Alias Mapping**: Aliases in `[model_alias]` must map to model names already defined in the `[api]` section. It is recommended to use aliases in app_prompt.toml to facilitate model replacement by end users.
+5. **Model Alias Mapping**: Aliases in `[model_alias]` must map to model names already defined in the `[api]` section. It is recommended to use aliases in app_prompt.toml to facilitate model replacement by end users.
