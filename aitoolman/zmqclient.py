@@ -148,8 +148,8 @@ class LLMZmqClient(LLMClient):
         # 构造LLMResponse
         finish_reason = FinishReason(response_data['finish_reason']) if response_data['finish_reason'] in FinishReason.__members__ else response_data['finish_reason']
         if not response_data['response_text'] and not response_data['response_reasoning']:
-            await request.output_channel.write(ChannelEvent('reasoning', 'end', None))
-            await request.output_channel.write(ChannelEvent('response', 'end', None))
+            await request.output_channel.write(ChannelEvent('reasoning', None))
+            await request.output_channel.write(ChannelEvent('response', None))
         response = LLMProviderResponse(
             client_id=response_data['client_id'],
             context_id=response_data['context_id'],
