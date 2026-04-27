@@ -3,8 +3,7 @@ import json
 import logging
 import asyncio
 import argparse
-import mimetypes
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from . import app as _app
 from . import util
@@ -14,6 +13,9 @@ from . import code_editor
 from .model import Message, MediaContent, LLMDirectRequest
 
 logger = logging.getLogger(__name__)
+
+
+_LOOP_FACTORY = asyncio.SelectorEventLoop if sys.platform == 'win32' else None
 
 
 async def run_client_session(
@@ -66,17 +68,7 @@ async def run_client_session(
         # 3. Prepare Media Content
         media_content_list = []
         if media_files:
-            for f in media_files:
-                with open(f, 'rb') as file:
-                    file_data = file.read()
-                mime_type, _ = mimetypes.guess_type(f)
-                if not mime_type:
-                    raise ValueError("Unknown file type: " + f)
-                media_content_list.append(MediaContent(
-                    media_type=mime_type.split('/', 1)[0],
-                    data=file_data,
-                    mime_type=mime_type
-                ))
+            media_content_list = [MediaContent.load_from_path(m) for m in media_files]
 
         # 4. Prepare Options
         options = {}
@@ -158,7 +150,8 @@ async def run_code_editor(args):
             output_arg=args.output,
             batch_mode=args.batch,
             overwrite=args.overwrite,
-            use_system=(not args.no_system)
+            use_system=(not args.no_system),
+            media_files=args.media
         )
         if args.raw_output:
             with open(args.raw_output, 'w', encoding='utf-8') as f:
@@ -169,7 +162,7 @@ def run_zmqserver(config_file):
     from . import zmqserver
     config = util.load_config(config_file)
     service = zmqserver.LLMZmqServer(config)
-    asyncio.run(service.run())
+    asyncio.run(service.run(), loop_factory=_LOOP_FACTORY)
 
 
 def run_monitor(pub_endpoint, db_path=None):
@@ -297,7 +290,7 @@ def main():
         help="ZeroMQ认证令牌"
     )
     parser_code_edit.add_argument(
-        "-m", "--model", type=str, default='DeepSeek-v3.2-251201',
+        "-m", "--model", type=str, required=True,
         help="指定模型名称（如: Kimi-K2, DeepSeek-v3）"
     )
 
@@ -320,6 +313,10 @@ def main():
     parser_code_edit.add_argument(
         "-p", "--prompt", type=str, required=False,
         help="提示词文件路径"
+    )
+    parser_code_edit.add_argument(
+        '-M', '--media', nargs='*', type=str,
+        help='图片/视频文件路径（多模态）'
     )
     parser_code_edit.add_argument(
         "--batch", action="store_true",
@@ -365,9 +362,9 @@ def main():
             no_think=args.no_think,
             batch_mode=args.batch,
             output=args.output
-        ))
+        ), loop_factory=_LOOP_FACTORY)
     elif args.subparser_name == 'code-edit':
-        asyncio.run(run_code_editor(args))
+        asyncio.run(run_code_editor(args), loop_factory=_LOOP_FACTORY)
     elif args.subparser_name == 'monitor':
         run_monitor(args.pub_endpoint, args.db_path)
 

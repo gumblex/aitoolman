@@ -10,6 +10,8 @@ import aitoolman
 import mock_llmclient
 
 logging.basicConfig(level="DEBUG", format="%(asctime)s - %(levelname)s - %(message)s")
+logging.getLogger('asyncio').setLevel(logging.INFO)
+
 
 TEST_CONFIG = aitoolman.load_config_str("""
 [module.test_module_with_input]
@@ -24,8 +26,8 @@ class TestTaskBasic(unittest.IsolatedAsyncioTestCase):
     async def test_task_success(self):
         """测试任务成功执行"""
         class SimpleTask(aitoolman.Task):
-            async def run(self, x, y):
-                return x + y
+            async def run(self):
+                return self.input_data['x'] + self.input_data['y']
 
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
@@ -62,8 +64,8 @@ class TestTaskBasic(unittest.IsolatedAsyncioTestCase):
                 self.input_data = {"value": value}
                 self.workflow = workflow
 
-            async def run(self, value):
-                return value * 2
+            async def run(self):
+                return self.input_data['value'] * 2
 
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
@@ -81,14 +83,14 @@ class FailingTask(aitoolman.Task):
 
 
 class SuccessTask(aitoolman.Task):
-    async def run(self, x):
-        return x * 2
+    async def run(self):
+        return self.input_data['x'] * 2
 
 
 class SlowTask(aitoolman.Task):
-    async def run(self, sec):
-        await asyncio.sleep(sec)
-        return sec
+    async def run(self):
+        await asyncio.sleep(self.input_data['sec'])
+        return self.input_data['sec']
 
 
 class TestTaskDependency(unittest.IsolatedAsyncioTestCase):
@@ -452,12 +454,12 @@ class TestLLMWorkflowToolUseCase(unittest.IsolatedAsyncioTestCase):
 
         # 定义不同意图的Task
         class GreetTask(aitoolman.Task):
-            async def run(self, name):
-                return f"你好，{name}！"
+            async def run(self):
+                return f"你好，{self.input_data['name']}！"
 
         class CalculateTask(aitoolman.Task):
-            async def run(self, a, b):
-                return f"结果是：{a+b}"
+            async def run(self):
+                return f"结果是：{self.input_data['a'] + self.input_data['b']}"
 
         class UnknownTask(aitoolman.Task):
             async def run(self):

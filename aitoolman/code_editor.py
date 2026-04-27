@@ -5,11 +5,11 @@ import sys
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pathlib import Path
 
 from . import app, postprocess
-from .model import LLMModuleRequest
+from .model import LLMModuleRequest, MediaContent
 from .channel import Channel, print_channel_output
 
 # 日志配置
@@ -18,6 +18,11 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# 大小限制常量
+WARN_FILE_CHARS = 128 * 1024
+MAX_FILE_BYTES = 200 * 1024
+WARN_PROMPT_CHARS = 200 * 1024
 
 
 # ------------------------------
@@ -61,26 +66,30 @@ reasoning_channel = "reasoning"
 template.user = """{% if references %}
 # 参考文件
 {% for ref in references %}
-<file name="{{ ref.filename }}">{{ref.content}}</file>
+<file name="{{ ref.filename }}"><![CDATA[{{ref.content}}]]></file>
 {% endfor %}
 {% endif %}
 {% if input_files -%}
-# 当前文件
+# 当前关注文件
 {% for file in input_files -%}
-<file name="{{ file.filename }}">{{file.content}}</file>
+<file name="{{ file.filename }}"><![CDATA[{{file.content}}]]></file>
 {% endfor %}
 {%- endif %}
-# 要求
+# 用户需求
 {{user_instruction}}
 {% if use_system -%}
-用 XML 格式输出新增或修改后的文件内容（代码/文本文件本身，不是指可能用代码输出的文件）：
+
+***
+
+# 系统输出格式
+用 XML 格式输出根据需求编写或修改后的文件内容（不是指代码可能使用的输出格式）：
 <output>
-{% if input_files|length == 1 -%}
-<file name="{{ input_files[0].filename }}"><![CDATA[文件内容]]></file>
+{% if input_files|length == 1 and output_file -%}
+<file name="{{ output_file }}"><![CDATA[文件内容]]></file>
 {%- else -%}
 <file name="输出文件名1"><![CDATA[文件内容1]]></file>
 <file name="输出文件名2"><![CDATA[文件内容2]]></file>
-{% endif %}
+{%- endif %}
 </output>
 {% endif %}"""
 post_processor = "extract_code_blocks"
@@ -129,6 +138,73 @@ def handle_existing_file(file_path: Path, overwrite: bool) -> Path:
         return new_path
 
 
+def load_files_from_paths(paths: List[str], relative_to: Optional[Path] = None) -> List[Dict]:
+    """
+    从路径列表加载文件，支持递归遍历目录
+    :param paths: 输入的文件/目录路径列表
+    :param relative_to: 如果不为None，返回的文件名转为相对于该路径的相对路径
+    :return: 加载成功的文件列表，每个元素为 {'filename': str, 'content': str}
+    """
+    loaded = []
+    base_path = (relative_to or Path.cwd()).resolve()
+
+    def _process_path(p: Path, is_direct_specified: bool = True):
+        if not p.exists():
+            logger.warning(f"路径不存在，跳过: {p}")
+            return
+        # 处理目录
+        if p.is_dir():
+            for child in p.iterdir():
+                # 非直接指定的路径跳过.开头的隐藏文件/目录
+                if not is_direct_specified and child.name.startswith('.'):
+                    logger.debug(f"跳过隐藏文件/目录: {child}")
+                    continue
+                _process_path(child, is_direct_specified=False)
+            return
+        # 处理文件
+        if p.is_file():
+            if not is_direct_specified and p.name.startswith('.'):
+                logger.debug(f"跳过隐藏文件: {p}")
+                return
+
+            # 检查文件大小是否超过最大限制
+            file_size = p.stat().st_size
+            if file_size > MAX_FILE_BYTES:
+                logger.warning(f"文件大小超过{MAX_FILE_BYTES}字节，跳过: {p}")
+                return
+
+            # 读取文件校验
+            try:
+                content = p.read_text(encoding='utf-8')
+                # 排除含有NUL字符的文件
+                if '\x00' in content:
+                    logger.warning(f"二进制文件，跳过: {p}")
+                    return
+
+                # 检查字符数是否超过警告阈值，超过则截断
+                if len(content) > WARN_FILE_CHARS:
+                    logger.warning(f"文件字符数超过{WARN_FILE_CHARS}，已截断: {p}")
+                    content = content[:WARN_FILE_CHARS] + "\n\n<!-- 文件内容过长已截断 -->"
+
+                # 处理文件名路径
+                filename = str(p)
+                if relative_to:
+                    try:
+                        filename = str(p.relative_to(base_path, walk_up=True).as_posix())
+                    except ValueError:
+                        filename = str(p)
+                loaded.append({'filename': filename, 'content': content})
+            except UnicodeDecodeError:
+                logger.warning(f"文件不是UTF-8编码，跳过: {p}")
+            except Exception as e:
+                logger.warning(f"读取文件失败 {p}: {str(e)}")
+
+    for path_str in paths:
+        p = Path(path_str).resolve()
+        _process_path(p, is_direct_specified=True)
+    return loaded
+
+
 def read_user_input(prompt) -> str:
     print(prompt + "（结束后输入单独的一行 . ）")
     lines = []
@@ -154,29 +230,30 @@ async def process_files(
         output_arg: str,
         batch_mode: bool,
         overwrite: bool,
-        use_system: bool = True
+        use_system: bool = True,
+        media_files: Optional[List[str]] = None
 ) -> app.LLMModuleResult:
     """处理多个文件"""
     logger.info("使用模型: %s", model_name)
-    logger.info("输入文件: %s", ', '.join(input_files))
+    if reference_files:
+        logger.info("参考文件: %s", ', '.join(reference_files))
+    if input_files:
+        logger.info("输入文件: %s", ', '.join(input_files))
 
-    # 处理参考文件
-    references = []
-    for ref_file in reference_files:
-        file_path = Path(ref_file)
-        with open(ref_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        references.append({'filename': str(file_path), 'content': content})
+    # 处理参考文件（替换原有逻辑）
+    references = load_files_from_paths(reference_files)
+    # 处理输入文件（替换原有逻辑）
+    input_files_list = load_files_from_paths(input_files, relative_to=Path.cwd())
 
-    # 处理输入文件
-    input_files_list = []
-    for input_file in input_files:
-        with open(input_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        input_files_list.append({
-            'filename': os.path.relpath(input_file, os.curdir),
-            'content': content
-        })
+    # 校验是否还有有效文件
+    if input_files and not input_files_list:
+        raise ValueError("所有输入文件都因过大/格式问题被排除，无法继续处理")
+    if not input_files and reference_files and not references:
+        raise ValueError("所有参考文件都因过大/格式问题被排除，无法继续处理")
+
+    media_content_list = []
+    if media_files:
+        media_content_list = [MediaContent.load_from_path(m) for m in media_files]
 
     # 获取用户指令
     user_instruction = None
@@ -194,15 +271,28 @@ async def process_files(
         header=True
     ))
 
+    output_file = None
+    if output_arg:
+        output_path = Path(output_arg)
+        if output_path.is_file() or '.' in output_path.name:
+            output_file = output_arg
+
     template_params = {
         'user_instruction': user_instruction,
         'input_files': input_files_list,
+        'output_file': output_file,
         'references': references,
         'use_system': use_system
     }
+    total_chars = sum(len(f['content']) + len(f['filename']) for f in references) + \
+                  sum(len(f['content']) + len(f['filename']) for f in input_files_list) + \
+                  len(user_instruction)
+    if total_chars > WARN_PROMPT_CHARS:
+        logger.warning(f"总文件字符数超过警告阈值 {total_chars} > {WARN_PROMPT_CHARS}，可能导致处理变慢或无法处理")
     result = await llm_app.call(LLMModuleRequest(
         module_name='code_edit',
         template_params=template_params,
+        media_content=media_content_list,
         model_name=model_name,
         stream=(not batch_mode),
         output_channel=output_channel

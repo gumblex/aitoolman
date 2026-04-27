@@ -15,7 +15,6 @@ from .client import LLMClient
 
 logger = logging.getLogger(__name__)
 
-
 class LLMZmqClient(LLMClient):
     def __init__(self, router_endpoint: str, auth_token: Optional[str] = None):
         super().__init__()

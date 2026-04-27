@@ -112,20 +112,33 @@ class Task:
         执行该任务，并设置 output_data
         用于 LLMWorkflow 内部
         """
-        if self._func is not None:
-            output_data = self._func(**self.input_data)
-            if inspect.isawaitable(output_data):
-                self.output_data = await output_data
-            else:
-                self.output_data = output_data
-        else:
-            self.output_data = await self.run(**self.input_data)
+        self.status = TaskStatus.RUNNING
+        self.status_event.clear()
+        try:
+            self.output_data = await self.run()
+            self.status = TaskStatus.COMPLETED
+        except TaskDependencyError as ex:
+            self.error = ex
+            self.status = TaskStatus.DEPENDENCY_FAILED
+        except Exception as ex:
+            logger.exception("Task failed: %r", self)
+            self.error = ex
+            self.status = TaskStatus.FAILED
+        finally:
+            self.status_event.set()
 
-    async def run(self, **input_data):
+    async def run(self):
         """
         用户函数：输入 self.input_data，返回值为 self.output_data
         """
-        raise NotImplementedError
+        if self._func is not None:
+            output_data = self._func(**self.input_data)
+            if inspect.isawaitable(output_data):
+                return await output_data
+            else:
+                return output_data
+        else:
+            raise NotImplementedError
 
     def clone(self):
         new_task = self.__class__()
@@ -136,13 +149,6 @@ class Task:
         new_task.description = self.description
         new_task._func = self._func
         return new_task
-
-
-class LLMTaskCompleted(Exception):
-    """
-    提前结束LLMTask，用于 LLMTask.post_process
-    """
-    pass
 
 
 class LLMTask(Task):
@@ -159,7 +165,7 @@ class LLMTask(Task):
         self.input_data = input_data
         self.workflow = workflow
 
-    async def start(self):
+    async def run(self):
         if isinstance(self.input_data, (_model.LLMModuleRequest, _model.LLMDirectRequest)):
             req = self.input_data
         else:
@@ -167,11 +173,10 @@ class LLMTask(Task):
         self.module_result = await self.workflow.call(req)
         self.module_result.raise_for_status()
         if self.module_result:
-            self.output_data = self.module_result.data
-            try:
-                await self.post_process(self.module_result)
-            except LLMTaskCompleted:
-                pass
+            output_data = self.module_result.data
+            await self.post_process(self.module_result)
+            return output_data
+        return None
 
     async def post_process(self, module_result: _model.LLMModuleResult):
         """
@@ -202,7 +207,6 @@ class LLMTask(Task):
         next_task.task_id = tool_call.id
         next_task._task_name = tool_call.name
         self.next_task = next_task
-        raise LLMTaskCompleted()
 
     async def run_tool_calls(self, **kwargs: Callable):
         """
@@ -218,7 +222,6 @@ class LLMTask(Task):
         next_task = self.clone()
         next_task.input_data = req
         self.next_task = next_task
-        raise LLMTaskCompleted()
 
 
 class LLMWorkflow(LLMApplication):
@@ -280,31 +283,25 @@ class LLMWorkflow(LLMApplication):
             self._reverse_graph[next_task.task_id].add(task.task_id)
 
     async def run_task(self, task: Task):
-        task.status = TaskStatus.RUNNING
-        task.status_event.clear()
-
         try:
             await task.start()
             if task.next_task:
                 self.add_task(task.next_task, None)
-            task.status = TaskStatus.COMPLETED
-            task.status_event.set()
 
-            # 检查并调度依赖的任务
-            await self._queue_dependents(task)
-        except TaskDependencyError as ex:
-            task.error = ex
-            task.status = TaskStatus.DEPENDENCY_FAILED
-            task.status_event.set()
-            # 传播错误到依赖的任务
-            self._fail_dependents(task, ex)
+            if task.status == TaskStatus.COMPLETED:
+                # 检查并调度依赖的任务
+                await self._queue_dependents(task)
+            elif task.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED):
+                # 传播错误到依赖的任务
+                self._fail_dependents(task, task.error)
         except Exception as ex:
-            logger.exception("Task failed: %r", task)
-            task.error = ex
-            task.status = TaskStatus.FAILED
-            task.status_event.set()
-            # 传播错误到依赖的任务
-            self._fail_dependents(task, ex)
+            # 兜底异常处理，正常情况下task.start()已经捕获所有异常
+            logger.exception("Unexpected error running task: %r", task)
+            if task.status == TaskStatus.RUNNING:
+                task.error = ex
+                task.status = TaskStatus.FAILED
+                task.status_event.set()
+                self._fail_dependents(task, ex)
 
     async def _queue_dependents(self, task: Task):
         """检查并调度依赖于此任务的任务"""

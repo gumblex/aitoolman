@@ -4,6 +4,7 @@ import typing
 import base64
 import asyncio
 import inspect
+import mimetypes
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union, Callable
 
@@ -115,6 +116,19 @@ class MediaContent(typing.NamedTuple):
             filename=data.get("filename"),
             url=data.get("url"),
             options=data.get("options")
+        )
+
+    @classmethod
+    def load_from_path(cls, path: str) -> "MediaContent":
+        with open(path, 'rb') as file:
+            file_data = file.read()
+        mime_type, _ = mimetypes.guess_type(path)
+        if not mime_type:
+            raise ValueError("Unknown file type: " + path)
+        return cls(
+            media_type=mime_type.split('/', 1)[0],
+            data=file_data,
+            mime_type=mime_type
         )
 
 

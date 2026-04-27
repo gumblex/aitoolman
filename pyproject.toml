@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aitoolman"
-version = "0.3.1"
+version = "0.3.2"
 authors = [
   { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
 ]
@@ -30,13 +30,10 @@ dependencies = [
   "BeautifulSoup4",
   "lxml",
   "xmltodict",
-  "pyzmq"
+  "pyzmq",
+  "tornado; sys_platform == 'win32'",
 ]
 [project.optional-dependencies]
-windows = [
-    # pyzmq requires
-    "tornado",
-]
 uuid = [
     "uuid-utils",
 ]

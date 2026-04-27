@@ -383,7 +383,7 @@ class Task:
     def set_func(self, fn: Callable): ...
 
     # Task execution logic, can be overridden
-    async def run(self, **input_data):
+    async def run(self):
         raise NotImplementedError
 
     # Clone task (used in tool call scenarios, etc.)

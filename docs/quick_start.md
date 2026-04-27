@@ -383,7 +383,7 @@ class Task:
     def set_func(self, fn: Callable): ...
 
     # 任务执行逻辑，可重写
-    async def run(self, **input_data):
+    async def run(self):
         raise NotImplementedError
 
     # 克隆任务（用于工具调用等场景）

@@ -10,4 +10,4 @@ from . import postprocess
 from .zmqclient import LLMZmqClient, LLMMonitor, DBLLMMonitor
 from .zmqserver import LLMZmqServer
 
-VERSION = '0.3.1'
+VERSION = '0.3.2'
