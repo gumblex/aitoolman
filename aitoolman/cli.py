@@ -151,7 +151,8 @@ async def run_code_editor(args):
             batch_mode=args.batch,
             overwrite=args.overwrite,
             use_system=(not args.no_system),
-            media_files=args.media
+            media_files=args.media,
+            file_size_limit=args.size_limit,
         )
         if args.raw_output:
             with open(args.raw_output, 'w', encoding='utf-8') as f:
@@ -317,6 +318,10 @@ def main():
     parser_code_edit.add_argument(
         '-M', '--media', nargs='*', type=str,
         help='图片/视频文件路径（多模态）'
+    )
+    parser_code_edit.add_argument(
+        '-L', '--size-limit', type=int, default=204800,
+        help='文件大小限制（字节），默认 200KB，设为0则不限'
     )
     parser_code_edit.add_argument(
         "--batch", action="store_true",

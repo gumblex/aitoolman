@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os.path
 import sys
 import asyncio
 import logging
@@ -21,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 # 大小限制常量
 WARN_FILE_CHARS = 128 * 1024
-MAX_FILE_BYTES = 200 * 1024
 WARN_PROMPT_CHARS = 200 * 1024
 
 
@@ -138,11 +136,15 @@ def handle_existing_file(file_path: Path, overwrite: bool) -> Path:
         return new_path
 
 
-def load_files_from_paths(paths: List[str], relative_to: Optional[Path] = None) -> List[Dict]:
+def load_files_from_paths(
+    paths: List[str], relative_to: Optional[Path] = None,
+    file_size_limit: Optional[int] = None
+) -> List[Dict]:
     """
     从路径列表加载文件，支持递归遍历目录
     :param paths: 输入的文件/目录路径列表
     :param relative_to: 如果不为None，返回的文件名转为相对于该路径的相对路径
+    :param file_size_limit: 跳过超过大小的文件
     :return: 加载成功的文件列表，每个元素为 {'filename': str, 'content': str}
     """
     loaded = []
@@ -169,8 +171,8 @@ def load_files_from_paths(paths: List[str], relative_to: Optional[Path] = None) 
 
             # 检查文件大小是否超过最大限制
             file_size = p.stat().st_size
-            if file_size > MAX_FILE_BYTES:
-                logger.warning(f"文件大小超过{MAX_FILE_BYTES}字节，跳过: {p}")
+            if file_size_limit and file_size > file_size_limit:
+                logger.warning(f"文件大小 {file_size} > {file_size_limit}，跳过: {p}")
                 return
 
             # 读取文件校验
@@ -181,10 +183,8 @@ def load_files_from_paths(paths: List[str], relative_to: Optional[Path] = None) 
                     logger.warning(f"二进制文件，跳过: {p}")
                     return
 
-                # 检查字符数是否超过警告阈值，超过则截断
                 if len(content) > WARN_FILE_CHARS:
-                    logger.warning(f"文件字符数超过{WARN_FILE_CHARS}，已截断: {p}")
-                    content = content[:WARN_FILE_CHARS] + "\n\n<!-- 文件内容过长已截断 -->"
+                    logger.warning("大文件（字符数 %s）: %s", len(content), p)
 
                 # 处理文件名路径
                 filename = str(p)
@@ -231,7 +231,8 @@ async def process_files(
         batch_mode: bool,
         overwrite: bool,
         use_system: bool = True,
-        media_files: Optional[List[str]] = None
+        media_files: Optional[List[str]] = None,
+        file_size_limit: Optional[int] = None
 ) -> app.LLMModuleResult:
     """处理多个文件"""
     logger.info("使用模型: %s", model_name)
@@ -243,7 +244,8 @@ async def process_files(
     # 处理参考文件（替换原有逻辑）
     references = load_files_from_paths(reference_files)
     # 处理输入文件（替换原有逻辑）
-    input_files_list = load_files_from_paths(input_files, relative_to=Path.cwd())
+    input_files_list = load_files_from_paths(
+        input_files, relative_to=Path.cwd(), file_size_limit=file_size_limit)
 
     # 校验是否还有有效文件
     if input_files and not input_files_list:
@@ -288,7 +290,7 @@ async def process_files(
                   sum(len(f['content']) + len(f['filename']) for f in input_files_list) + \
                   len(user_instruction)
     if total_chars > WARN_PROMPT_CHARS:
-        logger.warning(f"总文件字符数超过警告阈值 {total_chars} > {WARN_PROMPT_CHARS}，可能导致处理变慢或无法处理")
+        logger.warning(f"提示词中，总文件长度较大 {total_chars} > {WARN_PROMPT_CHARS}，可能导致处理变慢或无法处理")
     result = await llm_app.call(LLMModuleRequest(
         module_name='code_edit',
         template_params=template_params,
