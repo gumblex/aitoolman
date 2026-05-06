@@ -23,10 +23,10 @@ aitoolman is a developer-focused LLM (Large Language Model) application framewor
 | Use Cases              | Controllable workflow orchestration, batch task processing       | Autonomous agents, exploratory applications                               |
 
 ## Core Features
+- **Unified Call Interface**: Consistent interfaces for streaming output or batch calls; construct templated requests or raw requests with context as needed to simplify development experience.
 - **Prompt Templating**: Encapsulate prompts as reusable Jinja2 templates for centralized management, avoiding scattered prompt definitions.
-- **Flexible Workflow Orchestration**: Supports serial, parallel, and dynamic DAG (Directed Acyclic Graph) workflows to handle complex multistep tasks easily.
-- **Native Tool Call Support**: Treats tool calls as a workflow control mechanism, enabling intent recognition or classic function call patterns.
-- **Real-time Streaming**: Channel system enables real-time output of response content and reasoning processes, enhancing interactive experiences.
+- **Flexible Workflow Orchestration**: Supports serial, parallel, and dynamic workflows, where execution paths are determined dynamically to easily handle complex multi-step tasks.
+- **Native Tool Call Support**: Supports classic function call patterns, or leverages tool calls to implement intent recognition.
 - **Microservice Architecture**: Deploy LLM schedulers as independent services for unified resource management, key isolation, and global auditing.
 
 ## Use Cases
@@ -48,7 +48,7 @@ aitoolman is suitable for various scenarios requiring controllable, reliable LLM
 ## Quick Start
 1. `pip install aitoolman`
 2. Refer to the [Developer Documentation](docs/quick_start.en.md) for detailed framework docs, API references, and sample code
-3. Configure LLM provider API keys and model parameters (llm_provider.toml)
+3. [Configure](docs/config.en.md) LLM provider API keys and model parameters (llm_provider.toml)
 4. Write prompt template configurations (app_prompt.toml)
 5. Build application logic using LLMApplication or LLMWorkflow
 
@@ -68,12 +68,12 @@ Principles of prompt design:
 - **Seamless connection**: The end of the prompt should connect naturally to the beginning of the AI's answer; for brief (one or two lines) input content, it can be placed at the very end of the prompt.
 - **Language consistency**: Write the prompt in the primary working language; place target language text at the end.
 - **Be concise and clear**: Use concise wording, focus more on writing "what to do" and less on "what not to do"; avoid exposing the large language model to irrelevant content.
-- **Explicit output format**: Specify a clear output format (e.g., JSON, XML, Markdown) for easy parsing.
+- **Explicit output format**: Specify a clear output format (e.g., JSON, XML, Markdown) and provide examples.
 
 ### Module Design
 
-- **Workflow first**: Avoid having the large language model perform deterministic tasks, or restrict large model behavior only with prompts.
-- **Modular design**: Break down complex prompts into multiple modules and global templates, with each module having a single responsibility.
 - **Template variables**: Use `{{ variable }}` and other Jinja2 template syntax.
 - **Context control**: Minimize the use of context messages; prioritize optimizing prompt quality.
+- **Modular design**: Break down complex prompts into multiple modules and global templates, with each module having a single responsibility.
+- **Workflow first**: Avoid having the large language model perform deterministic tasks, or restrict large model behavior only with prompts.
 - **Tool description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools.

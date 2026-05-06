@@ -2,8 +2,6 @@ import enum
 import asyncio
 import inspect
 import logging
-import contextlib
-import collections
 from typing import Any, Dict, List, Optional, Set, Callable, Union, ClassVar
 
 from .app import LLMApplication
@@ -20,49 +18,14 @@ class TaskStatus(enum.Enum):
     RUNNING = 2    # 执行中
     COMPLETED = 3  # 已完成
     FAILED = 4     # 已失败
-    DEPENDENCY_FAILED = 5  # 依赖失败
 
 
 class LLMWorkflowError(_model.LLMApplicationError):
-    """工作流执行错误基类"""
-    pass
-
-
-class TaskDependencyError(LLMWorkflowError):
-    """依赖的任务执行错误，包含出错的所有任务"""
-
-    def __init__(self, error_tasks: List['Task'], task_chain: List[List['Task']], context_id=None):
-        self.error_tasks = error_tasks
-        self.task_chain = task_chain
-        self.first_error = error_tasks[0].error
-        self.context_id = context_id
-        super().__init__(self._format_message())
-
-    def _format_message(self) -> str:
-        line = ""
-        if self.context_id:
-            line = f"[{self.context_id}] "
-        line += f"Workflow execution failed: {len(self.error_tasks)} task(s) failed"
-        lines = [line]
-
-        # Show the first error
-        if self.first_error:
-            lines.append(f"\nFirst error: {type(self.first_error).__name__}: {self.first_error}")
-
-        # Show dependency chain if available
-        if self.task_chain:
-            lines.append("\nDependency chain (root -> leaves):")
-            for i, level_tasks in enumerate(self.task_chain):
-                task_descs = [f"{t.task_name}[{t.task_id}]" for t in level_tasks]
-                lines.append(f"  Level {i}: {', '.join(task_descs)}")
-
-        # Show all failed tasks
-        if len(self.error_tasks) > 1:
-            lines.append(f"\nAll failed tasks:")
-            for task in self.error_tasks:
-                lines.append(f"  - {task.task_name}[{task.task_id}]: {task.error}")
-
-        return "\n".join(lines)
+    """工作流执行错误"""
+    def __init__(self, msg: str, *tasks: 'Task'):
+        super().__init__(f'{msg} Task: {tasks}')
+        self.msg = msg
+        self.tasks = tasks
 
 
 class Task:
@@ -117,9 +80,6 @@ class Task:
         try:
             self.output_data = await self.run()
             self.status = TaskStatus.COMPLETED
-        except TaskDependencyError as ex:
-            self.error = ex
-            self.status = TaskStatus.DEPENDENCY_FAILED
         except Exception as ex:
             logger.exception("Task failed: %r", self)
             self.error = ex
@@ -149,10 +109,19 @@ class Task:
         new_task.description = self.description
         new_task._func = self._func
         return new_task
+        
+    def following_tasks(self) -> List['Task']:
+        """收集当前任务后续的所有链式任务，返回任务列表"""
+        tasks = []
+        current = self.next_task
+        while current:
+            tasks.append(current)
+            current = current.next_task
+        return tasks
 
 
 class LLMTask(Task):
-    """LLM任务类"""
+    """LLM任务类，专注于LLM调用和工具调用处理"""
     input_data: Union[_model.LLMModuleRequest, _model.LLMDirectRequest] = None
     module_result: Optional[_model.LLMModuleResult] = None
 
@@ -219,6 +188,8 @@ class LLMTask(Task):
         if not self.module_result.tool_calls:
             raise _model.LLMResponseFormatError("tool call list is empty")
         req = await self.module_result.run_tool_calls(kwargs)
+        if req is None:
+            return
         next_task = self.clone()
         next_task.input_data = req
         self.next_task = next_task
@@ -226,11 +197,14 @@ class LLMTask(Task):
 
 class LLMWorkflow(LLMApplication):
     """
-    任务调度器，支持DAG（有向无环图）任务执行
+    任务调度器，支持动态任务链和并行子任务。
 
-    两种运行模式（可结合）：
-    1. 通过 run，在 Task 中设置 next_task，串行执行工作流
-    2. 用 add_task 生成嵌套任务，用 wait_tasks 等待任务完成
+    核心概念：
+    - 通过 submit(task) 将任务提交到执行队列，由消费者协程池并行执行。
+    - 任务完成后，如果设置了 next_task，会自动提交下一个任务（链式执行）。
+    - 使用 wait_tasks(*tasks) 提交一组任务并等待它们全部完成。
+    - 使用 run(start_task) 执行一条完整的任务链（依次跟随 next_task）。
+    - 任务内部可以通过 workflow.wait_tasks/spawn 启动支线（子任务链）并等待。
     """
 
     def __init__(
@@ -249,99 +223,112 @@ class LLMWorkflow(LLMApplication):
             context_id=context_id
         )
         self.max_parallel_tasks = max_parallel_tasks
-        # 用于防止下列状态同时修改
-        self._task_lock = asyncio.Lock()
-        self._consumer_lock = asyncio.Lock()
-
-        # 内部调度状态
-        # 跟踪待运行、运行时的任务，运行完成之后清除
-        self._new_tasks: Dict[str, Task] = {}
-        self._queued_tasks: Dict[str, Task] = {}
-        # task -> 被依赖项 (dependents)
-        self._graph: Dict[str, Set[str]] = collections.defaultdict(set)
-        # task -> 依赖项 (dependencies)
-        self._reverse_graph: Dict[str, Set[str]] = collections.defaultdict(set)
-        self._pending_queue: asyncio.Queue[str] = asyncio.Queue()
-
-        self._next_consumer_id: int = 0
+        self._pending_queue = asyncio.Queue()
+        self._active_tasks: Dict[str, Task] = {}  # 跟踪已提交且未完成的任务
         self._consumers: Dict[int, asyncio.Task] = {}
-        self.running: bool = False
+        self._next_consumer_id = 0
+        self._consumer_lock = asyncio.Lock()
+        self._running = False
+        self._stopped = False
 
-    def add_task(self, task: Task, next_task: Optional[Task] = None):
-        """
-        添加后台任务 task，不立即执行
-        task 为 next_task 之前要运行的任务
+    # ------------------------------------------------------------------
+    # 公共接口
+    # ------------------------------------------------------------------
 
-        Args:
-            task: 要添加的任务
-            next_task: 要添加的任务之后要执行的任务，或为 None
+    async def submit(self, task: Task):
         """
+        提交任务到执行队列。
+        如果任务已经提交过（task_id 在活动任务中），则忽略。
+        任务完成后，如果 task.next_task 不为 None，会自动提交下一个任务。
+        """
+        if self._stopped:
+            return
+        if task.task_id in self._active_tasks:
+            return
         task.workflow = self
-        self._new_tasks[task.task_id] = task
-        if next_task:
-            self._graph[task.task_id].add(next_task.task_id)
-            self._reverse_graph[next_task.task_id].add(task.task_id)
+        self._active_tasks[task.task_id] = task
+        self._pending_queue.put_nowait(task.task_id)
+        await self._ensure_consumers()
 
-    async def run_task(self, task: Task):
-        try:
-            await task.start()
-            if task.next_task:
-                self.add_task(task.next_task, None)
+    async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None):
+        """
+        提交多个任务（如果尚未提交），并发等待所有任务完成。
+        """
+        # 提交所有尚未提交的任务
+        for task in tasks:
+            if task.status == TaskStatus.INIT:
+                await self.submit(task)
 
-            if task.status == TaskStatus.COMPLETED:
-                # 检查并调度依赖的任务
-                await self._queue_dependents(task)
-            elif task.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED):
-                # 传播错误到依赖的任务
-                self._fail_dependents(task, task.error)
-        except Exception as ex:
-            # 兜底异常处理，正常情况下task.start()已经捕获所有异常
-            logger.exception("Unexpected error running task: %r", task)
-            if task.status == TaskStatus.RUNNING:
-                task.error = ex
-                task.status = TaskStatus.FAILED
-                task.status_event.set()
-                self._fail_dependents(task, ex)
+        # 等待所有任务完成f
+        wait_coros = [task.status_event.wait() for task in tasks]
+        if timeout:
+            await asyncio.wait_for(asyncio.gather(*wait_coros), timeout=timeout)
+        else:
+            await asyncio.gather(*wait_coros)
 
-    async def _queue_dependents(self, task: Task):
-        """检查并调度依赖于此任务的任务"""
-        for dependent_id in self._graph.get(task.task_id, []):
-            if dependent_id not in self._queued_tasks:
-                continue
-            dependent = self._queued_tasks[dependent_id]
-            # 检查是否所有依赖都已完成
-            if all(
-                    dep_id not in self._queued_tasks or
-                    self._queued_tasks[dep_id].status == TaskStatus.COMPLETED
-                for dep_id in self._reverse_graph.get(dependent_id, [])
-            ):
-                if dependent.status == TaskStatus.INIT:
-                    await self._pending_queue.put(dependent_id)
+        # 检查失败的任务
+        failed = [t for t in tasks if t.status == TaskStatus.FAILED]
+        if failed:
+            raise LLMWorkflowError(f"{len(failed)} tasks failed.", *failed)
 
-    def _fail_dependents(self, task: Task, error: Exception):
-        """将错误传播到所有依赖的任务"""
-        for dependent_id in self._graph.get(task.task_id, []):
-            if dependent_id not in self._queued_tasks:
-                continue
-            dependent = self._queued_tasks[dependent_id]
-            if dependent.status in (TaskStatus.INIT, TaskStatus.WAITING):
-                dependent.status = TaskStatus.DEPENDENCY_FAILED
-                dependent.error = error
-                dependent.status_event.set()
-                # 递归传播
-                self._fail_dependents(dependent, error)
+    async def run(self, start_task: Task) -> Task:
+        """
+        执行一条任务链，从 start_task 开始，依次跟随 next_task 直到没有下一步。
+        返回链上最后一个完成的任务。
+        如果在链中任何任务失败，抛出异常并停止执行后续任务。
+        """
+        current = start_task
+        last_task = start_task
+        while current:
+            await self.submit(current)
+            await current.status_event.wait()
+            if current.status == TaskStatus.FAILED:
+                raise LLMWorkflowError("Task failed.", current) from current.error
+            last_task = current
+            current = current.next_task
+        return last_task
 
-    def _clear_task_by_id(self, task_id: str):
-        """清除任务的跟踪状态"""
-        with contextlib.suppress(KeyError):
-            del self._graph[task_id]
-        with contextlib.suppress(KeyError):
-            del self._reverse_graph[task_id]
-        with contextlib.suppress(KeyError):
-            del self._queued_tasks[task_id]
+    async def stop(self):
+        """停止所有消费者协程（通常用于关闭工作流）。"""
+        if self._stopped:
+            return
+        async with self._consumer_lock:
+            self._stopped = True
+            consumers = list(self._consumers.values())
+            self._consumers.clear()
+        for c in consumers:
+            c.cancel()
+        if consumers:
+            await asyncio.gather(*consumers, return_exceptions=True)
+
+    # 支持 async with
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.stop()
+
+    # ------------------------------------------------------------------
+    # 内部调度
+    # ------------------------------------------------------------------
+
+    async def _ensure_consumers(self):
+        """确保有足够的消费者协程在运行，数量不超过 max_parallel_tasks。"""
+        if self._stopped:
+            return
+        async with self._consumer_lock:
+            if self._stopped:
+                return
+            while len(self._consumers) < self.max_parallel_tasks:
+                consumer_id = self._next_consumer_id
+                self._next_consumer_id += 1
+                self._consumers[consumer_id] = asyncio.create_task(
+                    self._consumer(consumer_id),
+                    name=f'LLMWorkflow.consumer[{consumer_id}]'
+                )
 
     async def _consumer(self, consumer_id: int):
-        """后台消费者协程，从队列取任务执行"""
+        """后台消费者协程，从队列获取任务并执行。"""
         try:
             while True:
                 task_id = None
@@ -351,236 +338,39 @@ class LLMWorkflow(LLMApplication):
                         self._pending_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     # Check if we should exit (no more tasks)
-                    if not self._queued_tasks and self._pending_queue.empty():
+                    if not self._active_tasks and self._pending_queue.empty():
                         break
                     continue
 
-                task = self._queued_tasks.get(task_id)
+                task = self._active_tasks.get(task_id)
                 if task is None:
-                    logger.error("[Consumer %s] Task %s not in _queued_tasks, skipped",
-                                 consumer_id, task_id)
+                    if task_id:
+                        self._pending_queue.task_done()
+                        logger.error("[Consumer %s] Task %s not in _queued_tasks, skipped",
+                                     consumer_id, task_id)
                     continue
 
                 if task.status not in (TaskStatus.INIT, TaskStatus.WAITING):
                     continue
 
-                await self.run_task(task)
-        finally:
-            with contextlib.suppress(KeyError):
-                del self._consumers[consumer_id]
-
-    def _start_consumers(self, task_num: int):
-        # Should use with self._consumer_lock
-        start_num = min(self.max_parallel_tasks,
-                        task_num - len(self._consumers))
-        if start_num <= 0:
-            return
-        for i in range(start_num):
-            consumer_id = self._next_consumer_id
-            self._next_consumer_id += 1
-            self._consumers[consumer_id] = asyncio.create_task(
-                self._consumer(consumer_id),
-                name=('LLMWorkflow.consumer[%s]' % consumer_id)
-            )
-
-    async def _stop_consumers(self):
-        """Stop all consumer tasks"""
-        # Should use with self._consumer_lock
-        for consumer_id, consumer_task in list(self._consumers.items()):
-            consumer_task.cancel()
-            try:
-                await consumer_task
-            except asyncio.CancelledError:
-                pass
-            with contextlib.suppress(KeyError):
-                del self._consumers[consumer_id]
-
-    async def _reset_state(self):
-        """Reset workflow state for a new run"""
-        async with self._task_lock:
-            self._new_tasks.clear()
-            self._queued_tasks.clear()
-            self._graph.clear()
-            self._reverse_graph.clear()
-            # Clear queue
-            while not self._pending_queue.empty():
                 try:
-                    self._pending_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-        async with self._consumer_lock:
-            await self._stop_consumers()
+                    await task.start()
+                except Exception as ex:
+                    logger.exception("Unhandled error in task: %r", task)
+                    if task.status == TaskStatus.RUNNING:
+                        task.error = ex
+                        task.status = TaskStatus.FAILED
+                        task.status_event.set()
+                finally:
+                    # 任务成功完成后，自动提交 next_task
+                    if task.status == TaskStatus.COMPLETED and task.next_task is not None:
+                        await self.submit(task.next_task)
+                    # 从活动任务中移除
+                    self._active_tasks.pop(task.task_id, None)
+                    self._pending_queue.task_done()
 
-    def _clear_all_tasks(self):
-        """Clear all task tracking data"""
-        self._new_tasks.clear()
-        self._queued_tasks.clear()
-        self._graph.clear()
-        self._reverse_graph.clear()
-
-    async def _raise_dependency_error(self, failed_tasks: List[Task]):
-        """Raise TaskDependencyError with proper task chain"""
-        # Build task chain from dependencies
-        task_chain = []
-        visited = set()
-
-        def build_chain(level_tasks, level=0):
-            if level >= len(task_chain):
-                task_chain.append([])
-
-            next_level_tasks = []
-            for task in level_tasks:
-                if task.task_id not in visited:
-                    visited.add(task.task_id)
-                    task_chain[level].append(task)
-                    # Add dependents for next level
-                    for dependent_id in self._graph.get(task.task_id, []):
-                        if dependent_id in self._queued_tasks:
-                            next_level_tasks.append(self._queued_tasks[dependent_id])
-
-            if next_level_tasks:
-                build_chain(next_level_tasks, level + 1)
-
-        build_chain(failed_tasks)
-
-        raise TaskDependencyError(
-            error_tasks=failed_tasks,
-            task_chain=task_chain,
-            context_id=self.context_id
-        )
-
-    async def _cleanup_completed_tasks(self):
-        """Clean up tasks that are completed and have no active dependents"""
-        async with self._task_lock:
-            # Collect all tasks that can be removed
-            tasks_to_remove = []
-
-            for task_id, task in list(self._queued_tasks.items()):
-                if task.status == TaskStatus.COMPLETED:
-                    # Check if it has any dependents that are not completed
-                    has_active_dependents = False
-                    for dependent_id in self._graph.get(task_id, []):
-                        dependent = self._queued_tasks.get(dependent_id)
-                        if dependent and dependent.status != TaskStatus.COMPLETED:
-                            has_active_dependents = True
-                            break
-
-                    if not has_active_dependents:
-                        tasks_to_remove.append(task_id)
-
-            # Remove tasks
-            for task_id in tasks_to_remove:
-                self._clear_task_by_id(task_id)
-
-    async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None):
-        """
-        等待指定的任务完成，如果任务不在已有任务列表内则添加
-
-        Args:
-            tasks: 要等待的任务
-            timeout: 超时时间（秒）
-        """
-        if not tasks:
-            return
-
-        # Register tasks if not already registered
-        for task in tasks:
-            if task.task_id not in self._new_tasks and task.task_id not in self._queued_tasks:
-                self.add_task(task, None)
-
-        # Check if all tasks are already completed
-        all_completed = all(
-            task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)
-            for task in tasks
-        )
-
-        if all_completed:
-            failed_tasks = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)]
-            if failed_tasks:
-                await self._raise_dependency_error(failed_tasks)
-            return
-
-        all_task_ids = set()
-
-        def collect_deps(task_id: str):
-            if task_id in all_task_ids:
-                return
-            all_task_ids.add(task_id)
-            # 递归收集所有上游依赖
-            for dep_id in self._reverse_graph.get(task_id, set()):
-                collect_deps(dep_id)
-
-        for task in tasks:
-            collect_deps(task.task_id)
-
-        # Build dependency graph and find ready tasks
-        ready_task_ids = []
-        async with self._task_lock:
-            # 将所有收集到的任务从_new_tasks移到_queued_tasks
-            for task_id in all_task_ids:
-                if task_id in self._new_tasks:
-                    task = self._new_tasks.pop(task_id)
-                    self._queued_tasks[task_id] = task
-
-            # Find tasks with no unmet dependencies
-            for task_id, task in self._queued_tasks.items():
-                if task.status == TaskStatus.INIT and not self._reverse_graph.get(task_id):
-                    ready_task_ids.append(task_id)
-
-        # Queue ready tasks
-        for task_id in ready_task_ids:
-            await self._pending_queue.put(task_id)
-
-        # Start consumers
-        async with self._consumer_lock:
-            self._start_consumers(len(self._queued_tasks))
-
-        # Wait for completion with timeout support
-        wait_coros = [task.status_event.wait() for task in tasks]
-        if timeout:
-            await asyncio.wait_for(asyncio.gather(*wait_coros), timeout=timeout)
-        else:
-            await asyncio.gather(*wait_coros)
-
-        # Check for errors
-        failed_tasks = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.DEPENDENCY_FAILED)]
-        if failed_tasks:
-            await self._raise_dependency_error(failed_tasks)
-
-        # Cleanup completed tasks
-        await self._cleanup_completed_tasks()
-
-    async def run(self, start_task: Task) -> Task:
-        """
-        运行工作流，从起始任务开始
-
-        Args:
-            start_task: 起始任务
-
-        Raises:
-            TaskDependencyError: 任务失败
-        """
-        # Ensure single instance
-        if self.running:
-            raise RuntimeError("parallel run is not supported")
-        self.running = True
-
-        # Reset state
-        await self._reset_state()
-
-        last_task = start_task
-        try:
-            current_task = start_task
-            while current_task:
-                current_task.workflow = self
-                logger.debug("Run step: %s", current_task)
-                await self.wait_tasks(current_task)
-                last_task = current_task
-                current_task = current_task.next_task
+        except asyncio.CancelledError:
+            pass
         finally:
             async with self._consumer_lock:
-                await self._stop_consumers()
-            self._clear_all_tasks()
-            self.running = False
-        return last_task
-
+                self._consumers.pop(consumer_id, None)

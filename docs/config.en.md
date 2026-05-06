@@ -40,6 +40,11 @@ Specific configuration for each model, model names can be customized.
 | `timeout`         | Integer | Inherited from `[default].timeout`     | Model-specific timeout duration                                                       |
 | `body_options`    | Dict    | Inherited from `[default].body_options` | Default request options for this model, overrides all options in `[default]`. |
 
+Additional notes:
+* For "openai" format, `headers` should include `Authorization`
+* For "anthropic" format, `headers` should include `"X-Api-Key"` and `"anthropic-version" = "2023-06-01"`; `body_options` should include `max_tokens`
+
+
 ### 1.4 [model_alias] Section
 Model alias configuration to simplify model name usage and enable friendly names in application configurations.
 

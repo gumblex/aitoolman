@@ -16,6 +16,7 @@ import httpx_sse
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def _get_retry_after(response: httpx.Response) -> Optional[int]:
@@ -101,8 +102,6 @@ class LLMFormatStrategy(abc.ABC):
 class OpenAICompatibleFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
-        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
-        self.logger.setLevel(logging.INFO)
 
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
@@ -240,7 +239,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                 body["tools"] = self.serialize_tool_description(request.tools)
             except Exception as ex:
                 raise ValueError("Tool description format invalid (%s: %s)" % (type(ex).__name__, ex))
-        self.logger.debug("[%s] request body: %s", request.request_id, body)
+        logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
     @classmethod
@@ -303,10 +302,10 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
-            self.logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
+            logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
             return ProviderStreamEvent.empty()
 
-        self.logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
+        logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
 
         # 4. 处理Token统计
         usage = chunk_data.get("usage")
@@ -333,7 +332,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
                 self.stream_tool_buffers.append(tool_item)
                 continue
             elif not self.stream_tool_buffers:
-                self.logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
+                logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
                 continue
 
             tool_item = self.stream_tool_buffers[-1]
@@ -363,8 +362,6 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 class AnthropicFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
-        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
-        self.logger.setLevel(logging.INFO)
 
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
@@ -483,7 +480,7 @@ class AnthropicFormat(LLMFormatStrategy):
             "stream": request.stream
         }
         body.update(request.options)
-        body.setdefault("max_tokens", 64000)
+        body.setdefault("max_tokens", 20000)
 
         # Separate system messages and tool results
         system_messages = []
@@ -523,7 +520,7 @@ class AnthropicFormat(LLMFormatStrategy):
         if request.tools and self.model_config.get("abilities", {}).get("tool"):
             body["tools"] = self.serialize_tool_description(request.tools)
 
-        self.logger.debug("[%s] request body: %s", request.request_id, body)
+        logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
     @classmethod
@@ -577,14 +574,14 @@ class AnthropicFormat(LLMFormatStrategy):
     def parse_stream_event(self, response: LLMProviderResponse,
                            event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
         """Parse streaming response chunk"""
-        self.logger.debug('[%s] stream event: %s', response.request_id, event)
+        logger.debug('[%s] stream event: %s', response.request_id, event)
         # Handle event type
         event_type = event.event
         line = event.data.strip()
         if event_type == "error":
             response.finish_reason = FinishReason.error_request.value
             response.error_text = line
-            self.logger.error("[%s: Anthropic] Stream error: %s",
+            logger.error("[%s: Anthropic] Stream error: %s",
                          response.request_id, line)
             return ProviderStreamEvent(True, "", "", [], None)
 
@@ -616,7 +613,7 @@ class AnthropicFormat(LLMFormatStrategy):
         try:
             chunk_data = json.loads(line)
         except json.JSONDecodeError:
-            self.logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
+            logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
                            response.request_id, line)
             return ProviderStreamEvent.empty()
 
@@ -690,7 +687,7 @@ class LLMProviderManager:
     }
 
     def __init__(self, config: Dict[str, Any]):
-        self.logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
+        logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
 
         self.default_config = config['default']
         self.api_config = config['api']
@@ -764,7 +761,7 @@ class LLMProviderManager:
             if retry_after is None:
                 retry_after = self.retry_duration * (self.retry_factor ** retries)
 
-            self.logger.warning(
+            logger.warning(
                 "[%s] Retry (%d/%d) after %.1fs, status code: %s",
                 request.request_id, retries + 1, self.max_retries, retry_after, status_code
             )
@@ -778,7 +775,7 @@ class LLMProviderManager:
     ):
         """处理非流式请求（完整响应）"""
         start_time = time.monotonic()
-        self.logger.debug("Batch POST: %s, %s", model_config['url'], request_body)
+        logger.debug("Batch POST: %s, %s", model_config['url'], request_body)
         try:
             # 发送带重试的HTTP请求
             response_data = await self._async_post_with_retry(
@@ -830,7 +827,7 @@ class LLMProviderManager:
 
         try:
             # 发送流式HTTP请求
-            self.logger.debug("Stream POST: %s, %s", model_config['url'],
+            logger.debug("Stream POST: %s, %s", model_config['url'],
                               request_body)
             async with self.http_client.stream(
                 method="POST",
@@ -914,14 +911,14 @@ class LLMProviderManager:
         request.model_name = real_model_name
         response.model_name = real_model_name
 
-        api_type = model_config.get("api_type", self.default_config.get('api_type', 'openai'))
+        api_type = model_config.get("type", self.default_config.get('api_type', 'openai'))
         if api_type not in self.format_strategies:
             await self._end_request_with_error(
                 request, response,
                 "Unsupported API type: %s" % api_type,
                 FinishReason.error_request
             )
-            self.logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
+            logger.error("[%s] Unsupported API type: %s", request.request_id, api_type)
             return
 
         if model_config.get('body_options') is None:
@@ -958,11 +955,11 @@ class LLMProviderManager:
                 await self._handle_batch_request(
                     request, response, model_config, request_body, format_strategy)
             if response.finish_reason.startswith('error') or response.finish_reason in ('cancelled', 'unknown'):
-                self.logger.warning(
+                logger.warning(
                     "[%s] Request error (%s): %s",
                     request.request_id, response.finish_reason, response.error_text)
             else:
-                self.logger.info(
+                logger.info(
                     "[%s] Request end (%s). %s/%s tokens, queue %.1fs/first %.1fs/total %.1fs",
                     request.request_id, response.finish_reason,
                     response.prompt_tokens, response.completion_tokens,
@@ -984,14 +981,14 @@ class LLMProviderManager:
         try:
             await self._call_llm_api(request, response)
         except asyncio.CancelledError:
-            self.logger.info("[%s] Request cancelled.", request.request_id)
+            logger.info("[%s] Request cancelled.", request.request_id)
             await self._end_request_with_error(
                 request, response,
                 "cancelled",
                 FinishReason.cancelled
             )
         except Exception as e:
-            self.logger.exception("[%s] API call error", request.request_id)
+            logger.exception("[%s] API call error", request.request_id)
             await self._end_request_with_error(
                 request, response,
                 f"API call error: {type(e).__qualname__} - {str(e)}",
@@ -1021,14 +1018,14 @@ class LLMProviderManager:
         """取消指定请求"""
         rt = self.active_requests.get(request_id)
         if not rt:
-            self.logger.warning("[%s] Request not found to cancel", request_id)
+            logger.warning("[%s] Request not found to cancel", request_id)
             return
         rt.request.is_cancelled = True
         rt.task.cancel()
         try:
             await rt.task
         except asyncio.CancelledError:
-            self.logger.info("[%s] Cancelled", request_id)
+            logger.info("[%s] Cancelled", request_id)
         finally:
             try:
                 del self.active_requests[request_id]
@@ -1051,7 +1048,7 @@ class LLMProviderManager:
                     cancelled_count += 1
                 del self.active_requests[request_id]
 
-        self.logger.info(
+        logger.info(
             "[Client: %s, Context: %s] Cancelled %d/%d requests",
             client_id, context_id, cancelled_count, total_count)
 

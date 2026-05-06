@@ -158,7 +158,7 @@ class LLMModuleResult:
 
 
 ### Data Interface Layer Request/Response
-Used for interacting with LLM providers, no need for upper-layer applications to关注.
+Used for interacting with LLM providers, no need for upper-layer applications to focus.
 
 `LLMProviderRequest`: Request sent to model provider, containing complete request data and channel configurations.
 > LLMClient outputs fixed topics to the channel: `reasoning` for model reasoning content, `response` for actual model response content.
@@ -342,12 +342,14 @@ result = await app.call(direct_request)
 ### 3.2 LLMWorkflow Class
 
 #### 3.2.1 Core Concepts
-LLMWorkflow extends LLMApplication, supporting dynamic workflow execution with two construction modes:
+LLMWorkflow extends LLMApplication, supporting dynamic task chains and parallel subtask execution. Workflow paths can be predefined or dynamically adjusted during execution based on LLM outputs or task results.
 
-1. **Sequential Mode**: Connect tasks via `next_task` attribute, execute using `run()` method
-2. **Parallel Mode**: Build DAG (Directed Acyclic Graph) via `add_task()` method, execute using `wait_tasks()` method
-
-The two modes can be mixed.
+Core concepts:
+- Submit tasks to the execution queue via `submit(task)`, which are executed in parallel by the consumer coroutine pool.
+- After a task completes, if `next_task` is set, the next task will be automatically submitted (chain execution).
+- Use `wait_tasks(*tasks)` to submit a set of tasks and wait for all of them to complete.
+- Use `run(start_task)` to execute a complete task chain (following `next_task` in sequence).
+- Tasks can start sub-task chains and wait for completion internally via `workflow.wait_tasks`/`submit`.
 
 #### 3.2.2 Task Definition
 `Task` is a generic task base class that supports two usage methods:
@@ -364,7 +366,6 @@ class TaskStatus(enum.Enum):
     RUNNING = 2 # Executing
     COMPLETED = 3  # Completed
     FAILED = 4     # Failed
-    DEPENDENCY_FAILED = 5  # Dependency failed
 ```
 
 ```python
@@ -388,6 +389,9 @@ class Task:
 
     # Clone task (used in tool call scenarios, etc.)
     def clone(self): ...
+    
+    # Get all chained tasks following the current task
+    def following_tasks(self) -> List['Task']: ...
 ```
 
 ```python
@@ -424,30 +428,26 @@ class LLMTask(Task):
 ```
 
 ```python
-class TaskDependencyError(LLMWorkflowError):
-    """Dependency task execution error, containing all failed tasks"""
+class LLMWorkflowError(_model.LLMApplicationError):
+    """Base class for workflow execution errors"""
 ```
 
 #### 3.2.3 Workflow Interfaces
 ```python
 class LLMWorkflow(LLMApplication):
-    # Add task to workflow
-    def add_task(self, task: Task, next_task: Optional[Task] = None):
-        """
-        Add background task task, not executed immediately
-        task is the task to run before next_task
+    # Submit task to execution queue, next_task will be automatically submitted after task completion
+    async def submit(self, task: Task): ...
 
-        Args:
-            task: Task to add
-            next_task: Task to execute after the added task, or None
-        """
-
-    # Wait for specified tasks to complete
+    # Submit multiple tasks (if not already submitted) and wait for all to complete in parallel
     async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None): ...
 
-    # Run sequential workflow
+    # Execute a complete task chain: start from start_task, execute next_task sequentially until end, return the last completed task
     async def run(self, start_task: Task) -> Task: ...
+    
+    # Stop all consumer coroutines and clean up resources
+    async def stop(self): ...
 ```
+LLMWorkflow supports `async with` context manager, which automatically stops the workflow and cleans up resources when exiting.
 
 #### 3.2.4 Usage Examples
 
@@ -455,8 +455,8 @@ class LLMWorkflow(LLMApplication):
 ```python
 # Method 1: Inherit Task and override run method
 class SimpleTask(aitoolman.Task):
-    async def run(self, x, y):
-        return x + y
+    async def run(self):
+        return self.input_data['x'] + self.input_data['y']
 
 # Method 2: Use set_func to specify function
 def simple_func(x, y):
@@ -479,14 +479,14 @@ class TranslationTask(aitoolman.LLMTask):
 
 
 # Run workflow
-workflow = aitoolman.LLMWorkflow(client, config)
-start_task = TranslationTask(
-    aitoolman.LLMModuleRequest(
-        module_name="translator",
-        template_params={"text": "Hello"}
+async with aitoolman.LLMWorkflow(client, config) as workflow:
+    start_task = TranslationTask(
+        aitoolman.LLMModuleRequest(
+            module_name="translator",
+            template_params={"text": "Hello"}
+        )
     )
-)
-final_task = await workflow.run(start_task)
+    final_task = await workflow.run(start_task)
 ```
 
 ## 4. Transport Layer
@@ -942,64 +942,70 @@ if __name__ == "__main__":
 ### 8.4 Static Workflow: Data Analysis Pipeline
 Application Scenario: Known task dependencies, such as first fetching data, then analyzing, and finally generating reports
 
-Use `LLMWorkflow` to build a static DAG:
+Use `LLMWorkflow` to build sequential task chain:
 - Define multiple analysis tasks
-- Use `add_task()` to establish dependencies
-- Use `wait_tasks()` to wait for all tasks to complete
+- Use `next_task` to establish sequential dependencies and pass data between tasks internally
+- Use `run()` to execute the entire task chain
 - Merge analysis results
 
 ```python
 import asyncio
 import aitoolman
 
-# Define task classes
 class DataFetchTask(aitoolman.Task):
-    async def run(self, query):
+    async def run(self):
+        query = self.input_data['query']
         # Simulate data fetching
-        return {"sales_data": [100, 200, 300]}
+        sales_data = [100, 200, 300]
+        # Pass result to next task
+        if self.next_task:
+            self.next_task.input_data['sales_data'] = sales_data
+        return sales_data
 
 class DataAnalysisTask(aitoolman.Task):
-    async def run(self, sales_data):
-        # Simulate data analysis
-        return {
-            "total": sum(sales_data),
-            "average": sum(sales_data)/len(sales_data)
-        }
+    async def run(self):
+        sales_data = self.input_data['sales_data']
+        total = sum(sales_data)
+        average = total / len(sales_data)
+        result = {'total': total, 'average': average}
+        # Pass result to next task
+        if self.next_task:
+            self.next_task.input_data['analysis_result'] = result
+        return result
 
 class ReportGenerationTask(aitoolman.Task):
-    async def run(self, format, analysis_result):
-        # Simulate report generation
-        if format == "markdown":
-            return f"""
+    async def run(self):
+        fmt = self.input_data['format']
+        analysis_result = self.input_data['analysis_result']
+        if fmt == 'markdown':
+            report = f"""
 # Sales Data Analysis Report
 - Total Sales: {analysis_result['total']}
 - Average Sales: {analysis_result['average']}
 """
+            return report
         return str(analysis_result)
 
 async def main():
-    # Initialize workflow
     api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
-        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        async with aitoolman.LLMWorkflow(client, prompt_config) as workflow:
+            # Create tasks
+            fetch_task = DataFetchTask({"query": "Q1 2024 sales data"})
+            analysis_task = DataAnalysisTask({})
+            report_task = ReportGenerationTask({"format": "markdown"})
 
-        # Create tasks
-        fetch_task = DataFetchTask({"query": "Q1 2024 sales data"})
-        analysis_task = DataAnalysisTask()
-        report_task = ReportGenerationTask({"format": "markdown"})
+            # Establish task chain
+            fetch_task.next_task = analysis_task
+            analysis_task.next_task = report_task
 
-        # Establish dependencies: fetch → analysis → report
-        workflow.add_task(fetch_task, analysis_task)
-        workflow.add_task(analysis_task, report_task)
+            # Execute the entire chain
+            last_task = await workflow.run(fetch_task)
 
-        # Wait for all tasks to complete
-        await workflow.wait_tasks(report_task)
-
-        # Get results
-        print("Analysis report generated successfully:")
-        print(report_task.output_data)
+            print("Analysis report generated successfully:")
+            print(last_task.output_data)
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -1008,8 +1014,8 @@ if __name__ == "__main__":
 ### 8.5 Dynamic Workflow: Batch Folder Analysis
 Recursively analyze folder structure:
 - Define folder analysis task to output sub-item list
-- Dynamically add sub-tasks in `run()` based on analysis content
-- Use `add_task()` and `wait_tasks()` to manage recursive dependencies
+- Dynamically create sub-tasks in `run()` based on analysis content
+- Use `wait_tasks()` to wait for all subtasks to complete in parallel
 - Handle file content analysis, classification, and other sub-tasks
 
 ### 8.6 Sequential Workflow: Multi-step Decision Making
@@ -1038,7 +1044,7 @@ class ContentSubmitTask(aitoolman.LLMTask):
         # Determine next step based on verification results
         if module_result.data['status'] == "valid":
             self.next_task = AIAuditTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = RejectionTask({
@@ -1057,11 +1063,11 @@ class AIAuditTask(aitoolman.LLMTask):
     async def post_process(self, module_result):
         if module_result.data['risk_level'] <= 1:
             self.next_task = PublishTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = ManualReviewTask({
-                "content": self.input_data.request.template_params['content'],
+                "content": self.input_data.template_params['content'],
                 "risk": module_result.data['risk_details']
             })
 
@@ -1077,26 +1083,30 @@ class ManualReviewTask(aitoolman.LLMTask):
     async def post_process(self, module_result):
         if module_result.data['approved']:
             self.next_task = PublishTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = RevisionTask({
-                "content": self.input_data.request.template_params['content'],
+                "content": self.input_data.template_params['content'],
                 "feedback": module_result.data['feedback']
             })
 
 class PublishTask(aitoolman.Task):
-    async def run(self, content):
+    async def run(self):
+        content = self.input_data['content']
         # Simulate publishing operation
         return {"status": "published", "content": content}
 
 class RevisionTask(aitoolman.Task):
-    async def run(self, content, feedback):
+    async def run(self):
+        content = self.input_data['content']
+        feedback = self.input_data['feedback']
         # Simulate returning revision suggestions
         return {"status": "revision_needed", "feedback": feedback}
 
 class RejectionTask(aitoolman.Task):
-    async def run(self, reason):
+    async def run(self):
+        reason = self.input_data['reason']
         # Simulate rejection operation
         return {"status": "rejected", "reason": reason}
 
@@ -1107,17 +1117,16 @@ async def main():
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
-        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        async with aitoolman.LLMWorkflow(client, prompt_config) as workflow:
+            # Start workflow
+            start_task = ContentSubmitTask({
+                "content": "Article content to be published...",
+                "type": "article"
+            })
+            final_task = await workflow.run(start_task)
 
-        # Start workflow
-        start_task = ContentSubmitTask({
-            "content": "Article content to be published...",
-            "type": "article"
-        })
-        final_task = await workflow.run(start_task)
-
-        print(f"Process completed, final status: {final_task.task_name}")
-        print(f"Result: {final_task.output_data}")
+            print(f"Process completed, final status: {final_task.task_name}")
+            print(f"Result: {final_task.output_data}")
 
 if __name__ == "__main__":
     asyncio.run(main())

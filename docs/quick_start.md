@@ -343,12 +343,14 @@ result = await app.call(direct_request)
 ### 3.2 LLMWorkflow 类
 
 #### 3.2.1 核心概念
-LLMWorkflow 扩展自 LLMApplication，支持动态工作流执行，提供两种构建模式：
+LLMWorkflow 扩展自 LLMApplication，支持动态任务链和并行子任务执行，工作流路径可以预先定义，也可以在执行过程中根据LLM输出或任务结果动态调整。
 
-1. **串行模式**：通过 `next_task` 属性连接任务，使用 `run()` 方法执行
-2. **并行模式**：通过 `add_task()` 构建 DAG（有向无环图），使用 `wait_tasks()` 方法执行
-
-两种模式可混合使用。
+核心概念：
+- 通过 `submit(task)` 将任务提交到执行队列，由消费者协程池并行执行。
+- 任务完成后，如果设置了 `next_task`，会自动提交下一个任务（链式执行）。
+- 使用 `wait_tasks(*tasks)` 提交一组任务并等待它们全部完成。
+- 使用 `run(start_task)` 执行一条完整的任务链（依次跟随 `next_task`）。
+- 任务内部可以通过 `workflow.wait_tasks`/`submit` 启动支线（子任务链）并等待。
 
 #### 3.2.2 任务定义
 `Task` 是通用任务基类，支持两种使用方式：
@@ -365,7 +367,6 @@ class TaskStatus(enum.Enum):
     RUNNING = 2 # 执行中
     COMPLETED = 3  # 已完成
     FAILED = 4     # 已失败
-    DEPENDENCY_FAILED = 5  # 依赖失败
 ```
 
 ```python
@@ -388,6 +389,9 @@ class Task:
 
     # 克隆任务（用于工具调用等场景）
     def clone(self): ...
+
+    # 获取当前任务后续的所有链式任务
+    def following_tasks(self) -> List['Task']: ...
 ```
 
 ```python
@@ -424,30 +428,26 @@ class LLMTask(Task):
 ```
 
 ```python
-class TaskDependencyError(LLMWorkflowError):
-    """依赖的任务执行错误，包含出错的所有任务"""
+class LLMWorkflowError(_model.LLMApplicationError):
+    """工作流执行错误基类"""
 ```
 
 #### 3.2.3 工作流接口
 ```python
 class LLMWorkflow(LLMApplication):
-    # 添加任务到工作流
-    def add_task(self, task: Task, next_task: Optional[Task] = None):
-        """
-        添加后台任务 task，不立即执行
-        task 为 next_task 之前要运行的任务
+    # 提交任务到执行队列，任务完成后自动提交next_task
+    async def submit(self, task: Task): ...
 
-        Args:
-            task: 要添加的任务
-            next_task: 要添加的任务之后要执行的任务，或为 None
-        """
-
-    # 等待指定任务完成
+    # 提交多个任务（如果尚未提交），并行等待所有任务完成
     async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None): ...
 
-    # 运行串行工作流
+    # 执行一条任务链：从start_task开始，依次执行next_task直到结束，返回最后一个完成的任务
     async def run(self, start_task: Task) -> Task: ...
+
+    # 停止所有消费者协程，清理资源
+    async def stop(self): ...
 ```
+LLMWorkflow 支持 `async with` 上下文管理器，退出时自动停止工作流、清理资源。
 
 #### 3.2.4 使用示例
 
@@ -455,8 +455,8 @@ class LLMWorkflow(LLMApplication):
 ```python
 # 方式1：继承Task并重写run方法
 class SimpleTask(aitoolman.Task):
-    async def run(self, x, y):
-        return x + y
+    async def run(self):
+        return self.input_data['x'] + self.input_data['y']
 
 # 方式2：使用set_func指定函数
 def simple_func(x, y):
@@ -479,14 +479,14 @@ class TranslationTask(aitoolman.LLMTask):
 
 
 # 运行工作流
-workflow = aitoolman.LLMWorkflow(client, config)
-start_task = TranslationTask(
-    aitoolman.LLMModuleRequest(
-        module_name="translator",
-        template_params={"text": "Hello"}
+async with aitoolman.LLMWorkflow(client, config) as workflow:
+    start_task = TranslationTask(
+        aitoolman.LLMModuleRequest(
+            module_name="translator",
+            template_params={"text": "Hello"}
+        )
     )
-)
-final_task = await workflow.run(start_task)
+    final_task = await workflow.run(start_task)
 ```
 
 ## 4. 传输层
@@ -949,64 +949,69 @@ if __name__ == "__main__":
 ### 8.4 静态工作流：数据分析流水线
 应用场景：已知任务依赖关系，比如先获取数据，再分析，最后生成报告
 
-使用 `LLMWorkflow` 构建静态 DAG：
+使用 `LLMWorkflow` 构建串行任务链：
 - 定义多个分析任务
-- 使用 `add_task()` 建立依赖关系
-- 使用 `wait_tasks()` 等待所有任务完成
+- 使用 `next_task` 建立串行依赖关系，并在任务内部传递数据
+- 使用 `run()` 执行整个任务链
 - 合并分析结果
 
 ```python
 import asyncio
 import aitoolman
 
-# 定义任务类
 class DataFetchTask(aitoolman.Task):
-    async def run(self, query):
+    async def run(self):
+        query = self.input_data['query']
         # 模拟数据获取
-        return {"sales_data": [100, 200, 300]}
+        sales_data = [100, 200, 300]
+        # 将结果传递给下一个任务
+        if self.next_task:
+            self.next_task.input_data['sales_data'] = sales_data
+        return sales_data
 
 class DataAnalysisTask(aitoolman.Task):
-    async def run(self, sales_data):
-        # 模拟数据分析
-        return {
-            "total": sum(sales_data),
-            "average": sum(sales_data)/len(sales_data)
-        }
+    async def run(self):
+        sales_data = self.input_data['sales_data']
+        total = sum(sales_data)
+        average = total / len(sales_data)
+        result = {'total': total, 'average': average}
+        if self.next_task:
+            self.next_task.input_data['analysis_result'] = result
+        return result
 
 class ReportGenerationTask(aitoolman.Task):
-    async def run(self, format, analysis_result):
-        # 模拟报告生成
-        if format == "markdown":
-            return f"""
+    async def run(self):
+        fmt = self.input_data['format']
+        analysis_result = self.input_data['analysis_result']
+        if fmt == 'markdown':
+            report = f"""
 # 销售数据分析报告
 - 总销售额: {analysis_result['total']}
 - 平均销售额: {analysis_result['average']}
 """
+            return report
         return str(analysis_result)
 
 async def main():
-    # 初始化工作流
     api_config = aitoolman.load_config("config/llm_provider.toml")
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
-        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        async with aitoolman.LLMWorkflow(client, prompt_config) as workflow:
+            # 创建任务
+            fetch_task = DataFetchTask({"query": "2024年Q1销售数据"})
+            analysis_task = DataAnalysisTask({})
+            report_task = ReportGenerationTask({"format": "markdown"})
 
-        # 创建任务
-        fetch_task = DataFetchTask({"query": "2024年Q1销售数据"})
-        analysis_task = DataAnalysisTask()
-        report_task = ReportGenerationTask({"format": "markdown"})
+            # 建立任务链
+            fetch_task.next_task = analysis_task
+            analysis_task.next_task = report_task
 
-        # 建立依赖关系：fetch → analysis → report
-        workflow.add_task(fetch_task, analysis_task)
-        workflow.add_task(analysis_task, report_task)
+            # 执行整个链
+            last_task = await workflow.run(fetch_task)
 
-        # 等待所有任务完成
-        await workflow.wait_tasks(report_task)
-
-        # 获取结果
-        print("分析报告生成完成：")
-        print(report_task.output_data)
+            print("分析报告生成完成：")
+            print(last_task.output_data)
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -1015,8 +1020,8 @@ if __name__ == "__main__":
 ### 8.5 动态工作流：文件夹批量分析
 递归分析文件夹结构：
 - 定义文件夹分析任务，输出子项列表
-- 在 `run()` 中根据分析内容动态添加子任务
-- 使用 `add_task()` 和 `wait_tasks()` 管理递归依赖
+- 在 `run()` 中根据分析内容动态创建子任务
+- 使用 `wait_tasks()` 等待所有子任务并行完成
 - 处理文件内容分析、分类等子任务
 
 ### 8.6 串行工作流：多步骤决策
@@ -1045,7 +1050,7 @@ class ContentSubmitTask(aitoolman.LLMTask):
         # 根据验证结果决定下一步
         if module_result.data['status'] == "valid":
             self.next_task = AIAuditTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = RejectionTask({
@@ -1064,11 +1069,11 @@ class AIAuditTask(aitoolman.LLMTask):
     async def post_process(self, module_result):
         if module_result.data['risk_level'] <= 1:
             self.next_task = PublishTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = ManualReviewTask({
-                "content": self.input_data.request.template_params['content'],
+                "content": self.input_data.template_params['content'],
                 "risk": module_result.data['risk_details']
             })
 
@@ -1084,26 +1089,30 @@ class ManualReviewTask(aitoolman.LLMTask):
     async def post_process(self, module_result):
         if module_result.data['approved']:
             self.next_task = PublishTask({
-                "content": self.input_data.request.template_params['content']
+                "content": self.input_data.template_params['content']
             })
         else:
             self.next_task = RevisionTask({
-                "content": self.input_data.request.template_params['content'],
+                "content": self.input_data.template_params['content'],
                 "feedback": module_result.data['feedback']
             })
 
 class PublishTask(aitoolman.Task):
-    async def run(self, content):
+    async def run(self):
+        content = self.input_data['content']
         # 模拟发布操作
         return {"status": "published", "content": content}
 
 class RevisionTask(aitoolman.Task):
-    async def run(self, content, feedback):
+    async def run(self):
+        content = self.input_data['content']
+        feedback = self.input_data['feedback']
         # 模拟返回修订建议
         return {"status": "revision_needed", "feedback": feedback}
 
 class RejectionTask(aitoolman.Task):
-    async def run(self, reason):
+    async def run(self):
+        reason = self.input_data['reason']
         # 模拟拒绝操作
         return {"status": "rejected", "reason": reason}
 
@@ -1114,17 +1123,16 @@ async def main():
     prompt_config = aitoolman.load_config("config/app_prompt.toml")
 
     async with aitoolman.LLMLocalClient(api_config) as client:
-        workflow = aitoolman.LLMWorkflow(client, prompt_config)
+        async with aitoolman.LLMWorkflow(client, prompt_config) as workflow:
+            # 启动工作流
+            start_task = ContentSubmitTask({
+                "content": "待发布的文章内容...",
+                "type": "article"
+            })
+            final_task = await workflow.run(start_task)
 
-        # 启动工作流
-        start_task = ContentSubmitTask({
-            "content": "待发布的文章内容...",
-            "type": "article"
-        })
-        final_task = await workflow.run(start_task)
-
-        print(f"流程完成，最终状态：{final_task.task_name}")
-        print(f"结果：{final_task.output_data}")
+            print(f"流程完成，最终状态：{final_task.task_name}")
+            print(f"结果：{final_task.output_data}")
 
 if __name__ == "__main__":
     asyncio.run(main())

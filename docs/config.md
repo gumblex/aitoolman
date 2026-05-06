@@ -39,6 +39,11 @@
 | `timeout`      | 整数  | 继承自 `[default].timeout`      | 该模型特定的超时时间                      |
 | `body_options` | 字典  | 继承自 `[default].body_options` | 该模型默认的请求选项，覆盖 default 中的所有选项    |
 
+其中：
+* "openai" 格式，headers 应有 `Authorization`
+* "anthropic" 格式，headers 应有 `"X-Api-Key"`, `"anthropic-version" = "2023-06-01"`；body_options 应有 `max_tokens`
+
+
 ### 1.4 [model_alias] 部分
 模型别名配置，用于简化模型名称的使用，方便在应用配置中使用更友好的名称。
 

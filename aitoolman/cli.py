@@ -186,7 +186,7 @@ def main():
     # --- Server Command ---
     parser_server = subparsers.add_parser('server')
     parser_server.add_argument(
-        "-v", "--verbose", action='store_true',
+        "-v", "--verbose", action='count', default=0,
         help="Print debug log"
     )
     parser_server.add_argument(
@@ -354,6 +354,10 @@ def main():
         logging.getLogger('aitoolman').setLevel(logging.DEBUG)
 
     if args.subparser_name == 'server':
+        if args.verbose > 1:
+            for name in logging.root.manager.loggerDict:
+                if name.startswith('aitoolman'):
+                    logging.getLogger(name).setLevel(logging.DEBUG)
         run_zmqserver(args.config)
     elif args.subparser_name == 'client':
         asyncio.run(run_client_session(
