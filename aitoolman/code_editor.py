@@ -236,22 +236,22 @@ async def process_files(
 ) -> app.LLMModuleResult:
     """处理多个文件"""
     logger.info("使用模型: %s", model_name)
-    if reference_files:
-        logger.info("参考文件: %s", ', '.join(reference_files))
-    if input_files:
-        logger.info("输入文件: %s", ', '.join(input_files))
 
-    # 处理参考文件（替换原有逻辑）
-    references = load_files_from_paths(reference_files)
-    # 处理输入文件（替换原有逻辑）
+    references = load_files_from_paths(
+        reference_files, relative_to=Path.cwd(), file_size_limit=file_size_limit)
     input_files_list = load_files_from_paths(
         input_files, relative_to=Path.cwd(), file_size_limit=file_size_limit)
 
+    if references:
+        logger.info("参考文件: %s", ', '.join(f['filename'] for f in references))
+    if input_files_list:
+        logger.info("输入文件: %s", ', '.join(f['filename'] for f in input_files_list))
+
     # 校验是否还有有效文件
     if input_files and not input_files_list:
-        raise ValueError("所有输入文件都因过大/格式问题被排除，无法继续处理")
+        raise ValueError("所有输入文件都因无法读取或大小超出限制被排除，无法继续处理")
     if not input_files and reference_files and not references:
-        raise ValueError("所有参考文件都因过大/格式问题被排除，无法继续处理")
+        raise ValueError("所有参考文件都因无法读取或大小超出限制被排除，无法继续处理")
 
     media_content_list = []
     if media_files:
@@ -291,6 +291,7 @@ async def process_files(
                   len(user_instruction)
     if total_chars > WARN_PROMPT_CHARS:
         logger.warning(f"提示词中，总文件长度较大 {total_chars} > {WARN_PROMPT_CHARS}，可能导致处理变慢或无法处理")
+
     result = await llm_app.call(LLMModuleRequest(
         module_name='code_edit',
         template_params=template_params,

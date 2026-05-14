@@ -526,6 +526,41 @@ async def print_channel_output(
     """
 ```
 
+Split Channel into sub-channels:
+```python
+class ChannelDemux:
+    """
+    Usage:
+        async with ChannelDemux(source_channel) as demux:
+            reader1 = demux.get_reader("topic1")
+            reader2 = demux.get_reader("topic2", "topic3") # Subscribe to multiple topics
+            reader3 = demux.get_reader() # Subscribe to all topics
+            # Consume events in parallel with each reader respectively
+            # Call await reader.close() to unsubscribe when no longer needed
+    Alternatively use start(), close() directly
+    """
+    def __init__(self, source: ChannelReader, topics: Optional[Set[str]] = None):
+        """
+        :param source: Input ChannelReader, used to read ChannelEvent
+        :param topics: Optional predefined topic set, used to initialize the subscription list in advance (does not affect dynamic subscriptions)
+        """
+
+    def get_reader(self, *topics: str) -> DemuxChannelReader:
+        """
+        Subscribe to specified topics and return an exclusive DemuxReader.
+        If no topics are passed, subscribe to all topics; multiple topics can be passed at the same time for simultaneous subscription.
+        Each call creates an independent consumption channel, so multiple consumers can subscribe to the same topic at the same time and each receive the complete event stream.
+        """
+
+    async def start(self): ...
+
+    async def close(self): ...
+
+    async def __aenter__(self): ...
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb): ...
+```
+
 #### 4.1.1 XML Tag Filters
 BaseXmlTagFilter automatically identifies XML tags from streaming text, mainly used when LLM outputs single-layer XML tags representing different types of text, which are then output to different topics. For example: output current status, output to users, processing results to applications.
 

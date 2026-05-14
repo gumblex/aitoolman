@@ -2,7 +2,7 @@ import abc
 import re
 import sys
 import asyncio
-from typing import Any, Optional, NamedTuple, Protocol, Set, Dict
+from typing import Any, Optional, NamedTuple, Protocol, Set, Dict, List
 
 
 class ChannelEvent(NamedTuple):
@@ -308,4 +308,126 @@ class XmlTagToChannelFilter(BaseXmlTagFilter):
     async def write_complete(self):
         await self.output_channel.write_complete()
 
+
+class DemuxChannelReader:
+    """只读 Channel 包装器，隐藏 write 接口，支持关闭取消订阅"""
+    def __init__(self, demux: 'ChannelDemux'):
+        self._demux = demux
+        self.channel = Channel()
+        self._closed = False
+
+    async def read(self) -> ChannelEvent:
+        if self._closed:
+            raise EOFError("Reader has been closed")
+        return await self.channel.read()
+
+    async def close(self):
+        """关闭当前reader，取消所有订阅，不再接收新消息"""
+        if self._closed:
+            return
+        self._closed = True
+        self._demux.remove_reader(self)
+        await self.channel.write_complete()
+
+
+class ChannelDemux:
+    """
+    多 topic Channel 拆分与分发器
+
+    使用方式：
+        async with ChannelDemux(source_channel) as demux:
+            reader1 = demux.get_reader("topic1")
+            reader2 = demux.get_reader("topic2", "topic3") # 订阅多个topic
+            reader3 = demux.get_reader() # 订阅所有topic
+            # 分别使用 reader 并行消费事件
+            # 不需要时可调用 await reader.close() 取消订阅
+    或使用 start(), close()
+    """
+    def __init__(self, source: ChannelReader, topics: Optional[Set[str]] = None):
+        """
+        :param source: 输入 ChannelReader，用于读取 ChannelEvent
+        :param topics:  可选的预定义 topic 集合，用于提前初始化订阅列表（不影响动态订阅）
+        """
+        self._source = source
+        self._topics = topics
+        self._readers: Dict[str, List[DemuxChannelReader]] = {}          # topic -> List[Channel]
+        self._all_subscribers: List[DemuxChannelReader] = []            # 订阅所有topic的通道
+        self._reader_topics: Dict[DemuxChannelReader, Optional[Set[str]]] = {}  # reader -> topics (None 表示全部)
+        self._dispatch_task: Optional[asyncio.Task] = None
+        self._closed = False
+
+        if topics:
+            for t in topics:
+                self._readers.setdefault(t, [])
+
+    def get_reader(self, *topics: str) -> DemuxChannelReader:
+        """
+        订阅指定 topic，并返回专属的 DemuxReader。
+        不传入topics时订阅所有topic，可同时传入多个topic同时订阅。
+        每次调用都会创建一个独立的消费通道，因此多个消费者可以同时订阅同一个 topic 并各自接收完整的事件流。
+        调用时机：必须在 demux 上下文内部调用，否则可能抛异常。
+        """
+        if self._closed:
+            raise RuntimeError("ChannelDemux is closed")
+        reader = DemuxChannelReader(self)
+        topic_set = set(topics)
+        if not topic_set:
+            # 空参数代表订阅所有topic
+            self._all_subscribers.append(reader)
+            self._reader_topics[reader] = None
+        else:
+            for t in topic_set:
+                self._readers.setdefault(t, []).append(reader)
+            self._reader_topics[reader] = topic_set
+        return reader
+
+    def remove_reader(self, reader: DemuxChannelReader):
+        """内部方法：根据 reader 实例注销并移除其所有订阅"""
+        topics = self._reader_topics.pop(reader, None)
+        if topics is None:
+            if reader in self._all_subscribers:
+                self._all_subscribers.remove(reader)
+        else:
+            for t in topics:
+                if t in self._readers and reader in self._readers[t]:
+                    self._readers[t].remove(reader)
+                    if not self._readers[t]:
+                        del self._readers[t]
+
+    async def _dispatch(self):
+        """后台分发协程"""
+        try:
+            while True:
+                event = await self._source.read()
+                # 合并对应topic订阅者和全量订阅者
+                readers = list(self._readers.get(event.topic, []))
+                readers.extend(self._all_subscribers)
+                for reader in readers:
+                    await reader.channel.write(event)
+        except (EOFError, asyncio.CancelledError):
+            pass
+        finally:
+            self._closed = True
+            # 通知所有目前活跃的子通道写入完成
+            for reader in list(self._reader_topics.keys()):
+                await reader.channel.write_complete()
+
+    async def start(self):
+        self._dispatch_task = asyncio.create_task(self._dispatch())
+
+    async def close(self):
+        if self._dispatch_task:
+            self._dispatch_task.cancel()
+            try:
+                await self._dispatch_task
+            except asyncio.CancelledError:
+                pass
+        self._closed = True
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 

@@ -530,6 +530,41 @@ async def print_channel_output(
     """
 ```
 
+Channel 拆分为子通道：
+```python
+class ChannelDemux:
+    """
+    使用方式：
+        async with ChannelDemux(source_channel) as demux:
+            reader1 = demux.get_reader("topic1")
+            reader2 = demux.get_reader("topic2", "topic3") # 订阅多个topic
+            reader3 = demux.get_reader() # 订阅所有topic
+            # 分别使用 reader 并行消费事件
+            # 不需要时可调用 await reader.close() 取消订阅
+    或使用 start(), close()
+    """
+    def __init__(self, source: ChannelReader, topics: Optional[Set[str]] = None):
+        """
+        :param source: 输入 ChannelReader，用于读取 ChannelEvent
+        :param topics: 可选的预定义 topic 集合，用于提前初始化订阅列表（不影响动态订阅）
+        """
+
+    def get_reader(self, *topics: str) -> DemuxChannelReader:
+        """
+        订阅指定 topic，并返回专属的 DemuxReader。
+        不传入topics时订阅所有topic，可同时传入多个topic同时订阅。
+        每次调用都会创建一个独立的消费通道，因此多个消费者可以同时订阅同一个 topic 并各自接收完整的事件流。
+        """
+
+    async def start(self): ...
+
+    async def close(self): ...
+
+    async def __aenter__(self): ...
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb): ...
+```
+
 #### 4.1.1 XML 标签过滤器
 BaseXmlTagFilter从流式文本中自动识别XML标签，主要用于LLM输出单层XML标签，表示不同类型的文本，输出到不同主题。例如：输出当前状态、给用户的输出、给应用程序的处理结果。
 
@@ -540,8 +575,7 @@ class BaseXmlTagFilter(ChannelWriter):
 
 class XmlTagToChannelFilter(BaseXmlTagFilter):
     """XML 标签分发到不同主题"""
-    def __init__(self, output_channel: ChannelWriter, tags: Set[str], input_topic: str = 'response')
-: ...
+    def __init__(self, output_channel: ChannelWriter, tags: Set[str], input_topic: str = 'response'): ...
 ```
 
 ### 4.2 LLMClient 客户端抽象

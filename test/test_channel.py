@@ -341,6 +341,131 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("结果是4", default_content)
 
 
+class TestChannelDemux(unittest.IsolatedAsyncioTestCase):
+    """测试ChannelDemux类"""
+
+    async def test_single_topic_subscribe(self):
+        """测试单个topic订阅"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            reader = demux.get_reader('topic1')
+            await source.write(_ch.ChannelEvent('topic1', 'msg1'))
+            await source.write(_ch.ChannelEvent('topic2', 'msg2'))
+            await source.write(_ch.ChannelEvent('topic1', 'msg3'))
+            await source.write_complete()
+
+            res1 = await reader.read()
+            self.assertEqual(res1.data, 'msg1')
+            res2 = await reader.read()
+            self.assertEqual(res2.data, 'msg3')
+            with self.assertRaises(EOFError):
+                await reader.read()
+
+    async def test_multiple_topics_subscribe(self):
+        """测试多个topic订阅"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            reader = demux.get_reader('topic1', 'topic2')
+            await source.write(_ch.ChannelEvent('topic1', 't1'))
+            await source.write(_ch.ChannelEvent('topic2', 't2'))
+            await source.write(_ch.ChannelEvent('topic3', 't3'))
+            await source.write_complete()
+
+            events = []
+            while True:
+                try:
+                    events.append(await reader.read())
+                except EOFError:
+                    break
+            self.assertEqual(len(events), 2)
+            topics = {e.topic for e in events}
+            self.assertEqual(topics, {'topic1', 'topic2'})
+
+    async def test_all_topics_subscribe(self):
+        """测试全量topic订阅（不传参数）"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            reader = demux.get_reader()
+            await source.write(_ch.ChannelEvent('t1', 'm1'))
+            await source.write(_ch.ChannelEvent('t2', 'm2'))
+            await source.write(_ch.ChannelEvent('t3', 'm3'))
+            await source.write_complete()
+
+            events = []
+            while True:
+                try:
+                    events.append(await reader.read())
+                except EOFError:
+                    break
+            self.assertEqual(len(events), 3)
+
+    async def test_multiple_subscribers_same_topic(self):
+        """测试多个订阅者订阅同一个topic，都能收到完整消息"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            reader1 = demux.get_reader('t1')
+            reader2 = demux.get_reader('t1')
+            await source.write(_ch.ChannelEvent('t1', 'test'))
+            await source.write_complete()
+
+            r1 = await reader1.read()
+            self.assertEqual(r1.data, 'test')
+            r2 = await reader2.read()
+            self.assertEqual(r2.data, 'test')
+
+    async def test_reader_close_unsubscribe(self):
+        """测试reader.close()取消订阅，不再接收消息"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            reader = demux.get_reader('t1')
+            await source.write(_ch.ChannelEvent('t1', 'm1'))
+            res = await reader.read()
+            self.assertEqual(res.data, 'm1')
+
+            # 关闭reader
+            await reader.close()
+            await source.write(_ch.ChannelEvent('t1', 'm2'))
+
+            # 读取应该抛出EOF
+            with self.assertRaises(EOFError):
+                await reader.read()
+
+    async def test_source_eof_propagation(self):
+        """测试source的EOF正确传播到所有reader"""
+        source = _ch.Channel()
+        demux = _ch.ChannelDemux(source)
+        async with demux:
+            r1 = demux.get_reader('t1')
+            r2 = demux.get_reader('t2')
+            r_all = demux.get_reader()
+            await source.write_complete()
+
+            with self.assertRaises(EOFError):
+                await r1.read()
+            with self.assertRaises(EOFError):
+                await r2.read()
+            with self.assertRaises(EOFError):
+                await r_all.read()
+
+    async def test_demux_context_manager(self):
+        """测试上下文管理器正常工作，退出后关闭"""
+        source = _ch.Channel()
+        async with _ch.ChannelDemux(source) as demux:
+            reader = demux.get_reader('t1')
+            await source.write(_ch.ChannelEvent('t1', 'test'))
+            res = await reader.read()
+            self.assertEqual(res.data, 'test')
+
+        # 退出上下文后demux关闭，不能再创建reader
+        with self.assertRaises(RuntimeError):
+            demux.get_reader('t2')
+
+
 if __name__ == '__main__':
     # 运行测试
     unittest.main(verbosity=2)
