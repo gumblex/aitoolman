@@ -5,6 +5,9 @@
 ### 新增
 - ChannelDemux 通道拆分
 
+### 修改
+- 修复 PUB 接口 response_message 格式
+
 ## 0.4.0
 
 ### 修改

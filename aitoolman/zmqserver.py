@@ -291,7 +291,9 @@ class LLMZmqServer:
             'request_messages': [m.to_dict() for m in request.messages],
             'request_tools': request.tools,
             'request_options': request.options,
-            'response_message': response.response_message
+            'response_message': (
+                response.response_message._asdict()
+                if response.response_message else None)
         }
         await self.pub_socket.send_multipart([
             b'llm_request',
