@@ -3,6 +3,7 @@ import time
 import asyncio
 import logging
 import sqlite3
+import datetime
 from typing import Optional, List, Dict, Any
 
 import zmq
@@ -145,7 +146,6 @@ class LLMZmqClient(LLMClient):
         """处理完整响应"""
         response_data = json_data['response']
         # 构造LLMResponse
-        finish_reason = FinishReason(response_data['finish_reason']) if response_data['finish_reason'] in FinishReason.__members__ else response_data['finish_reason']
         if not response_data['response_text'] and not response_data['response_reasoning']:
             await request.output_channel.write(ChannelEvent('reasoning', None))
             await request.output_channel.write(ChannelEvent('response', None))
@@ -163,7 +163,7 @@ class LLMZmqClient(LLMClient):
             response_text=response_data['response_text'],
             response_reasoning=response_data['response_reasoning'],
             response_tool_calls=[ToolCall(**tc) for tc in (response_data['response_tool_calls'] or [])],
-            finish_reason=finish_reason,
+            finish_reason=response_data['finish_reason'],
             error_text=response_data['error_text'],
             prompt_tokens=response_data['prompt_tokens'],
             completion_tokens=response_data['completion_tokens'],
@@ -279,18 +279,130 @@ class LLMZmqClient(LLMClient):
 
 
 class LLMMonitor:
-    def __init__(self, pub_endpoint: str):
+    """LLM请求监控器，用于监控aitoolman的请求和审计事件"""
+
+    def __init__(self, pub_endpoint: str, pub_type: str = 'bind', verbose: bool = False):
+        """
+        初始化监控器
+
+        Args:
+            pub_endpoint: ZeroMQ PUB端点地址
+            verbose: 是否打印详细内容
+        """
         self.pub_endpoint = pub_endpoint
+        self.pub_type = pub_type
+        self.verbose = verbose
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.SUB)
         self.running = False
 
+    def _truncate_text(self, text: str, max_len: int = 200) -> str:
+        """截断文本"""
+        if not text:
+            return ""
+        if len(text) <= max_len:
+            return text
+        return text[:max_len] + "..."
+
+    def _format_time(self, timestamp: Optional[float]) -> str:
+        """格式化时间"""
+        if timestamp is None:
+            return "N/A"
+        return f"{timestamp:.3f}s"
+
+    def on_llm_request(self, data: Dict[str, Any]):
+        """处理LLM请求审计消息"""
+        client_id = data.get('client_id', '')
+        context_id = data.get('context_id', '')
+        short_request_id = data['request_id'][-4:]
+        model_name = data.get('model_name', '')
+        stream = data.get('stream', False)
+        start_time = data.get('start_time')
+        queue_time = data.get('queue_time') or 0
+        time_to_first_token = data.get('time_to_first_token') or 0
+        total_response_time = data.get('total_response_time') or 0
+        finish_reason = data.get('finish_reason', 'unknown')
+        prompt_tokens = data.get('prompt_tokens') or 0
+        completion_tokens = data.get('completion_tokens') or 0
+
+        # 1. 一行总结
+        summary = [f"{short_request_id} [LLM] Client: {client_id}/{context_id}", "Model: " + model_name]
+        if stream:
+            summary.append("Stream")
+        if start_time:
+            summary.append("Start: " + datetime.datetime.fromtimestamp(start_time).strftime('%H:%M:%S'))
+        summary.append("Times: Queue=%.1fs, TTFT=%.1fs, Total=%ds" % (queue_time, time_to_first_token, total_response_time))
+        summary.append("Tokens: %d/%d" % (prompt_tokens, completion_tokens))
+        summary.append("Finish: " + finish_reason)
+        logger.info(', '.join(summary))
+
+        if self.verbose:
+            separator = '=' * 20
+            # 2. 工具名称列表（如有）
+            request_tools = data.get('request_tools', {})
+            if request_tools:
+                logger.info("%s  [Tools] %s", short_request_id, ', '.join(request_tools.keys()))
+
+            # 3. 前序消息（除最后一条）
+            request_messages = data.get('request_messages', [])
+            if len(request_messages) > 1:
+                ctx = [
+                    '%s(%s)' % (msg.get('role'), len(msg.get('content', '')))
+                    for msg in request_messages[:-1]
+                ]
+                logger.info("%s  [Context] %s", short_request_id, ', '.join(ctx))
+
+            # 4. 最后一条请求消息
+            if request_messages:
+                last_msg = request_messages[-1]
+                role = last_msg.get('role', 'unknown')
+                logger.info("%s  [Request] role=%s %s\n%s",
+                            short_request_id, role, separator, last_msg.get('content', ''))
+                logger.info("%s  [/Request] %s", short_request_id, separator)
+
+            # 5. 最后一条响应
+            response_text = data.get('response_text', '')
+            response_reasoning = data.get('response_reasoning', '')
+            error_text = data.get('error_text', '')
+            response_tool_calls = data.get('response_tool_calls', [])
+
+            if error_text:
+                logger.info("%s  [Error] %s", short_request_id, error_text)
+            if response_tool_calls:
+                tc_repr = ['%s(%s)' % (
+                    tc.name,
+                    ', '.join(
+                        '%s=%r' % (k, v) for k, v in tc['arguments'].items()
+                        ) if tc['arguments'] else tc.get('arguments_text')
+                ) for tc in response_tool_calls]
+                logger.info("%s  [Tool Calls] %s", short_request_id, ', '.join(tc_repr))
+            if response_reasoning:
+                logger.info("%s  [Reasoning] %s\n%s", short_request_id, separator, response_reasoning)
+                logger.info("%s  [/Reasoning] %s", short_request_id, separator)
+            if response_text:
+                logger.info("%s  [Response] %s\n%s", short_request_id, separator, response_text)
+                logger.info("%s  [/Response] %s", short_request_id, separator)
+
+    def on_audit_event(self, data: Dict[str, Any]):
+        """处理审计事件消息"""
+        logger.info(
+            "[AUDIT] Client: %s/%s, Event: %s, %s",
+            data['client_id'], data['context_id'],
+            data['event_type'], data['kwargs']
+        )
+
     def start(self):
         """开始监听审计消息"""
-        self.socket.connect(self.pub_endpoint)
+        if self.pub_type == 'bind':
+            self.socket.connect(self.pub_endpoint)
+        else:
+            self.socket.bind(self.pub_endpoint)
+            logger.info("[Monitor] Started listening on %s", self.pub_endpoint)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "llm_request")
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "audit_event")
         self.running = True
+        if self.verbose:
+            logger.info("[Monitor] Verbose mode")
         while self.running:
             try:
                 message = self.socket.recv_multipart()
@@ -308,30 +420,6 @@ class LLMMonitor:
             except Exception as e:
                 logger.info(f"Monitor error: {e}")
 
-    def on_llm_request(self, data: Dict[str, Any]):
-        """处理审计消息（子类可重写）"""
-        # 使用新的字段名
-        logger.info(
-            "[AUDIT LLM: %s/%s] model: %s, queue: %.1f s, first_token: %.1f s, total: %.1f s, tokens: %s/%s, reason: %s",
-            data['client_id'],
-            data['request_id'],
-            data['model_name'],
-            data.get('queue_time', 0) or 0,
-            data.get('time_to_first_token', 0) or 0,
-            data.get('total_response_time', 0) or 0,
-            data.get('prompt_tokens', 0),
-            data.get('completion_tokens', 0),
-            data.get('finish_reason', 'unknown')
-        )
-
-    def on_audit_event(self, data: Dict[str, Any]):
-        """处理审计事件消息（子类可重写）"""
-        logger.info(
-            "[AUDIT EVENT: %s/%s] event: %s, %s",
-            data['client_id'], data['context_id'],
-            data['event_type'], data['kwargs']
-        )
-
     def stop(self):
         """停止监听"""
         self.running = False
@@ -340,8 +428,8 @@ class LLMMonitor:
 
 
 class DBLLMMonitor(LLMMonitor):
-    def __init__(self, pub_endpoint: str, db_path: str = "llm_audit.db"):
-        super().__init__(pub_endpoint)
+    def __init__(self, pub_endpoint: str, pub_type: str = 'bind', verbose: bool = False, db_path: str = "llm_audit.db"):
+        super().__init__(pub_endpoint, pub_type, verbose)
         self.db_path = db_path
         self._init_database()
 
@@ -390,7 +478,7 @@ class DBLLMMonitor(LLMMonitor):
         conn.close()
 
     def on_llm_request(self, data: Dict[str, Any]):
-        """将审计消息存入数据库，使用新的字段结构"""
+        """将审计消息存入数据库并打印"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         db_data = data.copy()
@@ -403,7 +491,7 @@ class DBLLMMonitor(LLMMonitor):
         super().on_llm_request(data)
 
     def on_audit_event(self, data: Dict[str, Any]):
-        """将审计事件存入数据库"""
+        """将审计事件存入数据库并打印"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         db_data = data.copy()

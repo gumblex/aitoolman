@@ -166,12 +166,12 @@ def run_zmqserver(config_file):
     asyncio.run(service.run(), loop_factory=_LOOP_FACTORY)
 
 
-def run_monitor(pub_endpoint, db_path=None):
+def run_monitor(pub_endpoint, pub_type='bind', verbose=False, db_path=None):
     from . import zmqclient
     if db_path:
-        monitor = zmqclient.DBLLMMonitor(pub_endpoint, db_path)
+        monitor = zmqclient.DBLLMMonitor(pub_endpoint, pub_type, verbose=verbose, db_path=db_path)
     else:
-        monitor = zmqclient.LLMMonitor(pub_endpoint)
+        monitor = zmqclient.LLMMonitor(pub_endpoint, pub_type, verbose=verbose)
     monitor.start()
 
 
@@ -340,11 +340,15 @@ def main():
     parser_monitor = subparsers.add_parser('monitor')
     parser_monitor.add_argument(
         "-v", "--verbose", action='store_true',
-        help="Print debug log"
+        help="Print detailed content (verbose mode)"
     )
     parser_monitor.add_argument(
         '--pub-endpoint', default='tcp://localhost:5556',
         help='ZeroMQ PUB endpoint (e.g., tcp://localhost:5556)')
+    parser_monitor.add_argument(
+        '--pub-type', default='bind',
+        choices=('bind', 'connect'),
+        help='ZeroMQ PUB endpoint type (bind or connect)')
     parser_monitor.add_argument(
         '--db-path',
         help='SQLite database path for DB monitor')
@@ -375,7 +379,7 @@ def main():
     elif args.subparser_name == 'code-edit':
         asyncio.run(run_code_editor(args), loop_factory=_LOOP_FACTORY)
     elif args.subparser_name == 'monitor':
-        run_monitor(args.pub_endpoint, args.db_path)
+        run_monitor(args.pub_endpoint, args.pub_type, args.verbose, args.db_path)
 
 
 if __name__ == "__main__":
