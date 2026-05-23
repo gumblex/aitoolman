@@ -5,7 +5,7 @@ import unittest
 
 import aitoolman
 
-import mock_llmclient
+from aitoolman.test import mock_llmclient
 
 logging.basicConfig(level="DEBUG", format="%(asctime)s - %(levelname)s - %(message)s")
 logging.getLogger('asyncio').setLevel(logging.INFO)

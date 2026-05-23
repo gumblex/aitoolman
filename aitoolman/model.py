@@ -110,7 +110,7 @@ class MediaContent(typing.NamedTuple):
         # 创建MediaContent对象
         return cls(
             raw_value=data.get("raw_value"),
-            media_type=data.get("media_type"),
+            media_type=data["media_type"],
             data=bytes_data,
             mime_type=data.get("mime_type"),
             filename=data.get("filename"),
@@ -220,7 +220,7 @@ class ToolCall(typing.NamedTuple):
 class LLMProviderResponse:
     """LLM网络层返回类，用于包装模型提供商的应答"""
     client_id: str
-    context_id: str
+    context_id: Optional[str]
     request_id: str
     model_name: str
     stream: bool
@@ -295,7 +295,7 @@ class FinishReason(enum.Enum):
     unknown = "unknown"
 
     @staticmethod
-    def raise_for_status(finish_reason: str, error_text: str = ""):
+    def raise_for_status(finish_reason: Optional[str], error_text: Optional[str] = None):
         """Raise appropriate error if the response indicates failure"""
         if not finish_reason:
             return
@@ -429,7 +429,8 @@ class LLMModuleResult:
             return None
 
         context = list(self.request.messages)
-        context.append(self.response_message)
+        if self.response_message:
+            context.append(self.response_message)
 
         for tool_call in self.tool_calls:
             tool_name = tool_call.name

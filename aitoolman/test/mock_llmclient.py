@@ -1,10 +1,10 @@
 import re
 import json
 import inspect
-from typing import Dict, List, Any, Callable, Optional, Union, NamedTuple, Tuple
+from typing import Dict, List, Any, Callable, Optional, Union, NamedTuple
 
-import aitoolman
-from aitoolman import MessageRole
+from .. import model as _model
+from .. import client as _client
 
 
 class AuditEvent(NamedTuple):
@@ -14,67 +14,67 @@ class AuditEvent(NamedTuple):
 
 
 def run_response_function(
-    request: aitoolman.LLMProviderRequest, fn: Callable[[str], Union[str, List[aitoolman.ToolCall]]]
-) -> aitoolman.LLMProviderResponse:
+    request: _model.LLMProviderRequest, fn: Callable[[str], Union[str, List[_model.ToolCall]]]
+) -> _model.LLMProviderResponse:
     try:
         response_content = fn(request.messages[-1].content)
-    except aitoolman.LLMLengthLimitError:
-        return aitoolman.LLMProviderResponse(
+    except _model.LLMLengthLimitError:
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.length.value,
+            finish_reason=_model.FinishReason.length.value,
             response_text='',
             response_message=None
         )
-    except aitoolman.LLMContentFilterError as ex:
-        return aitoolman.LLMProviderResponse(
+    except _model.LLMContentFilterError as ex:
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.content_filter.value,
+            finish_reason=_model.FinishReason.content_filter.value,
             response_text=str(ex),
-            response_message=aitoolman.Message(role='assistant', content=str(ex))
+            response_message=_model.Message(role='assistant', content=str(ex))
         )
     except Exception as ex:
-        return aitoolman.LLMProviderResponse(
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.error_request.value,
+            finish_reason=_model.FinishReason.error_request.value,
             error_text=str(ex)
         )
     if isinstance(response_content, str):
-        return aitoolman.LLMProviderResponse(
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.stop.value,
+            finish_reason=_model.FinishReason.stop.value,
             response_text=response_content,
-            response_message=aitoolman.Message(
+            response_message=_model.Message(
                 role='assistant', content=response_content,
                 raw_value={"content": response_content}
             )
         )
     else:
-        tool_calls_with_id = [tc._replace(id=aitoolman.get_id()) for tc in response_content]
-        return aitoolman.LLMProviderResponse(
+        tool_calls_with_id = [tc._replace(id=_model.get_id()) for tc in response_content]
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.tool_calls.value,
+            finish_reason=_model.FinishReason.tool_calls.value,
             response_tool_calls=tool_calls_with_id,
-            response_message=aitoolman.Message(
+            response_message=_model.Message(
                 role='assistant', content='',
                 raw_value={"tool_calls": [tc._asdict() for tc in tool_calls_with_id]}
             )
@@ -82,40 +82,40 @@ def run_response_function(
 
 
 def make_simple_response(
-    request: aitoolman.LLMProviderRequest,
-    response_content: Union[str, List[aitoolman.ToolCall]]
-) -> aitoolman.LLMProviderResponse:
+    request: _model.LLMProviderRequest,
+    response_content: Union[str, List[_model.ToolCall]]
+) -> _model.LLMProviderResponse:
     if isinstance(response_content, str):
-        return aitoolman.LLMProviderResponse(
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.stop.value,
+            finish_reason=_model.FinishReason.stop.value,
             response_text=response_content,
-            response_message=aitoolman.Message(
+            response_message=_model.Message(
                 role='assistant', content=response_content,
                 raw_value={"content": response_content}
             )
         )
     else:
-        return aitoolman.LLMProviderResponse(
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.tool_calls.value,
+            finish_reason=_model.FinishReason.tool_calls.value,
             response_tool_calls=response_content,
-            response_message=aitoolman.Message(
+            response_message=_model.Message(
                 role='assistant', content='',
                 raw_value={"tool_calls": [tc._asdict() for tc in response_content]}
             )
         )
 
 
-def make_tool_call_response(request: aitoolman.LLMProviderRequest):
+def make_tool_call_response(request: _model.LLMProviderRequest):
     tool_results = []
     tool_call_map = {}
     for msg in request.messages:
@@ -131,46 +131,46 @@ def make_tool_call_response(request: aitoolman.LLMProviderRequest):
                 "result": msg.content
             })
     response_text = json.dumps(tool_results, ensure_ascii=False)
-    return aitoolman.LLMProviderResponse(
+    return _model.LLMProviderResponse(
         client_id=request.client_id,
         context_id=request.context_id,
         request_id=request.request_id,
         model_name=request.model_name,
         stream=False,
-        finish_reason=aitoolman.FinishReason.stop.value,
+        finish_reason=_model.FinishReason.stop.value,
         response_text=response_text,
-        response_message=aitoolman.Message(
+        response_message=_model.Message(
             role='assistant', content=response_text,
             raw_value={"content": response_text}
         )
     )
 
 
-def default_response(request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+def default_response(request: _model.LLMProviderRequest) -> _model.LLMProviderResponse:
     return make_simple_response(request, request.messages[-1].content)
 
 
 class LLMResponseGenerator:
     def __init__(self, response_fn = None):
-        self.response_fn: Dict[str, Callable[[str], Union[str, List[aitoolman.ToolCall]]]] = response_fn or {}
+        self.response_fn: Dict[str, Callable[[str], Union[str, List[_model.ToolCall]]]] = response_fn or {}
 
-    def __call__(self, request: aitoolman.LLMProviderRequest) -> aitoolman.LLMProviderResponse:
+    def __call__(self, request: _model.LLMProviderRequest) -> _model.LLMProviderResponse:
         last_msg = request.messages[-1]
-        if last_msg.role == MessageRole.user.value:
+        if last_msg.role == _model.MessageRole.user.value:
             for match_str, fn in self.response_fn.items():
                 if not match_str or re.search(match_str, last_msg.content):
                     return run_response_function(request, fn)
-            return aitoolman.LLMProviderResponse(
+            return _model.LLMProviderResponse(
                 client_id=request.client_id,
                 context_id=request.context_id,
                 request_id=request.request_id,
                 model_name=request.model_name,
                 stream=False,
-                finish_reason=aitoolman.FinishReason.error_request.value,
+                finish_reason=_model.FinishReason.error_request.value,
                 error_text="no matching function",
                 response_message=None
             )
-        elif last_msg.role == MessageRole.tool.value:
+        elif last_msg.role == _model.MessageRole.tool.value:
             tool_results = []
             tool_call_map = {}
             for msg in request.messages:
@@ -186,54 +186,54 @@ class LLMResponseGenerator:
                         "result": msg.content
                     })
             response_text = json.dumps(tool_results, ensure_ascii=False)
-            return aitoolman.LLMProviderResponse(
+            return _model.LLMProviderResponse(
                 client_id=request.client_id,
                 context_id=request.context_id,
                 request_id=request.request_id,
                 model_name=request.model_name,
                 stream=False,
-                finish_reason=aitoolman.FinishReason.stop.value,
+                finish_reason=_model.FinishReason.stop.value,
                 response_text=response_text,
-                response_message=aitoolman.Message(
+                response_message=_model.Message(
                     role='assistant', content=response_text,
                     raw_value={"content": response_text}
                 )
             )
-        return aitoolman.LLMProviderResponse(
+        return _model.LLMProviderResponse(
             client_id=request.client_id,
             context_id=request.context_id,
             request_id=request.request_id,
             model_name=request.model_name,
             stream=False,
-            finish_reason=aitoolman.FinishReason.error_request.value,
+            finish_reason=_model.FinishReason.error_request.value,
             error_text="invalid message role",
             response_message=None
         )
 
 
-class MockLLMClient(aitoolman.LLMClient):
+class MockLLMClient(_client.LLMClient):
     """模拟LLM客户端，用于测试，不实际调用远程API"""
-    def __init__(self, response_generator: Optional[Callable[[aitoolman.LLMProviderRequest], aitoolman.LLMProviderResponse]] = None):
+    def __init__(self, response_generator: Optional[Callable[[_model.LLMProviderRequest], _model.LLMProviderResponse]] = None):
         super().__init__()
-        self.requests: List[aitoolman.LLMProviderRequest] = []
+        self.requests: List[_model.LLMProviderRequest] = []
         self.events: List[AuditEvent] = []
         self.response_generator: Callable[
-            [aitoolman.LLMProviderRequest], aitoolman.LLMProviderResponse
+            [_model.LLMProviderRequest], _model.LLMProviderResponse
         ] = response_generator or default_response
 
-    def set_response_fn_on_text(self, fn_map: Dict[str, Callable[[str], Union[str, List[aitoolman.ToolCall]]]]):
+    def set_response_fn_on_text(self, fn_map: Dict[str, Callable[[str], Union[str, List[_model.ToolCall]]]]):
         self.response_generator = LLMResponseGenerator(fn_map)
 
     async def request(
         self,
         model_name: str,
-        messages: List[aitoolman.Message],
+        messages: List[_model.Message],
         tools: Dict[str, Dict[str, Any]] = None,
         options: Dict[str, Any] = None,
         stream: bool = False,
         context_id: str = None,
         output_channel: Any = None
-    ) -> aitoolman.LLMProviderRequest:
+    ) -> _model.LLMProviderRequest:
         request = self.make_request(
             model_name, messages, tools, options, stream,
             context_id, output_channel
