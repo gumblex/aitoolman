@@ -1,33 +1,21 @@
-import os
 import json
 import base64
 import socket
 import mimetypes
 try:
-    import uuid_utils as uuid
-except ImportError:
-    import uuid
-try:
     import tomllib
 except ImportError:
     import tomli as tomllib
+import ksuid
 
 
 def get_id():
-    if hasattr(uuid, 'uuid7'):
-        uid = uuid.uuid7()
-    else:
-        uid = uuid.uuid4()
-    return base64.urlsafe_b64encode(uid.bytes).decode('utf-8').rstrip('=')
+    return str(ksuid.Ksuid())
 
 
 def get_host_id(hostname=None):
     host_part = hostname or socket.gethostname()
-    if hasattr(uuid, 'uuid7'):
-        uid = uuid.uuid7()
-    else:
-        uid = uuid.uuid4()
-    return host_part + "_" + base64.urlsafe_b64encode(uid.bytes).decode('utf-8').rstrip('=')[-6:]
+    return host_part + "_" + str(ksuid.Ksuid())[-6:]
 
 
 def make_insert(d):

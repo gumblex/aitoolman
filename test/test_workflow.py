@@ -162,8 +162,8 @@ class TestSerialExecution(unittest.IsolatedAsyncioTestCase):
         # task_c 不应该被执行
         self.assertEqual(task_c.status, aitoolman.TaskStatus.INIT)
 
-    async def test_chain_via_wait_tasks(self):
-        """通过 wait_tasks 同时提交多个任务，观察链式推进"""
+    async def test_chain_via_submit(self):
+        """通过 submit 提交链首任务，自动推进整个链"""
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
@@ -173,8 +173,11 @@ class TestSerialExecution(unittest.IsolatedAsyncioTestCase):
         task_a.next_task = task_b
         task_b.next_task = task_c
 
-        # 提交 task_a，由于自动提交 next_task，整个链都会执行
-        await app.wait_tasks(task_a)
+        # 只提交链首，链式自动推进
+        await app.submit(task_a)
+        # 等待链上所有任务完成
+        for t in [task_a, task_b, task_c]:
+            await t.status_event.wait()
 
         self.assertEqual(task_a.status, aitoolman.TaskStatus.COMPLETED)
         self.assertEqual(task_b.status, aitoolman.TaskStatus.COMPLETED)
@@ -189,7 +192,7 @@ class TestBranchingSubTasks(unittest.IsolatedAsyncioTestCase):
     """测试在任务内部启动支线（wait_tasks / submit）"""
 
     async def test_subtask_wait_inside_task(self):
-        """父任务内部 wait_tasks 等待两个子任务并行完成"""
+        """父任务内部 wait_tasks 等待两个子任务并行完成（使用 release_worker 释放并发配额）"""
         sub_log = []
 
         class SubTask(aitoolman.Task):
@@ -202,7 +205,8 @@ class TestBranchingSubTasks(unittest.IsolatedAsyncioTestCase):
             async def run(self):
                 sub_a = SubTask({"name": "A"})
                 sub_b = SubTask({"name": "B"})
-                await self.workflow.wait_tasks(sub_a, sub_b)
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(sub_a, sub_b)
                 return sub_a.output_data + sub_b.output_data
 
         client = mock_llmclient.MockLLMClient()
@@ -228,8 +232,10 @@ class TestBranchingSubTasks(unittest.IsolatedAsyncioTestCase):
                 t1 = LeafTask({"value": 1})
                 t2 = LeafTask({"value": 2})
                 t1.next_task = t2
-                # 只提交链首，自动推进到链尾
-                await self.workflow.wait_tasks(t2)
+                async with self.workflow.release_worker():
+                    # 只提交链首，自动推进到链尾
+                    await self.workflow.submit(t1)
+                    await t2.status_event.wait()
                 return t2.output_data
 
         client = mock_llmclient.MockLLMClient()
@@ -286,7 +292,8 @@ class TestStaticDependencyDAG(unittest.IsolatedAsyncioTestCase):
             async def run(self):
                 self.b = SuccessTask({"x": 2})
                 self.c = SuccessTask({"x": 3})
-                await self.workflow.wait_tasks(self.b, self.c)
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(self.b, self.c)
                 # 将汇聚任务作为 next_task 交给工作流自动执行，
                 # 或者直接在此执行并返回。这里选择返回给 next_task。
                 self.next_task = FanInTask(self.b, self.c)
@@ -318,7 +325,8 @@ class TestStaticDependencyDAG(unittest.IsolatedAsyncioTestCase):
             async def run(self):
                 self.b = SuccessTask({"x": 2})
                 self.c = SuccessTask({"x": 3})
-                await self.workflow.wait_tasks(self.b, self.c)
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(self.b, self.c)
                 self.next_task = TaskD(self.b, self.c)
                 return "A_done"
 
@@ -367,7 +375,8 @@ class TestStaticDependencyDAG(unittest.IsolatedAsyncioTestCase):
                 good = SuccessTask({"x": 5})
                 bad = FailingTask({})
                 try:
-                    await self.workflow.wait_tasks(good, bad)
+                    async with self.workflow.release_worker():
+                        await self.workflow.wait_tasks(good, bad)
                 except aitoolman.LLMWorkflowError:
                     raise RuntimeError("child task failed, cannot proceed")
 
@@ -401,35 +410,144 @@ class TestStaticDependencyDAG(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
         self.assertEqual(task.counter, 1)
 
-    async def test_max_parallel_consumers(self):
-        """测试并行 consumer 个数不超过指定值"""
+    async def test_max_parallel_tasks(self):
+        """测试并行执行任务数不超过 max_parallel_tasks"""
         max_parallel = 2
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
 
-        tasks = [
-            SlowTask({"sec": 0.2}, workflow=app)
-            for _ in range(5)
-        ]
+        current_running = 0
+        max_observed = 0
 
-        # 启动一个协程并发提交所有任务
-        await asyncio.gather(*[app.submit(t) for t in tasks])
+        class TrackedSlowTask(aitoolman.Task):
+            async def run(self):
+                nonlocal current_running, max_observed
+                current_running += 1
+                max_observed = max(max_observed, current_running)
+                await asyncio.sleep(0.1)
+                current_running -= 1
+                return True
 
-        # 短暂等待，让消费者启动
-        await asyncio.sleep(0.05)
-
-        # 在任意时刻，活跃消费者不应超过最大并行数
-        for _ in range(10):
-            async with app._consumer_lock:
-                count = len(app._consumers)
-            self.assertLessEqual(count, max_parallel,
-                                 f"Consumer count {count} exceeds max {max_parallel}")
-            await asyncio.sleep(0.05)
-
-        # 等待所有任务完成
+        tasks = [TrackedSlowTask() for _ in range(5)]
         await app.wait_tasks(*tasks)
 
         self.assertTrue(all(t.status == aitoolman.TaskStatus.COMPLETED for t in tasks))
+        self.assertLessEqual(max_observed, max_parallel,
+                             f"Observed {max_observed} concurrent tasks, exceeding max {max_parallel}")
+
+
+# ---------------------------------------------------------------------------
+# release_worker 机制
+# ---------------------------------------------------------------------------
+
+class TestReleaseWorker(unittest.IsolatedAsyncioTestCase):
+    """测试 release_worker 上下文管理器"""
+
+    async def test_release_worker_prevents_deadlock(self):
+        """低并行度下，release_worker 防止父子任务死锁"""
+        max_parallel = 1
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+
+        class ParentWithSubtasks(aitoolman.Task):
+            async def run(self):
+                sub_a = SuccessTask({"x": 1})
+                sub_b = SuccessTask({"x": 2})
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(sub_a, sub_b)
+                return sub_a.output_data + sub_b.output_data
+
+        task = ParentWithSubtasks()
+        await app.wait_tasks(task)
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 2 + 4)  # 1*2 + 2*2
+
+    async def test_release_worker_outside_task_raises(self):
+        """在任务外部调用 release_worker 应抛出 RuntimeError"""
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
+
+        with self.assertRaises(RuntimeError):
+            async with app.release_worker():
+                pass
+
+    async def test_release_worker_nested_subtasks(self):
+        """release_worker 支持多层嵌套子任务"""
+        max_parallel = 2
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+
+        class InnerTask(aitoolman.Task):
+            async def run(self):
+                return self.input_data['x'] * 3
+
+        class MiddleTask(aitoolman.Task):
+            async def run(self):
+                inner = InnerTask({"x": self.input_data['x']})
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(inner)
+                return inner.output_data + 1
+
+        class OuterTask(aitoolman.Task):
+            async def run(self):
+                mid = MiddleTask({"x": 5})
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(mid)
+                return mid.output_data + 10
+
+        task = OuterTask()
+        await app.wait_tasks(task)
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        # MiddleTask: 5*3 + 1 = 16; OuterTask: 16 + 10 = 26
+        self.assertEqual(task.output_data, 26)
+
+    async def test_release_worker_with_run(self):
+        """release_worker 配合 workflow.run 使用"""
+        max_parallel = 1
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+
+        class ParentWithChain(aitoolman.Task):
+            async def run(self):
+                t1 = SuccessTask({"x": 3})
+                t2 = SuccessTask({"x": 4})
+                t1.next_task = t2
+                async with self.workflow.release_worker():
+                    last = await self.workflow.run(t1)
+                return last.output_data
+
+        task = ParentWithChain()
+        await app.wait_tasks(task)
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 8)  # 4*2
+
+    async def test_release_worker_exception_safety(self):
+        """测试release_worker在with块抛出异常时仍能正确重新获取配额"""
+        max_parallel = 1
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+
+        class ExceptionInReleaseTask(aitoolman.Task):
+            async def run(self):
+                try:
+                    async with self.workflow.release_worker():
+                        raise RuntimeError("Intentional error in release block")
+                except RuntimeError:
+                    pass
+                # 确认退出with块后仍然持有配额，可以正常执行后续逻辑
+                sub = SuccessTask({"x": 5})
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(sub)
+                return sub.output_data
+
+        task = ExceptionInReleaseTask()
+        await app.wait_tasks(task)
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 10)
+        # 确认配额正常，后续任务可以执行
+        task2 = SuccessTask({"x": 10})
+        await app.wait_tasks(task2)
+        self.assertEqual(task2.output_data, 20)
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +556,7 @@ class TestStaticDependencyDAG(unittest.IsolatedAsyncioTestCase):
 
 class TestWorkflowCleanup(unittest.IsolatedAsyncioTestCase):
     async def test_no_residual_tasks_after_completion(self):
-        """测试任务完成后无残留的 task 和 consumer"""
+        """测试任务完成后无残留的 task 和 exec_task"""
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
@@ -447,18 +565,15 @@ class TestWorkflowCleanup(unittest.IsolatedAsyncioTestCase):
             for i in range(3)
         ]
         await app.wait_tasks(*tasks)
-        # await asyncio.gather(*[app.submit(t) for t in tasks])
-        # await asyncio.gather(*[t.status_event.wait() for t in tasks])
 
-        # 等待资源清理（消费者超时退出需0.5秒）
-        await asyncio.sleep(0.6)
+        # 等待 done_callback 清理 _exec_tasks
+        await asyncio.sleep(0.05)
 
         self.assertEqual(len(app._active_tasks), 0)
-        self.assertEqual(len(app._consumers), 0)
-        self.assertTrue(app._pending_queue.empty())
+        self.assertEqual(len(app._exec_tasks), 0)
 
     async def test_workflow_async_context_manager(self):
-        """测试 async with 语法自动停止消费者"""
+        """测试 async with 语法自动停止工作流"""
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=2)
 
@@ -466,8 +581,41 @@ class TestWorkflowCleanup(unittest.IsolatedAsyncioTestCase):
             t = SlowTask({"sec": 0.1})
             await app.wait_tasks(t)
 
-        # 退出上下文后消费者应全部停止
-        self.assertEqual(len(app._consumers), 0)
+        # 退出上下文后工作流应停止
+        self.assertTrue(app._stopped)
+
+    async def test_stop_cancels_running_tasks(self):
+        """测试stop方法会取消所有正在运行的任务"""
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
+
+        task_started = asyncio.Event()
+        task_cancelled = False
+
+        class CancellableTask(aitoolman.Task):
+            async def run(self):
+                nonlocal task_cancelled
+                task_started.set()
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    task_cancelled = True
+                    raise
+
+        task = CancellableTask()
+        # 提交任务不等待
+        await app.submit(task)
+        # 等待任务开始运行
+        await task_started.wait()
+        # 停止工作流
+        await app.stop()
+        # 确认任务被取消
+        await asyncio.sleep(0.05)
+        self.assertEqual(task.status, aitoolman.TaskStatus.FAILED)
+        self.assertTrue(task_cancelled)
+        self.assertTrue(app._stopped)
+        self.assertEqual(len(app._active_tasks), 0)
+        self.assertEqual(len(app._exec_tasks), 0)
 
 
 # ---------------------------------------------------------------------------
@@ -852,8 +1000,9 @@ class TestComplexLLMFlow(unittest.IsolatedAsyncioTestCase):
                     ),
                     action_map=SUB_ACTION_MAP
                 )
-                # 执行整个子任务链，等待完全结束后再返回
-                await self.workflow.run(sub_start_task)
+                # 释放并发配额后执行子任务链，避免死锁
+                async with self.workflow.release_worker():
+                    await self.workflow.run(sub_start_task)
                 executed_actions.append(self.input_data['action'])
                 return "子任务E全部完成"
 
@@ -902,8 +1051,9 @@ class TestComplexLLMFlow(unittest.IsolatedAsyncioTestCase):
                         raise ValueError(f"未知动作: {act_name}")
                     parallel_tasks.append(task_cls({"action": act_name}))
 
-                # 等待所有并行动作执行完成（普通动作和子任务E无差异，子任务E内部会自动跑完整个流程）
-                await self.workflow.wait_tasks(*parallel_tasks)
+                # 释放并发配额后等待所有并行动作执行完成
+                async with self.workflow.release_worker():
+                    await self.workflow.wait_tasks(*parallel_tasks)
 
                 # 结束动作Z不需要继续循环
                 if "Z" in actions:
@@ -948,9 +1098,9 @@ class TestComplexLLMFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Z", sub_executed_actions)
 
         # 资源清理验证
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.05)
         self.assertEqual(len(app._active_tasks), 0)
-        self.assertEqual(len(app._consumers), 0)
+        self.assertEqual(len(app._exec_tasks), 0)
 
 
 if __name__ == '__main__':

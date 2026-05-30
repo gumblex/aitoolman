@@ -346,11 +346,12 @@ result = await app.call(direct_request)
 LLMWorkflow 扩展自 LLMApplication，支持动态任务链和并行子任务执行，工作流路径可以预先定义，也可以在执行过程中根据LLM输出或任务结果动态调整。
 
 核心概念：
-- 通过 `submit(task)` 将任务提交到执行队列，由消费者协程池并行执行。
+- 通过 `submit(task)` 提交任务执行，内置并发控制自动限制并行任务数，避免资源耗尽。
 - 任务完成后，如果设置了 `next_task`，会自动提交下一个任务（链式执行）。
 - 使用 `wait_tasks(*tasks)` 提交一组任务并等待它们全部完成。
 - 使用 `run(start_task)` 执行一条完整的任务链（依次跟随 `next_task`）。
 - 任务内部可以通过 `workflow.wait_tasks`/`submit` 启动支线（子任务链）并等待。
+- 使用 `release_worker()` 异步上下文管理器，在任务内部等待子任务时临时释放并发配额，避免嵌套任务死锁，提升并发利用率。
 
 #### 3.2.2 任务定义
 `Task` 是通用任务基类，支持两种使用方式：
@@ -435,7 +436,7 @@ class LLMWorkflowError(_model.LLMApplicationError):
 #### 3.2.3 工作流接口
 ```python
 class LLMWorkflow(LLMApplication):
-    # 提交任务到执行队列，任务完成后自动提交next_task
+    # 提交任务，任务完成后自动提交next_task
     async def submit(self, task: Task): ...
 
     # 提交多个任务（如果尚未提交），并行等待所有任务完成
@@ -444,8 +445,17 @@ class LLMWorkflow(LLMApplication):
     # 执行一条任务链：从start_task开始，依次执行next_task直到结束，返回最后一个完成的任务
     async def run(self, start_task: Task) -> Task: ...
 
-    # 停止所有消费者协程，清理资源
+    # 停止所有任务，清理资源
     async def stop(self): ...
+    
+    # 临时释放当前任务的并发配额，用于等待子任务时避免死锁
+    @asynccontextmanager
+    async def release_worker(self):
+        """
+        仅可在任务执行逻辑（run/post_process）内调用，典型场景：
+            async with self.workflow.release_worker():
+                await self.workflow.wait_tasks(subtask1, subtask2)
+        """
 ```
 LLMWorkflow 支持 `async with` 上下文管理器，退出时自动停止工作流、清理资源。
 
@@ -487,6 +497,28 @@ async with aitoolman.LLMWorkflow(client, config) as workflow:
         )
     )
     final_task = await workflow.run(start_task)
+```
+
+**嵌套任务（release_worker使用）示例**：
+```python
+class FolderAnalysisTask(aitoolman.Task):
+    async def run(self):
+        folder_path = self.input_data['path']
+        # 分析文件夹得到子文件/子文件夹列表
+        sub_items = scan_folder(folder_path)
+        sub_tasks = []
+        for item in sub_items:
+            if item.is_dir:
+                sub_tasks.append(FolderAnalysisTask({"path": item.path}))
+            else:
+                sub_tasks.append(FileAnalysisTask({"path": item.path}))
+
+        # 等待子任务时释放当前配额，避免死锁，提升并发效率
+        async with self.workflow.release_worker():
+            await self.workflow.wait_tasks(*sub_tasks)
+
+        # 合并子任务结果
+        return merge_results([t.output_data for t in sub_tasks])
 ```
 
 ## 4. 传输层
@@ -620,6 +652,22 @@ class LLMZmqClient(LLMClient):
 
     # 取消指定上下文的所有请求，适合用户退出会话时终止所有未完成的请求
     async def cancel_all(self, context_id: Optional[str] = None): ...
+```
+
+#### 4.2.4 Mock测试客户端
+在 test.mock_llmclient 中：
+
+```python
+class MockLLMClient(LLMClient):
+    """模拟LLM客户端，用于单元测试，不实际调用远程API"""
+    def __init__(self, response_generator: Optional[Callable[[LLMProviderRequest], LLMProviderResponse]] = None):
+        """用户提供模拟函数：输入 LLMProviderRequest，输出 LLMProviderResponse"""
+
+def make_simple_response(
+    request: LLMProviderRequest,
+    response_content: Union[str, List[model.ToolCall]]
+) -> LLMProviderResponse:
+    """直接根据要返回的文本或工具调用创建 LLMProviderResponse 对象"""
 ```
 
 ## 5. 数据接口层
@@ -1055,7 +1103,7 @@ if __name__ == "__main__":
 递归分析文件夹结构：
 - 定义文件夹分析任务，输出子项列表
 - 在 `run()` 中根据分析内容动态创建子任务
-- 使用 `wait_tasks()` 等待所有子任务并行完成
+- 调用 `release_worker()` 释放配额后使用 `wait_tasks()` 等待所有子任务并行完成
 - 处理文件内容分析、分类等子任务
 
 ### 8.6 串行工作流：多步骤决策
@@ -1290,14 +1338,16 @@ except LLMResponseFormatError as e:
 ```
 
 ### 10.4 性能优化
-- **并行度配置**：根据模型配额合理设置 `parallel` 参数
+- **并行度配置**：根据模型配额合理设置 `max_parallel_tasks` 参数
 - **流式响应**：对长文本使用流式，提升用户体验
 - **批量请求**：对于批量/后台任务，采用批量请求，或专用的批量接口，提升并行度
 - **资源管理**：使用 `ResourceManager` 避免超额请求
 - **缓存策略**：对重复查询实现结果缓存
+- **嵌套任务**：多层嵌套任务场景下使用 `release_worker()` 释放配额，避免死锁，提升并发利用率
 
 ### 10.5 调试技巧
 - **通道监听**：创建自定义Channel并传入请求，使用 `print_channel_output` 实时查看 LLM 输出
 - **审计日志**：启用监控器记录所有请求和响应
 - **逐步执行**：复杂工作流可先测试单个任务
 - **提供商日志**：启用 `logging.DEBUG` 查看原始 API 交互
+- **单元测试**：使用 `MockLLMClient` 模拟LLM返回，无需调用外部服务即可验证业务逻辑

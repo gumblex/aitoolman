@@ -2,8 +2,13 @@
 
 ## 0.4.3
 
+### 新增
+- LLMWorkflow 支持 `async with self.workflow.release_worker()` 暂时释放资源，避免低并行度时被嵌套任务卡住
+
 ### 修改
-- 将 LLMClient mock 测试移入主代码包 
+- 将 LLMClient mock 测试移入主代码包
+- 修复 provider 中 FinishReason 为空的问题
+- 将 get_id 实现改为 Ksuid
 
 ## 0.4.2
 

@@ -562,8 +562,14 @@ class AnthropicFormat(LLMFormatStrategy):
                 response.finish_reason = FinishReason.length.value
             elif stop_reason == "tool_use":
                 response.finish_reason = FinishReason.tool_calls.value
-            else:
+            elif stop_reason in FinishReason:
                 response.finish_reason = stop_reason
+            else:
+                logger.warning(
+                    "[%s: Anthropic] Unknown stop_reason: %s",
+                    response.request_id, stop_reason)
+                response.finish_reason = FinishReason.error_request.value
+                response.error_text = 'stop_reason: %s' % stop_reason
 
         response.response_message = self.parse_response_message(response, response_data)
         # Parse token usage
@@ -807,6 +813,10 @@ class LLMProviderManager:
             )
             return
 
+        if not response.finish_reason:
+            response.finish_reason = FinishReason.error_app.value
+            response.error_text = 'No finish_reason set after parse_batch_response'
+
         # 发送完整响应到Channel
         await request.output_channel.write(ChannelEvent(
             'reasoning', response.response_reasoning))
@@ -842,6 +852,8 @@ class LLMProviderManager:
                 # 逐行解析流式响应（SSE格式：data: ...）
                 async for sse_event in event_source.aiter_sse():
                     if request.is_cancelled:
+                        response.finish_reason = FinishReason.cancelled.value
+                        response.error_text = 'cancelled'
                         break
                     event = format_strategy.parse_stream_event(response, sse_event)
                     # logger.debug("Event: %s", event)
@@ -878,6 +890,10 @@ class LLMProviderManager:
                             ChannelEvent('response', event.content))
                     if event.is_end:
                         break
+
+            if not response.finish_reason:
+                response.finish_reason = FinishReason.error_request.value
+                response.error_text = 'Unexpected end of stream'
 
             # 流式响应结束，记录总时间
             response.total_response_time = time.monotonic() - start_time
@@ -954,7 +970,11 @@ class LLMProviderManager:
             else:
                 await self._handle_batch_request(
                     request, response, model_config, request_body, format_strategy)
-            if response.finish_reason.startswith('error') or response.finish_reason in ('cancelled', 'unknown'):
+            if response.finish_reason is None:
+                logger.error(
+                    "[%s] Request finish_reason is None: %s",
+                    request.request_id, response.finish_reason, response.error_text)
+            elif response.finish_reason.startswith('error') or response.finish_reason in ('cancelled', 'unknown'):
                 logger.warning(
                     "[%s] Request error (%s): %s",
                     request.request_id, response.finish_reason, response.error_text)

@@ -345,11 +345,12 @@ result = await app.call(direct_request)
 LLMWorkflow extends LLMApplication, supporting dynamic task chains and parallel subtask execution. Workflow paths can be predefined or dynamically adjusted during execution based on LLM outputs or task results.
 
 Core concepts:
-- Submit tasks to the execution queue via `submit(task)`, which are executed in parallel by the consumer coroutine pool.
+- Submit tasks for execution via `submit(task)`, with built-in concurrency control to automatically limit the number of parallel tasks and avoid resource exhaustion.
 - After a task completes, if `next_task` is set, the next task will be automatically submitted (chain execution).
 - Use `wait_tasks(*tasks)` to submit a set of tasks and wait for all of them to complete.
 - Use `run(start_task)` to execute a complete task chain (following `next_task` in sequence).
 - Tasks can start sub-task chains and wait for completion internally via `workflow.wait_tasks`/`submit`.
+- Use the `release_worker()` async context manager to temporarily release concurrency quotas when waiting for subtasks inside a task, avoiding nested task deadlocks and improving concurrency utilization.
 
 #### 3.2.2 Task Definition
 `Task` is a generic task base class that supports two usage methods:
@@ -435,7 +436,7 @@ class LLMWorkflowError(_model.LLMApplicationError):
 #### 3.2.3 Workflow Interfaces
 ```python
 class LLMWorkflow(LLMApplication):
-    # Submit task to execution queue, next_task will be automatically submitted after task completion
+    # Submit tasks, next_task will be automatically submitted after task completion
     async def submit(self, task: Task): ...
 
     # Submit multiple tasks (if not already submitted) and wait for all to complete in parallel
@@ -444,8 +445,17 @@ class LLMWorkflow(LLMApplication):
     # Execute a complete task chain: start from start_task, execute next_task sequentially until end, return the last completed task
     async def run(self, start_task: Task) -> Task: ...
     
-    # Stop all consumer coroutines and clean up resources
+    # Stop all tasks and clean up resources
     async def stop(self): ...
+    
+    # Temporarily release the concurrency quota of the current task, used to avoid deadlocks when waiting for subtasks
+    @asynccontextmanager
+    async def release_worker(self):
+        """
+        Can only be called within the task execution logic (run/post_process), typical scenario:
+            async with self.workflow.release_worker():
+                await self.workflow.wait_tasks(subtask1, subtask2)
+        """
 ```
 LLMWorkflow supports `async with` context manager, which automatically stops the workflow and cleans up resources when exiting.
 
@@ -487,6 +497,28 @@ async with aitoolman.LLMWorkflow(client, config) as workflow:
         )
     )
     final_task = await workflow.run(start_task)
+```
+
+**Nested Task (release_worker Usage) Example**:
+```python
+class FolderAnalysisTask(aitoolman.Task):
+    async def run(self):
+        folder_path = self.input_data['path']
+        # Analyze the folder to get the list of sub-files/sub-folders
+        sub_items = scan_folder(folder_path)
+        sub_tasks = []
+        for item in sub_items:
+            if item.is_dir:
+                sub_tasks.append(FolderAnalysisTask({"path": item.path}))
+            else:
+                sub_tasks.append(FileAnalysisTask({"path": item.path}))
+
+        # Release the current quota when waiting for subtasks to avoid deadlocks and improve concurrency efficiency
+        async with self.workflow.release_worker():
+            await self.workflow.wait_tasks(*sub_tasks)
+
+        # Merge subtask results
+        return merge_results([t.output_data for t in sub_tasks])
 ```
 
 ## 4. Transport Layer
@@ -615,6 +647,22 @@ class LLMZmqClient(LLMClient):
 
     # Cancel all requests for the specified context, suitable for terminating all incomplete requests when user exits session
     async def cancel_all(self, context_id: Optional[str] = None): ...
+```
+
+#### 4.2.4 Mock Test Client
+In test.mock_llmclient:
+
+```python
+class MockLLMClient(LLMClient):
+    """Mock LLM client for unit testing, no actual calls to remote APIs"""
+    def __init__(self, response_generator: Optional[Callable[[LLMProviderRequest], LLMProviderResponse]] = None):
+        """User provides mock function: input LLMProviderRequest, output LLMProviderResponse"""
+
+def make_simple_response(
+    request: LLMProviderRequest,
+    response_content: Union[str, List[model.ToolCall]]
+) -> LLMProviderResponse:
+    """Directly create LLMProviderResponse object based on the text or tool call to be returned"""
 ```
 
 ## 5. Data Interface Layer
@@ -1050,7 +1098,7 @@ if __name__ == "__main__":
 Recursively analyze folder structure:
 - Define folder analysis task to output sub-item list
 - Dynamically create sub-tasks in `run()` based on analysis content
-- Use `wait_tasks()` to wait for all subtasks to complete in parallel
+- Call `release_worker()` to release the quota before using `wait_tasks()` to wait for all subtasks to complete in parallel
 - Handle file content analysis, classification, and other sub-tasks
 
 ### 8.6 Sequential Workflow: Multi-step Decision Making
@@ -1285,14 +1333,16 @@ except LLMResponseFormatError as e:
 ```
 
 ### 10.4 Performance Optimization
-- **Parallelism Configuration**: Set `parallel` according to model quotas
+- **Parallelism Configuration**: Set `max_parallel_tasks` parameter reasonably according to model quotas
 - **Streaming Response**: Use streaming for long text to improve user experience
 - **Batch Requests**: For batch/background tasks, use batch requests or dedicated batch interfaces to improve parallelism
 - **Resource Management**: Use `ResourceManager` to avoid excessive requests
 - **Caching Strategy**: Implement result caching for repeated queries
+- **Nested Tasks**: Use `release_worker()` to release quotas in multi-layer nested task scenarios to avoid deadlocks and improve concurrency utilization
 
 ### 10.5 Debugging Tips
 - **Channel Monitoring**: Create custom Channel and pass it to the request, use `print_channel_output` to view LLM output in real-time
 - **Audit Logs**: Enable monitor to record all requests and responses
 - **Step-by-Step Execution**: Test individual tasks first for complex workflows
 - **Provider Logs**: Enable `logging.DEBUG` to view raw API interactions
+- **Unit Testing**: Use `MockLLMClient` to simulate LLM responses, verify business logic without calling external services

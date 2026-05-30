@@ -2,6 +2,8 @@ import enum
 import asyncio
 import inspect
 import logging
+import contextvars
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Set, Callable, Union, ClassVar
 
 from .app import LLMApplication
@@ -10,6 +12,10 @@ from . import model as _model
 
 
 logger = logging.getLogger(__name__)
+
+# 用于标记当前协程是否持有 worker semaphore 的上下文变量
+_semaphore_held: contextvars.ContextVar[int] = contextvars.ContextVar('semaphore_held', default=0)
+
 
 class TaskStatus(enum.Enum):
     """任务状态枚举"""
@@ -109,7 +115,7 @@ class Task:
         new_task.description = self.description
         new_task._func = self._func
         return new_task
-        
+
     def following_tasks(self) -> List['Task']:
         """收集当前任务后续的所有链式任务，返回任务列表"""
         tasks = []
@@ -200,11 +206,13 @@ class LLMWorkflow(LLMApplication):
     任务调度器，支持动态任务链和并行子任务。
 
     核心概念：
-    - 通过 submit(task) 将任务提交到执行队列，由消费者协程池并行执行。
-    - 任务完成后，如果设置了 next_task，会自动提交下一个任务（链式执行）。
+    - 使用 Semaphore 限制并行执行的任务数，避免资源耗尽。
+    - 通过 submit(task) 将任务提交执行，任务完成自动提交 next_task 实现链式执行。
     - 使用 wait_tasks(*tasks) 提交一组任务并等待它们全部完成。
     - 使用 run(start_task) 执行一条完整的任务链（依次跟随 next_task）。
-    - 任务内部可以通过 workflow.wait_tasks/spawn 启动支线（子任务链）并等待。
+    - 任务内部可以通过 workflow.wait_tasks/submit 启动支线（子任务链）并等待。
+    - 为避免在等待子任务时阻塞并发配额，可在任务内部使用
+      async with workflow.release_worker(): 临时释放配额，允许其他任务执行。
     """
 
     def __init__(
@@ -223,12 +231,9 @@ class LLMWorkflow(LLMApplication):
             context_id=context_id
         )
         self.max_parallel_tasks = max_parallel_tasks
-        self._pending_queue = asyncio.Queue()
+        self._semaphore = asyncio.Semaphore(max_parallel_tasks)
         self._active_tasks: Dict[str, Task] = {}  # 跟踪已提交且未完成的任务
-        self._consumers: Dict[int, asyncio.Task] = {}
-        self._next_consumer_id = 0
-        self._consumer_lock = asyncio.Lock()
-        self._running = False
+        self._exec_tasks: Dict[str, asyncio.Task] = {}  # 正在执行的任务协程
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -237,8 +242,7 @@ class LLMWorkflow(LLMApplication):
 
     async def submit(self, task: Task):
         """
-        提交任务到执行队列。
-        如果任务已经提交过（task_id 在活动任务中），则忽略。
+        提交任务。如果任务已经提交过（task_id 在活动任务中），则忽略。
         任务完成后，如果 task.next_task 不为 None，会自动提交下一个任务。
         """
         if self._stopped:
@@ -247,8 +251,11 @@ class LLMWorkflow(LLMApplication):
             return
         task.workflow = self
         self._active_tasks[task.task_id] = task
-        self._pending_queue.put_nowait(task.task_id)
-        await self._ensure_consumers()
+        # 直接创建协程执行任务，通过 Semaphore 限制并发
+        exec_coro = self._execute_task(task)
+        exec_task = asyncio.create_task(exec_coro, name=f'LLMWorkflow-{task.task_id}')
+        self._exec_tasks[task.task_id] = exec_task
+        exec_task.add_done_callback(lambda t, tid=task.task_id: self._exec_tasks.pop(tid, None))
 
     async def wait_tasks(self, *tasks: Task, timeout: Optional[float] = None):
         """
@@ -259,7 +266,7 @@ class LLMWorkflow(LLMApplication):
             if task.status == TaskStatus.INIT:
                 await self.submit(task)
 
-        # 等待所有任务完成f
+        # 等待所有任务完成
         wait_coros = [task.status_event.wait() for task in tasks]
         if timeout:
             await asyncio.wait_for(asyncio.gather(*wait_coros), timeout=timeout)
@@ -289,17 +296,38 @@ class LLMWorkflow(LLMApplication):
         return last_task
 
     async def stop(self):
-        """停止所有消费者协程（通常用于关闭工作流）。"""
+        """停止所有正在执行的任务，清理资源。"""
         if self._stopped:
             return
-        async with self._consumer_lock:
-            self._stopped = True
-            consumers = list(self._consumers.values())
-            self._consumers.clear()
-        for c in consumers:
-            c.cancel()
-        if consumers:
-            await asyncio.gather(*consumers, return_exceptions=True)
+        self._stopped = True
+        exec_tasks = list(self._exec_tasks.values())
+        for t in exec_tasks:
+            t.cancel()
+        if exec_tasks:
+            await asyncio.gather(*exec_tasks, return_exceptions=True)
+        self._active_tasks.clear()
+        self._exec_tasks.clear()
+
+    @asynccontextmanager
+    async def release_worker(self):
+        """
+        异步上下文管理器，用于临时释放当前任务的并发配额，允许其他任务执行。
+
+        必须在任务执行期间调用（即 Task.run() 或 LLMTask.post_process() 内）。
+        典型用法：
+            async with self.workflow.release_worker():
+                await self.workflow.wait_tasks(subtask1, subtask2)
+        """
+        held = _semaphore_held.get()
+        if held <= 0:
+            raise RuntimeError("release_worker can only be called from a task that holds the worker semaphore")
+        self._semaphore.release()
+        _semaphore_held.set(0)
+        try:
+            yield
+        finally:
+            await self._semaphore.acquire()
+            _semaphore_held.set(1)
 
     # 支持 async with
     async def __aenter__(self):
@@ -312,65 +340,38 @@ class LLMWorkflow(LLMApplication):
     # 内部调度
     # ------------------------------------------------------------------
 
-    async def _ensure_consumers(self):
-        """确保有足够的消费者协程在运行，数量不超过 max_parallel_tasks。"""
-        if self._stopped:
-            return
-        async with self._consumer_lock:
-            if self._stopped:
-                return
-            while len(self._consumers) < self.max_parallel_tasks:
-                consumer_id = self._next_consumer_id
-                self._next_consumer_id += 1
-                self._consumers[consumer_id] = asyncio.create_task(
-                    self._consumer(consumer_id),
-                    name=f'LLMWorkflow.consumer[{consumer_id}]'
-                )
-
-    async def _consumer(self, consumer_id: int):
-        """后台消费者协程，从队列获取任务并执行。"""
+    async def _execute_task(self, task: Task):
+        """执行单个任务，管理 Semaphore 和后续任务提交。"""
+        acquired = False
         try:
-            while True:
-                task_id = None
-                try:
-                    # 从队列获取任务，设置超时以便定期检查停止信号
-                    task_id = await asyncio.wait_for(
-                        self._pending_queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    # Check if we should exit (no more tasks)
-                    if not self._active_tasks and self._pending_queue.empty():
-                        break
-                    continue
+            await self._semaphore.acquire()
+            acquired = True
+            _semaphore_held.set(1)
 
-                task = self._active_tasks.get(task_id)
-                if task is None:
-                    if task_id:
-                        self._pending_queue.task_done()
-                        logger.error("[Consumer %s] Task %s not in _queued_tasks, skipped",
-                                     consumer_id, task_id)
-                    continue
+            # 防止重复执行
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                return
 
-                if task.status not in (TaskStatus.INIT, TaskStatus.WAITING):
-                    continue
+            await task.start()
 
-                try:
-                    await task.start()
-                except Exception as ex:
-                    logger.exception("Unhandled error in task: %r", task)
-                    if task.status == TaskStatus.RUNNING:
-                        task.error = ex
-                        task.status = TaskStatus.FAILED
-                        task.status_event.set()
-                finally:
-                    # 任务成功完成后，自动提交 next_task
-                    if task.status == TaskStatus.COMPLETED and task.next_task is not None:
-                        await self.submit(task.next_task)
-                    # 从活动任务中移除
-                    self._active_tasks.pop(task.task_id, None)
-                    self._pending_queue.task_done()
+            # 任务成功完成后自动提交 next_task
+            if task.status == TaskStatus.COMPLETED and task.next_task is not None:
+                await self.submit(task.next_task)
 
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as ex:
+            if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                task.status = TaskStatus.FAILED
+                task.error = ex
+                task.status_event.set()
+            raise
+        except Exception as ex:
+            logger.exception("Unhandled error in execute_task for task: %r", task)
+            if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                task.status = TaskStatus.FAILED
+                task.error = ex
+                task.status_event.set()
         finally:
-            async with self._consumer_lock:
-                self._consumers.pop(consumer_id, None)
+            if acquired and _semaphore_held.get() > 0:
+                self._semaphore.release()
+                _semaphore_held.set(0)
+            self._active_tasks.pop(task.task_id, None)

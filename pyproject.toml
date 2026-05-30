@@ -31,11 +31,9 @@ dependencies = [
   "lxml",
   "xmltodict",
   "pyzmq",
+  "svix-ksuid",
+  "tomli; python_version < '3.11'",
   "tornado; sys_platform == 'win32'",
-]
-[project.optional-dependencies]
-uuid = [
-    "uuid-utils",
 ]
 
 [project.urls]
