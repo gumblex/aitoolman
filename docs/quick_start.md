@@ -715,7 +715,26 @@ class LLMProviderManager:
 
 ## 6. 实用工具
 
-### 6.1 配置文件
+### 6.1 命令行工具
+aitoolman 提供了命令行工具集，可快速完成模型测试、服务启停、监控审计、代码修改等常用操作，适合快速验证效果、调试配置和运维管理。
+
+主要命令包括：
+* `server`: 启动 LLM 微服务端，统一管理模型资源、对外提供调用接口
+* `client`: 通用 LLM 测试客户端，支持本地/远程服务调用、多模态输入、流式输出
+* `monitor`: 微服务监控工具，实时查看请求统计、Token使用、错误日志，支持数据持久化到SQLite
+* `code-edit`: 代码智能修改工具，支持参考文件上下文、单/多文件新建或修改，自动保存修改后代码
+
+命令的详细参数和使用示例可通过添加 `--help` 参数查看：
+
+```bash
+# 查看所有支持的命令
+python3 -m aitoolman --help
+
+# 查看单个子命令的详细用法，例如查看server命令参数
+python3 -m aitoolman server --help
+```
+
+### 6.2 配置文件
 
 用于加载和管理TOML格式的配置文件，支持文件和字符串两种来源。
 
@@ -727,7 +746,7 @@ aitoolman.load_config(filename)
 aitoolman.load_config_str(s)
 ```
 
-### 6.2 后处理器（aitoolman.postprocess）
+### 6.3 后处理器（aitoolman.postprocess）
 提供常用的文本后处理函数，用于解析LLM输出。
 
 ```python
@@ -737,11 +756,11 @@ parse_json(s: str) -> Any
 # XML 内容提取
 get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]
 
-# XML 解析为字典
-parse_xml(s: str, root: str) -> Optional[Dict]
+# XML 解析为字典 (xmltodict)
+parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
 ```
 
-### 6.3 资源管理器
+### 6.4 资源管理器
 ```python
 class ResourceManager:
     """管理模型并行处理资源，防止超额请求和资源竞争"""

@@ -710,7 +710,26 @@ class LLMProviderManager:
 
 ## 6. Utility Tools
 
-### 6.1 Configuration Files
+### 6.1 Command Line Tools
+aitoolman provides a command line toolset, which allows you to quickly complete common operations such as model testing, service start/stop, monitoring and auditing, and code modification. It is suitable for quick verification, configuration debugging and operational management.
+
+Main commands include:
+* `server`: Starts the LLM microservice server, uniformly manages model resources and provides external invocation interfaces
+* `client`: General LLM test client, supports local/remote service invocation, multimodal input and streaming output
+* `monitor`: Microservice monitoring tool, supports real-time viewing of request statistics, token usage and error logs, and supports persisting data to SQLite
+* `code-edit`: Intelligent code modification tool, supports reference files, creating or modifying single/multiple files, and automatically saves modified code
+
+You can view detailed parameters and usage examples of commands by adding the `--help` parameter:
+
+```bash
+# View all supported commands
+python3 -m aitoolman --help
+
+# View detailed usage of a single subcommand, e.g. view parameters of the server command
+python3 -m aitoolman server --help
+```
+
+### 6.2 Configuration Files
 Used for loading and managing TOML format configuration files, supporting both file and string sources.
 
 ```python
@@ -721,7 +740,7 @@ aitoolman.load_config(filename)
 aitoolman.load_config_str(s)
 ```
 
-### 6.2 Post-processors (aitoolman.postprocess)
+### 6.3 Post-processors (aitoolman.postprocess)
 Provides common text post-processing functions for parsing LLM outputs.
 
 ```python
@@ -731,11 +750,11 @@ parse_json(s: str) -> Any
 # XML content extraction
 get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]
 
-# XML parsing to dictionary
-parse_xml(s: str, root: str) -> Optional[Dict]
+# XML parsing to dictionary (xmltodict)
+parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
 ```
 
-### 6.3 Resource Manager
+### 6.4 Manager
 ```python
 class ResourceManager:
     """Manages model parallel processing resources, preventing excessive requests and resource competition"""

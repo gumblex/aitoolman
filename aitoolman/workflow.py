@@ -4,7 +4,7 @@ import inspect
 import logging
 import contextvars
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Set, Callable, Union, ClassVar
+from typing import Any, Dict, List, Optional, Callable, Union
 
 from .app import LLMApplication
 from . import util

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+### 修改
+- postprocess.parse_xml 支持 xmltodict 其他参数
+
 ## 0.4.3
 
 ### 新增

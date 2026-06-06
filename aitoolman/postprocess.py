@@ -52,14 +52,16 @@ def get_xml_tag_content(s: str, root: str, with_tag: bool = False, cdata: bool =
     return s[start_pos:end_pos]
 
 
-def parse_xml(s: str, root: str, force_list=None) -> Optional[Dict]:
+def parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]:
     """
     从LLM输出的文本中解析XML
 
     Args:
         s: 包含XML的文本字符串
         root: 期望的XML根标签名
-        force_list: 用于 xmltodict，将标签作为列表
+        **kwargs: 用于 xmltodict 的额外参数，例如：
+            force_list: List[str], 将标签作为列表
+            strip_whitespace: bool, 控制是否保留空白，默认True
 
     Returns:
         解析后的字典，如果无法解析则返回None
@@ -72,10 +74,14 @@ def parse_xml(s: str, root: str, force_list=None) -> Optional[Dict]:
             xml_str,
             process_namespaces=False,
             disable_entities=True,
-            force_list=force_list
+            **kwargs
         )
     except Exception:
-        if xml_str.count(CDATA_START) > 1:
+        cnt = xml_str.count(CDATA_START)
+        if cnt > 0:
+            if ']]</' in xml_str:
+                xml_str = xml_str.replace(']]</', ']]></')
+        if cnt > 1:
             xml_str = escape_nested_cdata(xml_str)
         try:
             soup = BeautifulSoup(xml_str, 'xml')
@@ -84,7 +90,7 @@ def parse_xml(s: str, root: str, force_list=None) -> Optional[Dict]:
                 fixed_xml,
                 process_namespaces=False,
                 disable_entities=True,
-                force_list=force_list
+                **kwargs
             )
         except Exception as e:
             # 如果解析过程中出现任何异常，返回None

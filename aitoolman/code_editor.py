@@ -36,7 +36,7 @@ def extract_code_blocks(text: str) -> List[Dict]:
         logger.warning("未找到 <output> 标签，将所有内容作为单个文件处理")
         return [{'filename': None, 'content': text.strip()}]
 
-    xml_dict = postprocess.parse_xml(output_content, 'output')
+    xml_dict = postprocess.parse_xml(output_content, 'output', strip_whitespace=False)
     if not xml_dict or 'file' not in xml_dict.get('output', {}):
         logger.warning("未找到 <file> 标签，将所有内容作为单个文件处理")
         return [{'filename': None, 'content': output_content.strip()}]
@@ -48,7 +48,7 @@ def extract_code_blocks(text: str) -> List[Dict]:
     result = []
     for file_item in files_data:
         filename = file_item.get('@name')
-        content = file_item.get('#text', '').strip()
+        content = file_item.get('#text', '')
         result.append({'filename': filename, 'content': content})
 
     return result
