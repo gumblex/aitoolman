@@ -103,3 +103,25 @@ options:
                         ZeroMQ PUB endpoint (e.g., tcp://localhost:5556)
   --db-path DB_PATH     SQLite database path for DB monitor
 ```
+
+## LLM 服务管理
+```
+usage: python3 -m aitoolman manage [-h] [-v] -z ZMQ_ENDPOINT [-a AUTH]
+                                   {list_models,update_config,change_api_status} ...
+
+Manage LLM ZMQ Server
+
+positional arguments:
+  {list_models,update_config,change_api_status}
+                        Management action
+    list_models         List available models
+    update_config       Update full server config
+    change_api_status   Enable/disable a model
+
+options:
+  -h, --help            show this help message and exit
+  -v, --verbose         Print debug log
+  -z, --zmq-endpoint ZMQ_ENDPOINT
+                        ZeroMQ ROUTER endpoint
+  -a, --auth AUTH       Management auth token
+```
