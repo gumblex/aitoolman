@@ -14,7 +14,7 @@ The framework emphasizes:
 - **Transparent and Debuggable Workflow**: All data sent to and received from LLM can be customized and audited, facilitating problem troubleshooting and prompt optimization
 - **Vendor Agnostic**: Unified adaptation of multiple LLM providers through abstraction layer, easy model switching while fully utilizing each provider's unique features
 - **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse
-- **Production-Grade Features**: Built-in resource management, error handling, microservice deployment, monitoring, and auditing capabilities, ready for direct production use
+- **Production-Grade Features**: Built-in resource management, error handling, microservice deployment, monitoring, auditing, and hot reload capabilities, ready for direct production use
 
 Whether it's simple one-time queries or complex multi-step business processes, aitoolman provides a stable, reliable, and maintainable solution. The framework encourages developers to deeply understand business logic, carefully design prompts, and seamlessly integrate AI capabilities into existing systems.
 
@@ -44,7 +44,7 @@ The framework adopts a layered architecture:
 1. User Application Layer: Business logic implementation
 2. Application Layer (LLMApplication / LLMWorkflow): Template management, workflow orchestration, result processing
 3. Transport Layer (LLMClient / Channel): Request sending, streaming response transmission, microservice communication
-4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting and retries
+4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting, retries, and model routing
 5. LLM Provider API (OpenAI / Anthropic, etc.): Underlying LLM services
 
 ## 2. Data Model Classes
@@ -117,7 +117,7 @@ class LLMModuleRequest(typing.NamedTuple):
     """Application layer template request parameters (module configuration)"""
     module_name: str                    # Module name
     template_params: Dict[str, Any]     # Template parameters
-    model_name: Optional[str] = None    # Override module's default model
+    model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, override module default configuration
     context_messages: List[Message] = []  # Context messages
     media_content: Optional[List[MediaContent]] = None  # Multimedia content
 
@@ -242,6 +242,8 @@ class LLMError(RuntimeError): ...
 class LLMLengthLimitError(LLMError): ...      # Response length limit reached
 class LLMContentFilterError(LLMError): ...    # Content filtered by moderation
 class LLMApiRequestError(LLMError): ...       # API request error
+class LLMNoAvailableModelError(LLMApiRequestError): ... # No available model error
+class LLMPermissionDeniedError(LLMApiRequestError): ... # Permission denied error
 class LLMResponseFormatError(LLMError): ...   # Response format error
 class LLMApplicationError(LLMError): ...      # Application code error
 class LLMCancelledError(LLMError): ...        # Request cancelled
@@ -626,6 +628,9 @@ class LLMClient(abc.ABC):
 
     async def cancel(self, request_id: str): ...
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
+    
+    async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str: ... # Resolve optimal model
 ```
 
 #### 4.2.2 Local Client
@@ -695,7 +700,7 @@ class AnthropicFormat(LLMFormatStrategy):
 ### 5.2 LLMProviderManager Provider Manager
 ```python
 class LLMProviderManager:
-    """Manages multiple LLM providers, handling API calls, retries, and resource limits"""
+    """Manages multiple LLM providers, handling API calls, retries, resource limits, and model routing"""
     def __init__(self, config: Dict[str, Any])
 
     def process_request(
@@ -706,18 +711,22 @@ class LLMProviderManager:
 
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
+    
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> str: ... # Route to select optimal model
+    def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
 ```
 
 ## 6. Utility Tools
 
 ### 6.1 Command Line Tools
-aitoolman provides a command line toolset, which allows you to quickly complete common operations such as model testing, service start/stop, monitoring and auditing, and code modification. It is suitable for quick verification, configuration debugging and operational management.
+aitoolman provides a command line toolset, which allows you to quickly complete common operations such as model testing, service start/stop, monitoring and auditing, code modification, and operation and maintenance management. It is suitable for quick verification, configuration debugging and operational management.
 
 Main commands include:
 * `server`: Starts the LLM microservice server, uniformly manages model resources and provides external invocation interfaces
 * `client`: General LLM test client, supports local/remote service invocation, multimodal input and streaming output
 * `monitor`: Microservice monitoring tool, supports real-time viewing of request statistics, token usage and error logs, and supports persisting data to SQLite
 * `code-edit`: Intelligent code modification tool, supports reference files, creating or modifying single/multiple files, and automatically saves modified code
+* `manage`: Remote service operation and maintenance tool, supports listing models, hot reloading configurations, starting/stopping models, etc.
 
 You can view detailed parameters and usage examples of commands by adding the `--help` parameter:
 
@@ -740,21 +749,22 @@ aitoolman.load_config(filename)
 aitoolman.load_config_str(s)
 ```
 
-### 6.3 Post-processors (aitoolman.postprocess)
+### 6.3 Post-processing Tools
 Provides common text post-processing functions for parsing LLM outputs.
+It is recommended to directly use the [fix-llm-xml](https://pypi.org/project/fix-llm-xml/) library to parse XML.
 
 ```python
 # JSON parsing (automatically fixes format errors)
-parse_json(s: str) -> Any
+aitoolman.postprocess.parse_json(s: str) -> Any
 
 # XML content extraction
-get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]
+fix_llm_xml.find_xml_document(s: str, root: str, with_tag: bool = False) -> Optional[str]
 
 # XML parsing to dictionary (xmltodict)
-parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
+fix_llm_xml.parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
 ```
 
-### 6.4 Manager
+### 6.4 Resource Manager
 ```python
 class ResourceManager:
     """Manages model parallel processing resources, preventing excessive requests and resource competition"""
@@ -781,6 +791,7 @@ Refer to the [Configuration File Documentation](./config.md) for detailed config
 zmq_router_rpc = "tcp://*:5555" # ZeroMQ ROUTER endpoint
 zmq_pub_event = "tcp://*:5556"  # ZeroMQ PUB endpoint (audit logs)
 zmq_auth_token = "YOUR_SECRET_TOKEN"  # Interface authentication token
+zmq_manage_token = "YOUR_MANAGE_TOKEN" # Management permission authentication token (optional)
 
 # Default Configuration
 [default]
@@ -788,28 +799,35 @@ timeout = 600
 max_retries = 3
 parallel = 1
 api_type = "openai"
+rank_adjust_ratio = 0.25 # Model routing weight adjustment parameter, optional
 
-# Model Alias Mapping
-# Use aliases in business configurations without worrying about underlying model details
-[model_alias]
-"Creative-Model" = "DeepSeek-v3.2-251201"
-"Precise-Model" = "GPT-4o"
-"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
-"Cheap-Model" = "Doubao-Mini-1.5"
-"Code-Model" = "CodeLlama-70B-Instruct"
+# Model tag configuration for model routing, sorted by priority, fill in as completely as possible
+# Use tags in business code without worrying about underlying specific models, supporting flexible switching and routing
+# Model routing supports passing multiple tags at the same time, the system will automatically match available models that meet all tags, and automatically select the optimal model combined with input token count limits and model priority.
+# For example, passing `["code", "multimodal"]` will automatically select a code model that supports multimodal, passing `["low_cost", "fast"]` will automatically select a low-cost and fast-response model, adapting to various cross scenarios.
+[model_tag]
+"low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # Low-cost model group, suitable for batch text processing
+"fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # High-speed response model group, suitable for fast task processing
+"creative" = ["deepseek-v4-pro", "kimi-k2.5"]  # Creative writing model group, suitable for content generation
+"precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]  # High-precision task model group, suitable for precise modification and information extraction
+"code" = ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]  # Code processing model group, suitable for code modification and generation
+"multimodal" = ["Doubao-Seed-2.0-pro", "doubao-seed-2.0-mini", "qwen-vl"]  # Multimodal model group, suitable for image/video understanding
 
 # API Configuration
-[api."Doubao-Seed-1.6"]
+[api."deepseek-v4-pro"]
+url = "https://api.deepseek.com/chat/completions"
+type = "openai"
+model = "deepseek-v4-pro"
+parallel = 10
+headers = {Authorization = "Bearer sk-xxx"}
+body_options.thinking.type = "enabled"
+body_options.reasoning_effort = "max"
+
+[api."Doubao-Seed-2.0-pro"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 type = "openai"
-model = "ep-xxx"
-headers = { Authorization = "Bearer YOUR_API_KEY" }
-
-[api."GPT-4"]
-url = "https://api.openai.com/v3/chat/completions"
-type = "openai"
-model = "gpt-4"
-headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
+model = "ep-aaa"
+headers = {Authorization = "Bearer xxx"}
 ```
 
 ### 7.2 Prompt Configuration File (app_prompt.toml)
@@ -817,7 +835,7 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 ```toml
 # Module Default Configuration
 [module_default]
-model = "Fast-Model"         # Default to fast inference model
+model = "fast"         # Default to fast inference model group
 stream = false
 options = { max_tokens = 4000 }
 
@@ -842,7 +860,7 @@ template.user = "{{content}}"
 
 # Article Summarization Module
 [module.summerize]
-model = "Creative-Model"     # Use creative model
+model = "creative"     # Use creative model group
 template.user = """
 Article Title: {{title}}
 Article Content: <article>{{content}}</article>
@@ -865,7 +883,7 @@ post_processor = "builtin.parse_json"
 
 # Schedule Planning Module (supports tool calls)
 [module.task_planner]
-model = "Fast-Model"         # Use fast inference model
+model = ["fast", "low_cost"]
 stream = true
 template.user = """
 As a scheduling assistant, analyze user instructions:
@@ -888,7 +906,7 @@ tools.add_task.param.content.required = true
 
 # JSON Extraction Module
 [module.json_extractor]
-model = "Precise-Model"      # Use high-precision model
+model = ["precise", "fast"]
 template.user = """
 Extract structured information from the following text:
 {{text}}
@@ -905,7 +923,7 @@ post_processor = "builtin.parse_json"
 
 # Multi-Round Dialogue Module
 [module.chat]
-model = "Doubao-Seed-1.6"
+model = "Doubao-Seed-2.0-pro"
 stream = true
 template.user = "{{message}}"
 ```
@@ -916,7 +934,7 @@ template.user = "{{message}}"
 ```
 my_llm_app/
 ├── config/
-│   ├── llm_provider.toml          # API configuration (models, keys)
+│   ├── llm_provider.toml          # API configuration (models, keys, routing tags)
 │   └── app_prompt.toml          # Prompt configuration (modules, templates)
 ├── src/
 │   ├── __init__.py
@@ -958,11 +976,12 @@ async def main():
             header=True
         ))
         
-        # Call code editor module, pass output channel
+        # Call code editor module, specify code + multimodal tag group, automatically select optimal model
         result = await app['code_editor'](
             code_content=open("app.py").read(),
-            instruction="Add error handling logic",
+            instruction="Add error handling logic referring to the screenshot",
             references=[{"filename": "utils.py", "content": open("utils.py").read()}],
+            _model_name=["code", "multimodal"],
             _output_channel=output_channel
         )
         result.raise_for_status()
@@ -996,7 +1015,8 @@ async def process_ticket(app_factory, ticket):
     app = app_factory()
     result = await app['ticket_classifier'](
         ticket_content=ticket['content'],
-        ticket_type=ticket['type']
+        ticket_type=ticket['type'],
+        _model_name=["low_cost", "fast"] # Use low-cost + high-speed model group
     )
     result.raise_for_status()
     return {
@@ -1243,14 +1263,17 @@ The aitoolman microservice architecture is suitable for the following scenarios:
 2. **Centralized Resource Management**: Unified management of API keys, model quotas, and access control
 3. **High-Availability Deployment**: Ensure service stability through load balancing and failover
 4. **Audit and Monitoring**: Centralized logging of all LLM call logs and performance metrics
-5. **Security Isolation**: Sensitive API keys are not exposed to client applications
+5. **Hot Reload Config**: Adjust model configurations, routing rules, start/stop models without restarting the service
+6. **Security Isolation**: Sensitive API keys are not exposed to client applications
 
 ### 9.2 Feature Highlights
 - **ZeroMQ Communication**: High-performance, low-latency inter-process communication
-- **Authentication and Authorization**: Support token authentication to ensure interface security
+- **Authentication and Authorization**: Supports two-level authentication for common interface tokens and management permission tokens to ensure interface security
 - **Request Queue**: Intelligent scheduling to avoid excessive requests
+- **Model Routing**: Automatically select the optimal model according to custom tags in the configuration, supporting token over-limit filtering
 - **Real-Time Monitoring**: Publish audit logs via PUB interface
 - **Client Management**: Support request cancellation, batch cancellation, and other operations
+- **Hot Reload Capability**: Modify configurations, model status, tag rules at runtime without restarting the service
 
 ### 9.3 Usage Methods
 
@@ -1278,16 +1301,16 @@ client = LLMZmqClient(
 
 Command-line client test:
 ```bash
-# Interactive test
+# Interactive test, specify a single model tag
 python3 -m aitoolman client \
-  -r tcp://localhost:5555 \
-  -m gpt-4 \
+  -z tcp://localhost:5555 \
+  -m fast \
   -a your-auth-token
 
-# Specify model alias
+# Specify multiple tags, automatically route to the matched optimal model
 python3 -m aitoolman client \
-  -r tcp://localhost:5555 \
-  -m Creative-Model \
+  -z tcp://localhost:5555 \
+  -m code -m multimodal \
   -a your-auth-token
 ```
 
@@ -1307,6 +1330,25 @@ The monitor will display the following information:
 - Token usage
 - Completion reasons and error messages
 - Custom audit events
+
+#### 9.3.5 Operation and Maintenance Management
+Use the `manage` command to perform hot O&M on remote services without restarting the service:
+```bash
+# View all available models
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token list_models
+
+# Filter available models by tag
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token list_models --tag code
+
+# Disable specified model
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token change_api_status --model doubao-mini --disable
+
+# Enable specified model
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token change_api_status --model doubao-mini --enable
+
+# Hot reload full configuration
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token update_config -c new_config.toml
+```
 
 ## 10. Best Practices
 
@@ -1333,6 +1375,7 @@ Principles of prompt design:
 - **Template variables**: Use `{{ variable }}` and other Jinja2 template syntax.
 - **Context control**: Minimize the use of context messages; prioritize optimizing prompt quality.
 - **Tool description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools.
+- **Tag Grouping**: Group models into different tags according to business scenarios, use tags instead of specific model names in business code, which facilitates unified adjustment of models later.
 
 ### 10.3 Error Handling
 ```python
@@ -1340,6 +1383,9 @@ try:
     result = await app['module'](...)
     result.raise_for_status()  # Check completion status
     processed_data = result.data
+except LLMNoAvailableModelError as e:
+    # No matching available model: adjust tags or expand model resources
+    pass
 except LLMLengthLimitError as e:
     # Handle length limit: process in segments or switch models
     pass
@@ -1358,6 +1404,7 @@ except LLMResponseFormatError as e:
 - **Resource Management**: Use `ResourceManager` to avoid excessive requests
 - **Caching Strategy**: Implement result caching for repeated queries
 - **Nested Tasks**: Use `release_worker()` to release quotas in multi-layer nested task scenarios to avoid deadlocks and improve concurrency utilization
+- **Model Routing**: Select appropriate tag combinations according to task characteristics to balance cost, speed and effect
 
 ### 10.5 Debugging Tips
 - **Channel Monitoring**: Create custom Channel and pass it to the request, use `print_channel_output` to view LLM output in real-time
@@ -1365,3 +1412,4 @@ except LLMResponseFormatError as e:
 - **Step-by-Step Execution**: Test individual tasks first for complex workflows
 - **Provider Logs**: Enable `logging.DEBUG` to view raw API interactions
 - **Unit Testing**: Use `MockLLMClient` to simulate LLM responses, verify business logic without calling external services
+- **Model Resolution Verification**: Use the `resolve_model` interface to verify the actual model matched by the tag, debug routing rules

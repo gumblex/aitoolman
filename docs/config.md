@@ -11,6 +11,8 @@
 | `zmq_pub_event`      | 字符串                | 无（可选）      | ZeroMQ PUB socket 地址，用于发布审计日志。格式同上                                       |
 | `zmq_pub_event_type` | 无/"bind"/"connect" | "bind"（可选） | ZeroMQ PUB socket 的绑定方式，监听新端口或连接已有端口                                     |
 | `zmq_auth_token`     | 字符串                | 无（可选）      | 任意字符串，用于认证                                                               |
+| `zmq_manage_token`   | 字符串                | 无（可选）      | 管理权限认证令牌，用于客户端管理操作的权限验证                                                   |
+
 
 ### 1.2 [default] 部分
 默认配置，会被所有模型配置继承。
@@ -25,31 +27,54 @@
 | `api_type`       | 字符串 | "openai" | 默认 API 类型，可选值："openai"、"anthropic"  |
 | `headers`        | 字典  | `{}`     | 默认 HTTP 请求头，可在此配置通用认证信息             |
 | `body_options`   | 字典  | `{}`     | 默认的请求选项，如 max_tokens, temperature 等 |
+| `max_input_tokens` | 整数  | 无（不限）    | 模型支持的最大输入Token数                    |
+| `bytes_per_token`  | 浮点数 | 4.0      | 单Token对应的UTF-8字节数估算值，用于Token数估算     |
+| `rank_adjust_ratio`| 浮点数 | 0.25     | 权重调整参数，用于模型路由算法中的排名权重计算          |
+
 
 ### 1.3 [api."模型名称"] 部分
 每个模型的具体配置，模型名称可以自定义。
 
-| 参数             | 类型  | 默认值                          | 说明                              |
-|----------------|-----|------------------------------|---------------------------------|
-| `url`          | 字符串 | 无（必须配置）                      | API 端点 URL                      |
-| `type`         | 字符串 | 继承自 `[default].api_type`     | API 类型，可选值："openai"、"anthropic" |
-| `model`        | 字符串 | 无（必须配置）                      | 提供商侧的模型标识符                      |
-| `parallel`     | 整数  | 继承自 `[default].parallel`     | 该模型的并行处理能力                      |
-| `headers`      | 字典  | 继承自 `[default].headers`      | 该模型特定的 HTTP 请求头                 |
-| `timeout`      | 整数  | 继承自 `[default].timeout`      | 该模型特定的超时时间                      |
-| `body_options` | 字典  | 继承自 `[default].body_options` | 该模型默认的请求选项，覆盖 default 中的所有选项    |
+| 参数             | 类型  | 默认值                              | 说明                              |
+|----------------|-----|----------------------------------|---------------------------------|
+| `url`          | 字符串 | 无（必须配置）                          | API 端点 URL                      |
+| `type`         | 字符串 | 继承自 `[default].api_type`         | API 类型，可选值："openai"、"anthropic" |
+| `model`        | 字符串 | 无（必须配置）                          | 提供商侧的模型标识符                      |
+| `parallel`     | 整数  | 继承自 `[default].parallel`         | 该模型的并行处理能力                      |
+| `headers`      | 字典  | 继承自 `[default].headers`          | 该模型特定的 HTTP 请求头                 |
+| `timeout`      | 整数  | 继承自 `[default].timeout`          | 该模型特定的超时时间                      |
+| `body_options` | 字典  | 继承自 `[default].body_options`     | 该模型默认的请求选项，覆盖 default 中的所有选项    |
+| `max_input_tokens` | 整数  | 继承自 `[default].max_input_tokens` | 该模型支持的最大输入Token数 |
+| `bytes_per_token`  | 浮点数 | 继承自 `[default].bytes_per_token`  | 该模型单Token对应的UTF-8字节数估算值 |
+| `enable`           | 布尔值 | true                            | 设为false则暂停该模型的调度使用   |
+
 
 其中：
 * "openai" 格式，headers 应有 `Authorization`
 * "anthropic" 格式，headers 应有 `"X-Api-Key"`, `"anthropic-version" = "2023-06-01"`；body_options 应有 `max_tokens`
 
 
-### 1.4 [model_alias] 部分
-模型别名配置，用于简化模型名称的使用，方便在应用配置中使用更友好的名称。
+### 1.4 [model_tag] 部分
+模型标签配置，用于模型路由和分组调度。按优先级排序，应尽量写全。
 
-| 参数   | 类型  | 默认值 | 说明                          |
-|------|-----|-----|-----------------------------|
-| `别名` | 字符串 | 无   | 映射到实际的模型名称（必须在[api]部分有对应配置） |
+业务代码可以使用标签，无需关心底层具体模型，支持灵活切换和路由。模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。例如传入 `["code", "multimodal"]` 可自动选择支持多模态的代码模型，传入 `["low_cost", "fast"]` 可自动选择低成本且响应快的模型，适配各类交叉场景。
+
+原有 `[model_alias]` 配置（`别名 = 模型名`）会自动合并到 `[model_tag]`，每个别名作为标签，对应单元素列表。
+
+| 参数     | 类型     | 默认值 | 说明                                                    |
+|--------|--------|-----|-------------------------------------------------------|
+| `标签名` | 字符串列表 | 无   | 键为标签名，值为模型列表。列表顺序为推荐优先级（越靠前权重越高）。模型名必须存在于[api]部分 |
+
+**示例：**
+```toml
+[model_tag]
+image = ['doubao-seed-2.0-pro']
+cheap = ['doubao-seed-2.0-mini','qwen-flash']
+fast = ['deepseek-v4-flash','qwen-flash']
+```
+
+**权重计算：**
+列表中模型的权重按位置计算，越靠前权重越高。权重公式中 `rank_adjust_ratio` 参数控制权重衰减速率，默认0.25。
 
 ### 1.5 配置示例
 ```toml
@@ -57,6 +82,7 @@
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
 zmq_auth_token = "YOUR_SECRET_TOKEN"  # 接口认证令牌（可选）
+zmq_manage_token = "YOUR_MANAGE_TOKEN"  # 管理权限认证令牌（可选）
 
 [default]
 timeout = 600
@@ -66,20 +92,30 @@ retry_duration = 0.5
 retry_factor = 1.5
 api_type = "openai"
 
-[model_alias]
-"Creative-Model" = "DeepSeek-v3.2-251201"
-"Precise-Model" = "GPT-4o-mini-251119"
-"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
-"Cheap-Model" = "Llama-3.1-8B-Instruct"
-"Code-Model" = "CodeLlama-70B-Instruct"
+[model_tag]
+"low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
+"fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]
+"creative" = ["deepseek-v4-pro", "kimi-k2.5"]
+"precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]
+"code" = ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]
+"multimodal" = ["Doubao-Seed-2.0-pro", "doubao-seed-2.0-mini", "qwen-vl"]
 
-[api."Doubao-Seed-1.6"]
+[api."deepseek-v4-pro"]
+url = "https://api.deepseek.com/chat/completions"
+type = "openai"
+model = "deepseek-v4-pro"
+parallel = 10
+headers = {Authorization = "Bearer sk-xxx"}
+body_options.thinking.type = "enabled"
+body_options.reasoning_effort = "max"
+
+[api."Doubao-Seed-2.0-pro"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 type = "openai"
 model = "ep-aaa"
 headers = {Authorization = "Bearer xxx"}
 
-[api."batch-Doubao-Seed-1.6-flash-250828"]
+[api."batch-Doubao-Seed-2.0-lite"]
 url = "https://ark.cn-beijing.volces.com/api/v3/batch/chat/completions"
 type = "openai"
 model = "ep-bbb"
@@ -123,9 +159,9 @@ headers = {Authorization = "Bearer xxx"}
 ### 2.4 [model_alias] 部分
 应用层模型别名配置，用于灵活配置具体模型。
 
-| 参数   | 类型  | 默认值 | 说明          |
-|------|-----|-----|-------------|
-| `别名` | 字符串 | 无   | 映射到实际的模型名称  |
+| 参数   | 类型        | 默认值 | 说明            |
+|------|-----------|-----|---------------|
+| `别名` | 字符串/字符串列表 | 无   | 映射到实际的模型或标签名称 |
 
 ### 2.5 模板语法
 模板使用 Jinja2 语法，支持变量替换和基本控制结构。
@@ -163,7 +199,7 @@ stream = false
 template.user = """{{content}}"""
 
 [module.summerize]
-model = "Precise-Model"  # 使用模型别名
+model = "precise"  # 使用模型别名
 template.user = """文章标题：{{title}}
 文章内容：<article>{{content}}</article>
 请根据文章内容：
@@ -172,16 +208,16 @@ template.user = """文章标题：{{title}}
 3. 总结这篇文章"""
 
 [module.creative_writing]
-model = "Creative-Model"  # 使用模型别名
+model = "creative"  # 使用模型别名
 template.user = """请以{{style}}风格创作一篇关于{{topic}}的文章，字数要求{{word_count}}字左右"""
 options = {temperature = 0.8, max_tokens = 2000}
 
 [module.code_generator]
-model = "Code-Model"  # 使用模型别名
+model = "code"  # 使用模型别名
 template.user = """请使用{{language}}语言编写一个{{functionality}}的代码示例，并添加详细注释"""
 
 [module.task_adder]
-model = "Fast-Model"  # 使用模型别名
+model = ["fast", "low_cost"]
 stream = true
 template.user = "你作为一个日程助手，可以帮用户添加待办事项。分析用户指令，如果有具体的待办事项则调用工具，没有则面向用户，让用户详细说明代表事项。用户说：{{user_input}}"
 
@@ -249,4 +285,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **工具调用**：工具配置必须包含完整的参数定义，否则可能无法正确解析。
 
-5. **模型别名映射**：`[model_alias]` 中的别名必须映射到 `[api]` 部分已定义的模型名称。建议在 app_prompt.toml 中指定别名，以方便最终用户替换模型。
+5. **模型路由**：使用 `model_tag` 进行模型路由时，系统会根据标签权重和模型可用性自动选择最优模型。传入 `messages` 时，会自动估算Token数并过滤超出限制的模型。

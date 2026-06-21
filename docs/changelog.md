@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+### 新增
+- 新增模型路由能力：
+  - 应用层（LLMApplication）：对LLMModuleRequest支持自动解析模型
+  - 传输层（LLMClient）：新增`list_models`/`resolve_model`相关接口
+  - 配置：支持`[model_tag]`标签配置，兼容原有`[model_alias]`，可按标签优先级、输入Token数自动选择最优模型
+- 新增配置热更新与运维管理能力：传输层（LLMClient）支持运行时修改模型配置、标签、启停状态，ZMQ接口新增`zmq_manage_token`管理权限token认证
+
+### 修改
+- postprocess.parse_xml 移动到独立的库 [fix-llm-xml](https://pypi.org/project/fix-llm-xml/)；函数改为直接导入
+- `LLMModuleRequest` 及提示词配置文件支持传入模型名/标签/别名列表，LLMApplication.call/render_direct_request 接口自动解析真实模型名称
+- 修改ZeroMQ认证协议，改连接时认证为每次调用认证
+
 ## 0.4.4
 
 ### 修改

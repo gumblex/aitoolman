@@ -7,38 +7,45 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 
-from . import app, postprocess
+from . import app
 from .model import LLMModuleRequest, MediaContent
 from .channel import Channel, print_channel_output
 
-# 日志配置
+import fix_llm_xml
+
+# Log configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# 大小限制常量
-WARN_FILE_CHARS = 128 * 1024
-WARN_PROMPT_CHARS = 200 * 1024
+# Size limit constants
+TOKEN_RATIO = 4.0
+WARN_FILE_K_TOKENS = 64
+WARN_PROMPT_K_TOKENS = 120
 
 
 # ------------------------------
-# 后处理器：解析<output>中的多文件内容
+# Postprocessor: parse multi-file content in <output>
 # ------------------------------
 def extract_code_blocks(text: str) -> List[Dict]:
     """
-    从LLM输出中解析<output>标签内的多个<file>内容
-    返回格式: [{'filename': str, 'content': str}, ...]
+    Parse multiple <file> contents inside <output> tags from LLM output
+    Return format: [{'filename': str, 'content': str}, ...]
     """
-    output_content = postprocess.get_xml_tag_content(text, 'output', with_tag=True)
+    output_content = fix_llm_xml.find_xml_document(text, 'output', with_tag=True)
     if not output_content:
-        logger.warning("未找到 <output> 标签，将所有内容作为单个文件处理")
+        logger.warning("<output> tag not found, treat all content as a single file")
         return [{'filename': None, 'content': text.strip()}]
 
-    xml_dict = postprocess.parse_xml(output_content, 'output', strip_whitespace=False)
+    xml_dict = fix_llm_xml.parse_xml(
+        output_content, 'output',
+        text_tags=['file'],
+        strip_whitespace=False
+    )
     if not xml_dict or 'file' not in xml_dict.get('output', {}):
-        logger.warning("未找到 <file> 标签，将所有内容作为单个文件处理")
+        logger.warning("<file> tag not found, treat all content as a single file")
         return [{'filename': None, 'content': output_content.strip()}]
 
     files_data = xml_dict['output']['file']
@@ -95,12 +102,12 @@ post_processor = "extract_code_blocks"
 
 
 # ------------------------------
-# 输出路径处理函数
+# Output path handling functions
 # ------------------------------
 def get_output_path(
     output_arg: str, filename: str, input_files: List[str], result_num: int
 ) -> Path:
-    """根据输出参数和文件名确定最终输出路径"""
+    """Determine final output path based on output parameter and filename"""
     output_path = Path(output_arg)
 
     if output_path.is_dir():
@@ -121,18 +128,18 @@ def get_output_path(
 
 
 def handle_existing_file(file_path: Path, overwrite: bool) -> Path:
-    """处理已存在的文件，返回最终路径"""
+    """Handle existing files, return final path"""
     if not file_path.exists():
         return file_path
 
     if overwrite:
-        logger.warning("文件已存在，覆盖: %s", file_path)
+        logger.warning("File already exists, overwriting: %s", file_path)
         return file_path
     else:
         stem = file_path.stem
         suffix = file_path.suffix
         new_path = file_path.with_name(f"{stem}.new{suffix}")
-        logger.warning("文件已存在，写入新文件: %s", new_path)
+        logger.warning("File already exists, writing to new file: %s", new_path)
         return new_path
 
 
@@ -141,52 +148,53 @@ def load_files_from_paths(
     file_size_limit: Optional[int] = None
 ) -> List[Dict]:
     """
-    从路径列表加载文件，支持递归遍历目录
-    :param paths: 输入的文件/目录路径列表
-    :param relative_to: 如果不为None，返回的文件名转为相对于该路径的相对路径
-    :param file_size_limit: 跳过超过大小的文件
-    :return: 加载成功的文件列表，每个元素为 {'filename': str, 'content': str}
+    Load files from path list, support recursive directory traversal
+    :param paths: List of input file/directory paths
+    :param relative_to: If not None, convert returned filename to relative path against this path
+    :param file_size_limit: Skip files exceeding size limit
+    :return: List of successfully loaded files, each element is {'filename': str, 'content': str}
     """
     loaded = []
     base_path = (relative_to or Path.cwd()).resolve()
 
     def _process_path(p: Path, is_direct_specified: bool = True):
         if not p.exists():
-            logger.warning(f"路径不存在，跳过: {p}")
+            logger.warning(f"Path does not exist, skipping: {p}")
             return
-        # 处理目录
+        # Process directory
         if p.is_dir():
             for child in p.iterdir():
-                # 非直接指定的路径跳过.开头的隐藏文件/目录
+                # Skip hidden files/directories for non-direct specified paths
                 if not is_direct_specified and child.name.startswith('.'):
-                    logger.debug(f"跳过隐藏文件/目录: {child}")
+                    logger.debug(f"Skip hidden file/directory: {child}")
                     continue
                 _process_path(child, is_direct_specified=False)
             return
-        # 处理文件
+        # Process file
         if p.is_file():
             if not is_direct_specified and p.name.startswith('.'):
-                logger.debug(f"跳过隐藏文件: {p}")
+                logger.debug(f"Skip hidden file: {p}")
                 return
 
-            # 检查文件大小是否超过最大限制
+            # Check if file size exceeds limit
             file_size = p.stat().st_size
             if file_size_limit and file_size > file_size_limit:
-                logger.warning(f"文件大小 {file_size} > {file_size_limit}，跳过: {p}")
+                logger.warning(f"File size {file_size} > {file_size_limit}, skipping: {p}")
                 return
 
-            # 读取文件校验
+            # Read and validate file
             try:
                 content = p.read_text(encoding='utf-8')
-                # 排除含有NUL字符的文件
+                # Exclude files containing NUL characters
                 if '\x00' in content:
-                    logger.warning(f"二进制文件，跳过: {p}")
+                    logger.warning(f"Binary file, skipping: {p}")
                     return
 
-                if len(content) > WARN_FILE_CHARS:
-                    logger.warning("大文件（字符数 %s）: %s", len(content), p)
+                estimated_file_k_tokens = len(content.encode('utf-8'))/TOKEN_RATIO/1024.0
+                if estimated_file_k_tokens > WARN_FILE_K_TOKENS:
+                    logger.warning("Large file (estimated %.1fK tokens): %s", estimated_file_k_tokens, p)
 
-                # 处理文件名路径
+                # Process filename path
                 filename = str(p)
                 if relative_to:
                     try:
@@ -195,9 +203,9 @@ def load_files_from_paths(
                         filename = str(p)
                 loaded.append({'filename': filename, 'content': content})
             except UnicodeDecodeError:
-                logger.warning(f"文件不是UTF-8编码，跳过: {p}")
+                logger.warning(f"File is not UTF-8 encoded, skipping: {p}")
             except Exception as e:
-                logger.warning(f"读取文件失败 {p}: {str(e)}")
+                logger.warning(f"Failed to read file {p}: {str(e)}")
 
     for path_str in paths:
         p = Path(path_str).resolve()
@@ -206,7 +214,7 @@ def load_files_from_paths(
 
 
 def read_user_input(prompt) -> str:
-    print(prompt + "（结束后输入单独的一行 . ）")
+    print(prompt + " (enter a separate line with . to finish)")
     lines = []
     while True:
         line = sys.stdin.readline()
@@ -219,7 +227,7 @@ def read_user_input(prompt) -> str:
 
 
 # ------------------------------
-# 异步处理函数
+# Asynchronous processing functions
 # ------------------------------
 async def process_files(
         llm_app: app.LLMApplication,
@@ -234,38 +242,36 @@ async def process_files(
         media_files: Optional[List[str]] = None,
         file_size_limit: Optional[int] = None
 ) -> app.LLMModuleResult:
-    """处理多个文件"""
-    logger.info("使用模型: %s", model_name)
-
+    """Process multiple files"""
     references = load_files_from_paths(
         reference_files, relative_to=Path.cwd(), file_size_limit=file_size_limit)
     input_files_list = load_files_from_paths(
         input_files, relative_to=Path.cwd(), file_size_limit=file_size_limit)
 
     if references:
-        logger.info("参考文件: %s", ', '.join(f['filename'] for f in references))
+        logger.info("Reference files: %s", ', '.join(f['filename'] for f in references))
     if input_files_list:
-        logger.info("输入文件: %s", ', '.join(f['filename'] for f in input_files_list))
+        logger.info("Input files: %s", ', '.join(f['filename'] for f in input_files_list))
 
-    # 校验是否还有有效文件
+    # Validate if there are valid files left
     if input_files and not input_files_list:
-        raise ValueError("所有输入文件都因无法读取或大小超出限制被排除，无法继续处理")
+        raise ValueError("All input files are excluded due to unreadable or size exceeding limit, cannot proceed")
     if not input_files and reference_files and not references:
-        raise ValueError("所有参考文件都因无法读取或大小超出限制被排除，无法继续处理")
+        raise ValueError("All reference files are excluded due to unreadable or size exceeding limit, cannot proceed")
 
     media_content_list = []
     if media_files:
         media_content_list = [MediaContent.load_from_path(m) for m in media_files]
 
-    # 获取用户指令
+    # Get user instruction
     user_instruction = None
     if prompt_file:
         with open(prompt_file, 'r', encoding='utf-8') as f:
             user_instruction = f.read()
     if not user_instruction:
-        user_instruction = read_user_input("请输入修改指令")
+        user_instruction = read_user_input("Please enter instruction to modify")
 
-    # 启动通道收集器
+    # Start channel collector
     output_channel = Channel()
     output_task = asyncio.create_task(print_channel_output(
         output_channel,
@@ -286,13 +292,7 @@ async def process_files(
         'references': references,
         'use_system': use_system
     }
-    total_chars = sum(len(f['content']) + len(f['filename']) for f in references) + \
-                  sum(len(f['content']) + len(f['filename']) for f in input_files_list) + \
-                  len(user_instruction)
-    if total_chars > WARN_PROMPT_CHARS:
-        logger.warning(f"提示词中，总文件长度较大 {total_chars} > {WARN_PROMPT_CHARS}，可能导致处理变慢或无法处理")
-
-    result = await llm_app.call(LLMModuleRequest(
+    rendered = await llm_app.render_direct_request(LLMModuleRequest(
         module_name='code_edit',
         template_params=template_params,
         media_content=media_content_list,
@@ -300,10 +300,20 @@ async def process_files(
         stream=(not batch_mode),
         output_channel=output_channel
     ))
+    logger.info("Resolved actual model: %s", rendered.model_name)
+    total_bytes = sum(len((m.content or '').encode('utf-8')) for m in rendered.messages)
+    estimated_total_k_tokens = total_bytes / TOKEN_RATIO / 1024.0
+    if estimated_total_k_tokens >= WARN_PROMPT_K_TOKENS:
+        logger.warning(
+            "Prompt total length is large, estimated %.1fK tokens >= %dK tokens, may reach model's limit",
+            estimated_total_k_tokens, WARN_PROMPT_K_TOKENS
+        )
+
+    result = await llm_app.call(rendered)
     result.raise_for_status()
     await output_task
 
-    # 处理输出文件
+    # Process output files
     file_results: List[Dict] = result.data
     if use_system and not output_arg and file_results:
         output_arg = '.'
@@ -322,9 +332,9 @@ async def process_files(
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(content)
                 if filename != output_path:
-                    logger.info(f"写入文件: {output_path}（原名 {filename}）")
+                    logger.info(f"Written to file: {output_path} (original name {filename})")
                 else:
-                    logger.info(f"写入文件: {output_path}")
+                    logger.info(f"Written to file: {output_path}")
             except Exception as e:
-                logger.exception(f"写入文件失败: {output_path or filename}")
+                logger.exception(f"Failed to write file: {output_path or filename}")
     return result

@@ -8,7 +8,7 @@ import zmq
 import zmq.asyncio
 
 from . import util
-from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message
+from .model import LLMProviderRequest, LLMProviderResponse, LLMPermissionDeniedError, FinishReason, Message
 from .provider import LLMProviderManager
 from .channel import ChannelWriter, ChannelEvent
 
@@ -37,8 +37,8 @@ class LLMZmqServer:
         self.pub_socket = self.ctx.socket(zmq.PUB)        # 发布审计日志
         self.provider_manager = LLMProviderManager(config)
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
-        self.auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # 读取认证令牌
-        self.authenticated_clients = set()  # 存储已认证的 client_id
+        self.zmq_auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # ZeroMQ路由认证令牌
+        self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
         self.running = False
 
     async def initialize(self):
@@ -78,35 +78,50 @@ class LLMZmqServer:
 
     async def process_message(self, message: List[bytes]):
         """解析并处理客户端消息"""
-        if len(message) != 3:
+        # 兼容3段和4段消息格式
+        if len(message) == 4:
+            client_id = message[0].decode('utf-8')
+            auth_token = message[2].decode('utf-8')
+            json_data = json.loads(message[3].decode('utf-8'))
+        elif len(message) == 3:
+            client_id = message[0].decode('utf-8')
+            auth_token = ''
+            json_data = json.loads(message[2].decode('utf-8'))
+        else:
             logger.error(f"Invalid message format: {len(message)} parts")
             return
-        client_id = message[0].decode('utf-8')
-        json_data = json.loads(message[2].decode('utf-8'))
+
         msg_type = json_data.get('type')
         request_id = json_data.get('request_id')
 
         logger.debug("[%s] Request: %s", client_id, json_data)
-        if self.auth_token:
-            if msg_type == 'auth':
-                await self.handle_auth(client_id, json_data)
-                return
-            elif client_id not in self.authenticated_clients:
-                logger.warning("[%s] Unauthenticated client", client_id)
-                if msg_type == 'request':
-                    await self.handle_request_auth_failed(client_id, json_data)
-                else:
-                    await self.send_error(client_id, request_id, "Authentication required")
-                return
 
         if msg_type == 'request':
-            await self.handle_request(client_id, json_data)
+            if self._check_permission(auth_token, manage=False):
+                await self.handle_request(client_id, json_data)
+            else:
+                await self.handle_request_auth_failed(client_id, json_data)
+                logger.warning("[%s] Permission denied for LLM request.", client_id)
         elif msg_type == 'cancel':
-            await self.handle_cancel(client_id, request_id)
+            if self._check_permission(auth_token, manage=False):
+                await self.handle_cancel(client_id, request_id)
+            else:
+                logger.warning("[%s] Permission denied for cancel request.", client_id)
         elif msg_type == 'cancel_all':
-            await self.handle_cancel_all(client_id, json_data.get('context_id'))
+            if self._check_permission(auth_token, manage=False):
+                await self.handle_cancel_all(client_id, json_data.get('context_id'))
+            else:
+                logger.warning("[%s] Permission denied for cancel_all request.", client_id)
+            # 否则忽略
         elif msg_type == 'audit_event':
-            await self.handle_audit_event(client_id, json_data)
+            if self._check_permission(auth_token, manage=False):
+                await self.handle_audit_event(client_id, json_data)
+            else:
+                # 权限不足，发送错误
+                logger.warning("[%s] Permission denied for audit_event request.", client_id)
+                await self.send_error(client_id, request_id, "Permission denied for audit_event")
+        elif msg_type == 'rpc':
+            await self.handle_rpc(client_id, request_id, auth_token, json_data)
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
@@ -226,32 +241,6 @@ class LLMZmqServer:
             util.encode_message(message)
         ])
 
-    async def handle_auth(self, client_id: str, json_data: Dict[str, Any]):
-        """处理认证消息"""
-        token = json_data.get('token')
-        request_id = json_data.get('request_id')
-
-        if secrets.compare_digest(token, self.auth_token):
-            self.authenticated_clients.add(client_id)
-            await self.send_auth_response(client_id, request_id, success=True)
-            logger.info("[%s] Client authenticated successfully", client_id)
-        else:
-            await self.send_auth_response(client_id, request_id, success=False)
-            logger.warning("[%s] Client authentication failed", client_id)
-
-    async def send_auth_response(self, client_id: str, request_id: str, success: bool):
-        """发送认证响应"""
-        message = {
-            'type': 'auth_response',
-            'request_id': request_id,
-            'success': success
-        }
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
-
     async def send_error(self, client_id: str, request_id: str, error: str):
         """发送错误消息"""
         message = {
@@ -299,6 +288,92 @@ class LLMZmqServer:
             b'llm_request',
             util.encode_message(audit_log)
         ])
+
+    def _check_permission(self, auth_token: str, manage: bool) -> bool:
+        """检查管理权限"""
+        if manage:
+            if self.zmq_manage_token is None:
+                return False
+            return secrets.compare_digest(auth_token, self.zmq_manage_token)
+        if self.zmq_auth_token is None:
+            return True
+        if self.zmq_manage_token is not None:
+            if secrets.compare_digest(auth_token, self.zmq_manage_token):
+                return True
+        return secrets.compare_digest(auth_token, self.zmq_auth_token)
+
+    async def handle_rpc(self, client_id: str, request_id: str, auth_token: str, json_data: Dict[str, Any]):
+        """处理通用RPC请求"""
+        method = json_data.get('method', '')
+        kwargs = json_data.get('kwargs', {})
+
+        # 管理类方法需要权限校验
+        manage_methods = {'update_config', 'update_api_config', 'change_api_status', 'update_model_tag'}
+        if not self._check_permission(auth_token, manage=(method in manage_methods)):
+            await self.send_rpc_response(client_id, request_id,
+                error=LLMPermissionDeniedError("Permission denied for method: %s" % method))
+            logger.warning("[%s] Permission denied for rpc request: %s", client_id, method)
+            return
+
+        # 查询类方法无需管理权限
+        query_methods = {'list_models', 'resolve_model'}
+        if method not in query_methods and method not in manage_methods:
+            await self.send_rpc_response(client_id, request_id,
+                error=RuntimeError("Unknown RPC method: %s" % method))
+            return
+
+        try:
+            if method == 'list_models':
+                result = self.provider_manager.list_models(kwargs.get('tag'))
+                # ModelInfo 转为 dict
+                result = [info._asdict() for info in result]
+            elif method == 'resolve_model':
+                result = self.provider_manager.resolve_model(
+                    kwargs.get('tags', []),
+                    [Message.from_dict(m) for m in kwargs.get('messages')] if kwargs.get('messages') else None
+                )
+            elif method == 'update_config':
+                self.provider_manager.update_config(kwargs['new_config'])
+                logger.info("Config updated successfully")
+                result = None
+            elif method == 'update_api_config':
+                self.provider_manager.update_api_config(kwargs['model_name'], kwargs['model_config'])
+                logger.info("Config updated successfully for model: %s" % kwargs['model_name'])
+                result = None
+            elif method == 'change_api_status':
+                self.provider_manager.change_api_status(kwargs['model_name'], kwargs['enabled'])
+                if kwargs['enabled']:
+                    logger.info("Enabled model: %s" % kwargs['model_name'])
+                else:
+                    logger.info("Disabled model: %s" % kwargs['model_name'])
+                result = None
+            elif method == 'update_model_tag':
+                self.provider_manager.update_model_tag(kwargs['tag'], kwargs['models'])
+                logger.info("Model tags updated successfully")
+                result = None
+            else:
+                raise ValueError(f"Unknown method: {method}")
+            await self.send_rpc_response(client_id, request_id, result=result)
+        except Exception as e:
+            await self.send_rpc_response(client_id, request_id, error=e)
+
+    async def send_rpc_response(self, client_id: str, request_id: str, result: Any = None, error: Optional[Exception] = None):
+        """发送RPC响应"""
+        message = {
+            'type': 'rpc_response',
+            'request_id': request_id,
+        }
+        if error is not None:
+            message['error_type'] = type(error).__name__
+            message['error_text'] = f"{type(error).__qualname__}: {str(error)}"
+        else:
+            message['result'] = result
+        await self.router_socket.send_multipart([
+            client_id.encode('utf-8'),
+            b'',
+            util.encode_message(message)
+        ])
+
 
     async def handle_cancel(self, client_id: str, request_id: str):
         """处理取消请求"""

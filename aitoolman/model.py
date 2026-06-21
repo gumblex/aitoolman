@@ -31,6 +31,16 @@ class LLMApiRequestError(LLMError):
     pass
 
 
+class LLMNoAvailableModelError(LLMApiRequestError):
+    """Error when no available model is found"""
+    pass
+
+
+class LLMPermissionDeniedError(LLMApiRequestError):
+    """Error when permission denied"""
+    pass
+
+
 class LLMResponseFormatError(LLMError):
     """Error with response format"""
     pass
@@ -191,6 +201,15 @@ class Message(typing.NamedTuple):
         )
 
 
+class ModelInfo(typing.NamedTuple):
+    """模型元数据"""
+    name: str                  # 真实模型名（api配置段的键名）
+    parallel: int              # 模型并行度配置
+    api_type: str              # API格式：openai/anthropic
+    body_options: Dict[str, Any] # 模型请求默认参数
+    tags: Dict[str, float]     # 关联的所有标签及对应权重
+
+
 class ToolCall(typing.NamedTuple):
     """LLM回复的工具调用请求"""
     name: str
@@ -332,6 +351,7 @@ class FinishReason(enum.Enum):
 
 class LLMDirectRequest(typing.NamedTuple):
     """应用层实际请求参数"""
+    # 实际模型名称
     model_name: str
     messages: List[Message]
     tools: Optional[Dict[str, Dict[str, Any]]] = None
@@ -345,7 +365,8 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str
     template_params: Dict[str, Any]
-    model_name: Optional[str] = None
+    # 模型名称或模型标签（多个取并集）
+    model_name: Union[str, List[str], None] = None
     context_messages: List[Message] = []
     media_content: Optional[List[MediaContent]] = None
 
@@ -359,7 +380,7 @@ class LLMModuleRequest(typing.NamedTuple):
 
 @dataclass
 class LLMModuleResult:
-    """应用层（模板）请求响应"""
+    """应用层（模板）请求结果"""
     model_name: str
     module_name: Optional[str]
     # 实际请求参数
@@ -461,3 +482,10 @@ class LLMModuleResult:
             output_channel=original_req.output_channel,
             post_processor=original_req.post_processor,
         )
+
+
+class LLMModuleRequestState(typing.NamedTuple):
+    """应用层请求响应（中间结果）"""
+    module_request: Optional[LLMModuleRequest]
+    direct_request: LLMDirectRequest
+    provider_request: LLMProviderRequest

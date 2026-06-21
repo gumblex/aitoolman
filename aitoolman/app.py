@@ -9,7 +9,8 @@ from . import util
 from . import postprocess
 from . import client as _client
 from . import channel as _channel
-from .model import LLMDirectRequest, Message, MediaContent, LLMModuleResult, LLMModuleRequest, FinishReason
+from .model import LLMDirectRequest, Message, MediaContent, LLMModuleResult, LLMModuleRequest, \
+    FinishReason, LLMModuleRequestState, LLMNoAvailableModelError
 
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ class ModuleConfig(NamedTuple):
     """模块配置"""
     name: str
     description: str
-    model: str
+    model: Union[str, List[str], None] = None
     templates: Dict[str, str] = {}
     tools: Dict[str, Dict[str, Any]] = {}
     stream: bool = False
@@ -80,7 +81,7 @@ class _LLMModule(NamedTuple):
 
     async def __call__(
             self, *,
-            _model_name: Optional[str] = None,
+            _model_name: Union[str, List[str], None] = None,
             _context_messages: Optional[List[Message]] = None,
             _media_content: Optional[List[MediaContent]] = None,
             _output_channel: Optional[_channel.ChannelWriter] = None,
@@ -162,7 +163,7 @@ class LLMApplication:
         return ModuleConfig(
             name=module_name,
             description=config.get('description', ''),
-            model=config.get('model', ''),
+            model=config.get('model'),
             templates=config.get('template', {}),
             tools=resolved_tools,
             stream=config.get('stream', False),
@@ -207,7 +208,7 @@ class LLMApplication:
         """触发用户自定义审计事件"""
         await self.client.audit_event(self.context_id, event_type, **kwargs)
 
-    def render_direct_request(
+    async def render_direct_request(
             self, module_request: Union[LLMModuleRequest, LLMDirectRequest]
     ) -> LLMDirectRequest:
         if isinstance(module_request, LLMDirectRequest):
@@ -229,8 +230,12 @@ class LLMApplication:
             output_channel = module_request.output_channel
         else:
             output_channel = _channel.NullChannel()
+        model_tags = (module_request.model_name or config.model)
+        if not model_tags:
+            raise LLMNoAvailableModelError("No model name or tags provided.")
+        model_name = await self.client.resolve_model(model_tags, messages)
         return LLMDirectRequest(
-            model_name=(module_request.model_name or config.model),
+            model_name=model_name,
             messages=messages,
             tools=(module_request.tools if module_request.tools is not None else config.tools),
             options=(module_request.options if module_request.options is not None else config.options),
@@ -239,32 +244,52 @@ class LLMApplication:
             post_processor=(module_request.post_processor if module_request.post_processor is not None else config.post_processor),
         )
 
-    async def _send_request(self, direct_request: LLMDirectRequest) -> LLMModuleResult:
-        """直接发送LLM请求"""
-        if direct_request.output_channel is not None:
-            output_channel = direct_request.output_channel
+    async def send_request(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleRequestState:
+        """发送LLM请求，返回请求状态（用于等待和取消）"""
+        if isinstance(request, LLMModuleRequest):
+            direct_req = await self.render_direct_request(request)
+            module_request = request
+        else:
+            direct_req = request
+            module_request = None
+
+        if direct_req.output_channel is not None:
+            output_channel = direct_req.output_channel
         else:
             output_channel = _channel.NullChannel()
-        model_name = direct_request.model_name
-        if model_name in self.model_alias:
+
+        model_name = direct_req.model_name
+        if isinstance(model_name, str) and model_name in self.model_alias:
             model_name = self.model_alias[model_name]
-        request = await self.client.request(
+
+        provider_request = await self.client.request(
             model_name=model_name,
-            messages=direct_request.messages,
-            tools=direct_request.tools,
-            options=direct_request.options,
-            stream=direct_request.stream,
+            messages=direct_req.messages,
+            tools=direct_req.tools,
+            options=direct_req.options,
+            stream=direct_req.stream,
             context_id=self.context_id,
             output_channel=output_channel
         )
-        response = await request.response
-        return LLMModuleResult.from_response(direct_request, response)
 
-    async def _post_process(
-            self, result: LLMModuleResult,
-            post_processor: Union[str, Callable[[str], Any], None],
-            request: Union[LLMDirectRequest, LLMModuleRequest]
-    ):
+        return LLMModuleRequestState(
+            module_request=module_request,
+            direct_request=direct_req,
+            provider_request=provider_request
+        )
+
+    async def post_process(self, request_state: LLMModuleRequestState) -> LLMModuleResult:
+        """等待请求完成并进行后处理"""
+        # 等待响应
+        response = await request_state.provider_request.response
+        result = LLMModuleResult.from_response(request_state.direct_request, response)
+
+        if request_state.module_request is not None:
+            result.module_name = request_state.module_request.module_name
+            result.request_params = request_state.module_request.template_params
+
+        # 执行后处理
+        post_processor = request_state.direct_request.post_processor
         if result.status == FinishReason.stop:
             if post_processor is not None:
                 if isinstance(post_processor, str):
@@ -278,23 +303,22 @@ class LLMApplication:
                     else:
                         result.data = data
                 except Exception:
-                    logger.exception("Post-process failed: %s", request)
+                    logger.exception("Post-process failed: %s", request_state.direct_request)
                     result.status = FinishReason.error_format
             else:
                 result.data = result.response_text
         return result
 
+    async def cancel(self, request_state: LLMModuleRequestState):
+        """取消正在进行的LLM请求"""
+        if not request_state.provider_request.is_cancelled:
+            await self.client.cancel(request_state.provider_request.request_id)
+            logger.debug("Cancelled request %s", request_state.provider_request.request_id)
+
     async def call(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleResult:
-        if isinstance(request, LLMModuleRequest):
-            direct_req = self.render_direct_request(request)
-        else:
-            direct_req = request
-        result = await self._send_request(direct_req)
-        if isinstance(request, LLMModuleRequest):
-            result.module_name = request.module_name
-            result.request_params = request.template_params
-        result = await self._post_process(result, direct_req.post_processor, request)
-        return result
+        """发送请求并等待结果"""
+        request_state = await self.send_request(request)
+        return await self.post_process(request_state)
 
     @classmethod
     def factory(

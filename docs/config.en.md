@@ -12,6 +12,8 @@ Configure network ports for the ZeroMQ server.
 | `zmq_pub_event`      | String                | None (Optional)   | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above                             |
 | `zmq_pub_event_type` | None/"bind"/"connect" | "bind" (Optional) | Bind method for the ZeroMQ PUB socket. Bind to a new port, or connect to an existing port                            |
 | `zmq_auth_token`     | String                | None (Optional)   | Any string for authentication                                                                                        |
+| `zmq_manage_token`   | String                | None (Optional)   | Management authentication token for client management operations                                                     |
+
 
 ### 1.2 [default] Section
 Default configuration inherited by all model configurations.
@@ -26,38 +28,61 @@ Default configuration inherited by all model configurations.
 | `api_type`        | String  | "openai"            | Default API type, available options: "openai", "anthropic"                  |
 | `headers`         | Dict    | `{}`                | Default HTTP request headers, universal authentication info can be configured here |
 | `body_options`    | Dict    | `{}`                | Default request options such as max_tokens, temperature, etc.               |
+| `max_input_tokens` | Integer | None (No limit)     | Maximum input token count supported by the model                            |
+| `bytes_per_token`  | Float   | 4.0                 | Estimated UTF-8 bytes per token, used for token count estimation            |
+| `rank_adjust_ratio`| Float   | 0.25                | Weight adjustment parameter for rank weight calculation in model routing    |
+
 
 ### 1.3 [api."Model Name"] Section
 Specific configuration for each model, model names can be customized.
 
-| Parameter         | Type    | Default Value                          | Description                                                                           |
-|-------------------|---------|----------------------------------------|---------------------------------------------------------------------------------------|
-| `url`             | String  | None (Required)                        | API endpoint URL                                                                      |
-| `type`            | String  | Inherited from `[default].api_type`    | API type, available options: "openai", "anthropic"                                    |
-| `model`           | String  | None (Required)                        | Model identifier on the provider's side                                               |
-| `parallel`        | Integer | Inherited from `[default].parallel`    | Parallel processing capacity for this model                                           |
-| `headers`         | Dict    | Inherited from `[default].headers`     | Model-specific HTTP request headers                                                   |
-| `timeout`         | Integer | Inherited from `[default].timeout`     | Model-specific timeout duration                                                       |
-| `body_options`    | Dict    | Inherited from `[default].body_options` | Default request options for this model, overrides all options in `[default]`. |
+| Parameter         | Type    | Default Value                               | Description                                                                           |
+|-------------------|---------|---------------------------------------------|---------------------------------------------------------------------------------------|
+| `url`             | String  | None (Required)                             | API endpoint URL                                                                      |
+| `type`            | String  | Inherited from `[default].api_type`         | API type, available options: "openai", "anthropic"                                    |
+| `model`           | String  | None (Required)                             | Model identifier on the provider's side                                               |
+| `parallel`        | Integer | Inherited from `[default].parallel`         | Parallel processing capacity for this model                                           |
+| `headers`         | Dict    | Inherited from `[default].headers`          | Model-specific HTTP request headers                                                   |
+| `timeout`         | Integer | Inherited from `[default].timeout`          | Model-specific timeout duration                                                       |
+| `body_options`    | Dict    | Inherited from `[default].body_options`     | Default request options for this model, overrides all options in `[default]`. |
+| `max_input_tokens` | Integer | Inherited from `[default].max_input_tokens` | Maximum input token count for this model            |
+| `bytes_per_token`  | Float   | Inherited from `[default].bytes_per_token`  | Estimated UTF-8 bytes per token for this model      |
+| `enable`           | Boolean | true                                        | Set to false to suspend scheduling of this model    |
+
 
 Additional notes:
 * For "openai" format, `headers` should include `Authorization`
 * For "anthropic" format, `headers` should include `"X-Api-Key"` and `"anthropic-version" = "2023-06-01"`; `body_options` should include `max_tokens`
 
 
-### 1.4 [model_alias] Section
-Model alias configuration to simplify model name usage and enable friendly names in application configurations.
+### 1.4 [model_tag] Section
+Model tag configuration for model routing and grouped scheduling.
 
-| Parameter | Type    | Default Value | Description                                                                 |
-|-----------|---------|---------------|-----------------------------------------------------------------------------|
-| (Alias)   | String  | None          | Maps to the actual model name (must have corresponding configuration in [api] section) |
+Original `[model_alias]` config (`alias = model_name`) will be merged into `[model_tag]`. Each alias is a tag, corresponding to a single-item list.
 
-### 1.5 Configuration Example
+| Parameter   | Type           | Default Value | Description                                                                                                     |
+|-------------|----------------|---------------|-----------------------------------------------------------------------------------------------------------------|
+| (Tag Name)  | List of String | None          | Key is the tag name, value is a list of model names. List order determines priority (earlier entries have higher weight). Model names must exist in the [api] section |
+
+**Example:**
+```toml
+[model_tag]
+image = ['doubao-seed-2.0-pro']
+cheap = ['doubao-seed-2.0-mini','qwen-flash']
+fast = ['deepseek-v4-flash','qwen-flash']
+```
+
+**Weight Calculation:**
+Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
+
+### 1.6 Configuration Example
+
 ```toml
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
 zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
+zmq_manage_token = "YOUR_MANAGE_TOKEN"  # Management auth token (optional)
 
 [default]
 timeout = 600
@@ -67,20 +92,28 @@ retry_duration = 0.5
 retry_factor = 1.5
 api_type = "openai"
 
-[model_alias]
-"Creative-Model" = "DeepSeek-v3.2-251201"
-"Precise-Model" = "GPT-4o-mini-251119"
-"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
-"Cheap-Model" = "Llama-3.1-8B-Instruct"
-"Code-Model" = "CodeLlama-70B-Instruct"
+[model_tag]
+"creative" = ["deepseek-v4-pro"]
+"code" = ["glm-5.1", "deepseek-v4-pro", "kimi-k2.5"]
+"fast" = ["deepseek-v4-flash", "Doubao-Seed-2.0-lite"]
+"precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]
 
-[api."Doubao-Seed-1.6"]
+[api."deepseek-v4-pro"]
+url = "https://api.deepseek.com/chat/completions"
+type = "openai"
+model = "deepseek-v4-pro"
+parallel = 10
+headers = {Authorization = "Bearer sk-xxx"}
+body_options.thinking.type = "enabled"
+body_options.reasoning_effort = "max"
+
+[api."Doubao-Seed-2.0-pro"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 type = "openai"
 model = "ep-aaa"
 headers = {Authorization = "Bearer xxx"}
 
-[api."batch-Doubao-Seed-1.6-flash-250828"]
+[api."batch-Doubao-Seed-2.0-lite"]
 url = "https://ark.cn-beijing.volces.com/api/v3/batch/chat/completions"
 type = "openai"
 model = "ep-bbb"
@@ -255,4 +288,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Model Alias Mapping**: Aliases in `[model_alias]` must map to model names already defined in the `[api]` section. It is recommended to use aliases in app_prompt.toml to facilitate model replacement by end users.
+5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. When `messages` are provided, token count is automatically estimated and models exceeding the limit are filtered out.

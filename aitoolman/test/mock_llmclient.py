@@ -250,3 +250,21 @@ class MockLLMClient(_client.LLMClient):
 
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         self.events.append(AuditEvent(context_id, event_type, kwargs))
+
+    async def list_models(self, tag: Optional[str] = None):
+        return []
+
+    async def resolve_model(self, tags: Union[str, List[str]], messages = None) -> str:
+        return 'test_model'
+
+    async def update_config(self, new_config: Dict[str, Any]):
+        pass
+
+    async def update_api_config(self, model_name: str, model_config: Dict[str, Any]):
+        pass
+
+    async def change_api_status(self, model_name: str, enabled: bool):
+        pass
+
+    async def update_model_tag(self, tag: str, models: List[str]):
+        pass

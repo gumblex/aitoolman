@@ -14,7 +14,7 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **AI �
 - **流程透明可调试**：所有发往LLM和从LLM返回的数据均可自定义、可审计，便于排查问题和优化提示词
 - **供应商无关**：通过抽象层统一适配多种LLM提供商，轻松切换模型且充分利用各提供商的特色功能
 - **模块化设计**：组件职责单一，易于测试、替换和复用
-- **生产级特性**：内置资源管理、错误处理、微服务部署、监控审计能力，可直接用于生产环境
+- **生产级特性**：内置资源管理、错误处理、微服务部署、监控审计、热更新能力，可直接用于生产环境
 
 无论是简单的单次查询，还是复杂的多步骤业务流程，aitoolman 都能提供稳定、可靠、可维护的解决方案。框架鼓励开发者深入理解业务逻辑，精心设计提示词，将 AI 能力无缝集成到现有系统中。
 
@@ -44,7 +44,7 @@ aitoolman 是一个面向开发者的 LLM 应用框架，核心思想是 **AI �
 1. 用户应用层：业务逻辑实现
 2. 应用层 (LLMApplication / LLMWorkflow)：模板管理、流程编排、结果处理
 3. 传输层 (LLMClient / Channel)：请求发送、流式响应传输、微服务通信
-4. 数据接口层 (ProviderManager)：多厂商适配、请求调度、限流重试
+4. 数据接口层 (ProviderManager)：多厂商适配、请求调度、限流重试、模型路由
 5. LLM 提供商 API (OpenAI / Anthropic 等)：底层LLM服务
 
 ## 2. 数据模型类
@@ -117,7 +117,7 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
-    model_name: Optional[str] = None    # 覆盖模块默认模型
+    model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，覆盖模块默认配置
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
 
@@ -243,6 +243,8 @@ class LLMError(RuntimeError): ...
 class LLMLengthLimitError(LLMError): ...      # 响应长度限制
 class LLMContentFilterError(LLMError): ...    # 内容被审核过滤
 class LLMApiRequestError(LLMError): ...       # API 请求错误
+class LLMNoAvailableModelError(LLMApiRequestError): ... # 无可用模型错误
+class LLMPermissionDeniedError(LLMApiRequestError): ... # 权限不足错误
 class LLMResponseFormatError(LLMError): ...   # 响应格式错误
 class LLMApplicationError(LLMError): ...      # 应用程序代码错误
 class LLMCancelledError(LLMError): ...        # 请求被取消
@@ -631,6 +633,9 @@ class LLMClient(abc.ABC):
 
     async def cancel(self, request_id: str): ...
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
+    
+    async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str: ... # 解析最优模型
 ```
 
 #### 4.2.2 本地客户端
@@ -700,7 +705,7 @@ class AnthropicFormat(LLMFormatStrategy):
 ### 5.2 LLMProviderManager 提供商管理器
 ```python
 class LLMProviderManager:
-    """管理多个 LLM 提供商，处理 API 调用、重试、资源限制"""
+    """管理多个 LLM 提供商，处理 API 调用、重试、资源限制、模型路由"""
     def __init__(self, config: Dict[str, Any])
 
     def process_request(
@@ -711,18 +716,22 @@ class LLMProviderManager:
 
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
+    
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> str: ... # 路由选择最优模型
+    def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
 ```
 
 ## 6. 实用工具
 
 ### 6.1 命令行工具
-aitoolman 提供了命令行工具集，可快速完成模型测试、服务启停、监控审计、代码修改等常用操作，适合快速验证效果、调试配置和运维管理。
+aitoolman 提供了命令行工具集，可快速完成模型测试、服务启停、监控审计、代码修改、运维管理等常用操作，适合快速验证效果、调试配置和运维管理。
 
 主要命令包括：
 * `server`: 启动 LLM 微服务端，统一管理模型资源、对外提供调用接口
 * `client`: 通用 LLM 测试客户端，支持本地/远程服务调用、多模态输入、流式输出
 * `monitor`: 微服务监控工具，实时查看请求统计、Token使用、错误日志，支持数据持久化到SQLite
 * `code-edit`: 代码智能修改工具，支持参考文件上下文、单/多文件新建或修改，自动保存修改后代码
+* `manage`: 远程服务运维工具，支持列出模型、热更新配置、启停模型等操作
 
 命令的详细参数和使用示例可通过添加 `--help` 参数查看：
 
@@ -746,18 +755,19 @@ aitoolman.load_config(filename)
 aitoolman.load_config_str(s)
 ```
 
-### 6.3 后处理器（aitoolman.postprocess）
+### 6.3 后处理工具
 提供常用的文本后处理函数，用于解析LLM输出。
+推荐直接使用 [fix-llm-xml](https://pypi.org/project/fix-llm-xml/) 库解析 XML。
 
 ```python
 # JSON 解析（自动修复格式错误）
-parse_json(s: str) -> Any
+aitoolman.postprocess.parse_json(s: str) -> Any
 
 # XML 内容提取
-get_xml_tag_content(s: str, root: str, with_tag: bool = False) -> Optional[str]
+fix_llm_xml.find_xml_document(s: str, root: str, with_tag: bool = False) -> Optional[str]
 
 # XML 解析为字典 (xmltodict)
-parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
+fix_llm_xml.parse_xml(s: str, root: str, **kwargs) -> Optional[Dict]
 ```
 
 ### 6.4 资源管理器
@@ -787,6 +797,7 @@ class ResourceManager:
 zmq_router_rpc = "tcp://*:5555" # ZeroMQ ROUTER 端点
 zmq_pub_event = "tcp://*:5556"  # ZeroMQ PUB 端点（审计日志）
 zmq_auth_token = "YOUR_SECRET_TOKEN"  # 接口认证令牌
+zmq_manage_token = "YOUR_MANAGE_TOKEN" # 管理权限认证令牌（可选）
 
 # 默认配置
 [default]
@@ -794,28 +805,35 @@ timeout = 600
 max_retries = 3
 parallel = 1
 api_type = "openai"
+rank_adjust_ratio = 0.25 # 模型路由权重调整参数，可选
 
-# 模型别名映射
-# 业务配置中使用别名，无需关心底层模型具体信息
-[model_alias]
-"Creative-Model" = "DeepSeek-v3.2-251201"
-"Precise-Model" = "GPT-4o"
-"Fast-Model" = "Doubao-Seed-1.6-flash-250828"
-"Cheap-Model" = "Doubao-Mini-1.5"
-"Code-Model" = "CodeLlama-70B-Instruct"
+# 模型标签配置，用于模型路由，按优先级排序，尽量写全
+# 业务代码使用标签，无需关心底层具体模型，支持灵活切换和路由
+# 模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。
+# 例如传入 `["code", "multimodal"]` 可自动选择支持多模态的代码模型，传入 `["low_cost", "fast"]` 可自动选择低成本且响应快的模型，适配各类交叉场景。
+[model_tag]
+"low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # 低成本模型组，适合批量文本处理
+"fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # 高速响应模型组，适合快速处理任务
+"creative" = ["deepseek-v4-pro", "kimi-k2.5"]  # 创意写作模型组，适合内容生成
+"precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]  # 高精度任务模型组，适合精准修改、信息提取
+"code" = ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]  # 代码处理模型组，适合代码修改、生成
+"multimodal" = ["Doubao-Seed-2.0-pro", "doubao-seed-2.0-mini", "qwen-vl"]  # 多模态模型组，适合图片/视频理解
 
 # API 配置
-[api."Doubao-Seed-1.6"]
+[api."deepseek-v4-pro"]
+url = "https://api.deepseek.com/chat/completions"
+type = "openai"
+model = "deepseek-v4-pro"
+parallel = 10
+headers = {Authorization = "Bearer sk-xxx"}
+body_options.thinking.type = "enabled"
+body_options.reasoning_effort = "max"
+
+[api."Doubao-Seed-2.0-pro"]
 url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 type = "openai"
-model = "ep-xxx"
-headers = { Authorization = "Bearer YOUR_API_KEY" }
-
-[api."GPT-4"]
-url = "https://api.openai.com/v3/chat/completions"
-type = "openai"
-model = "gpt-4"
-headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
+model = "ep-aaa"
+headers = {Authorization = "Bearer xxx"}
 ```
 
 ### 7.2 提示词配置文件 (app_prompt.toml)
@@ -823,7 +841,7 @@ headers = { Authorization = "Bearer YOUR_OPENAI_KEY" }
 ```toml
 # 模块默认配置
 [module_default]
-model = "Fast-Model"         # 默认使用快速推理模型
+model = "fast"         # 默认使用快速推理模型组
 stream = false
 options = { max_tokens = 4000 }
 
@@ -848,7 +866,7 @@ template.user = "{{content}}"
 
 # 文章总结模块
 [module.summerize]
-model = "Creative-Model"     # 使用创意模型
+model = "creative"     # 使用创意模型组
 template.user = """
 文章标题：{{title}}
 文章内容：<article>{{content}}</article>
@@ -871,7 +889,7 @@ post_processor = "builtin.parse_json"
 
 # 日程规划模块（支持工具调用）
 [module.task_planner]
-model = "Fast-Model"         # 使用快速推理模型
+model = ["fast", "low_cost"]
 stream = true
 template.user = """
 你作为日程助手，分析用户指令：
@@ -894,7 +912,7 @@ tools.add_task.param.content.required = true
 
 # JSON 提取模块
 [module.json_extractor]
-model = "Precise-Model"      # 使用高精度模型
+model = ["precise", "fast"]
 template.user = """
 从以下文本中提取结构化信息：
 {{text}}
@@ -911,7 +929,7 @@ post_processor = "builtin.parse_json"
 
 # 多轮对话模块
 [module.chat]
-model = "Doubao-Seed-1.6"
+model = "Doubao-Seed-2.0-pro"
 stream = true
 template.user = "{{message}}"
 ```
@@ -922,7 +940,7 @@ template.user = "{{message}}"
 ```
 my_llm_app/
 ├── config/
-│   ├── llm_provider.toml          # API 配置（模型、密钥）
+│   ├── llm_provider.toml          # API 配置（模型、密钥、路由标签）
 │   └── app_prompt.toml          # 提示词配置（模块、模板）
 ├── src/
 │   ├── __init__.py
@@ -964,11 +982,12 @@ async def main():
             header=True
         ))
 
-        # 调用代码编辑器模块，传入输出通道
+        # 调用代码编辑器模块，指定使用代码+多模态标签组，自动选择最优模型
         result = await app['code_editor'](
             code_content=open("app.py").read(),
-            instruction="添加错误处理逻辑",
+            instruction="参考截图添加错误处理逻辑",
             references=[{"filename": "utils.py", "content": open("utils.py").read()}],
+            _model_name=["code", "multimodal"],
             _output_channel=output_channel
         )
         result.raise_for_status()
@@ -1002,7 +1021,8 @@ async def process_ticket(app_factory, ticket):
     app = app_factory()
     result = await app['ticket_classifier'](
         ticket_content=ticket['content'],
-        ticket_type=ticket['type']
+        ticket_type=ticket['type'],
+        _model_name=["low_cost", "fast"] # 使用低成本+高速模型组
     )
     result.raise_for_status()
     return {
@@ -1248,14 +1268,17 @@ aitoolman 微服务架构适用于以下场景：
 2. **资源集中管理**：统一管理 API 密钥、模型配额和访问控制
 3. **高可用部署**：通过负载均衡和故障转移确保服务稳定性
 4. **审计与监控**：集中记录所有 LLM 调用日志和性能指标
-5. **安全隔离**：敏感 API 密钥不暴露给客户端应用
+5. **热更新运维**：无需重启服务即可调整模型配置、路由规则、启停模型
+6. **安全隔离**：敏感 API 密钥不暴露给客户端应用
 
 ### 9.2 功能特性
 - **ZeroMQ 通信**：高性能、低延迟的进程间通信
-- **认证授权**：支持令牌认证，确保接口安全
+- **认证授权**：支持普通接口令牌和管理权限令牌两级认证，确保接口安全
 - **请求队列**：智能调度，避免超额请求
+- **模型路由**：自动按配置中的自定义标签选择最优模型，支持Token超限过滤
 - **实时监控**：通过 PUB 接口发布审计日志
 - **客户端管理**：支持请求取消、批量取消等操作
+- **热更新能力**：运行时修改配置、模型状态、标签规则，无需重启服务
 
 ### 9.3 使用方法
 
@@ -1283,16 +1306,16 @@ client = LLMZmqClient(
 
 命令行客户端测试：
 ```bash
-# 交互式测试
+# 交互式测试，指定单个模型标签
 python3 -m aitoolman client \
-  -r tcp://localhost:5555 \
-  -m gpt-4 \
+  -z tcp://localhost:5555 \
+  -m fast \
   -a your-auth-token
 
-# 指定模型别名
+# 指定多个标签，自动路由到匹配的最优模型
 python3 -m aitoolman client \
-  -r tcp://localhost:5555 \
-  -m Creative-Model \
+  -z tcp://localhost:5555 \
+  -m code -m multimodal \
   -a your-auth-token
 ```
 
@@ -1312,6 +1335,25 @@ python3 -m aitoolman monitor \
 - Token 使用情况
 - 完成原因和错误信息
 - 自定义审计事件
+
+#### 9.3.5 运维管理
+使用`manage`命令可对远程服务进行热运维，无需重启服务：
+```bash
+# 查看所有可用模型
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token list_models
+
+# 按标签过滤可用模型
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token list_models --tag code
+
+# 禁用指定模型
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token change_api_status --model doubao-mini --disable
+
+# 启用指定模型
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token change_api_status --model doubao-mini --enable
+
+# 热更新全量配置
+python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token update_config -c new_config.toml
+```
 
 ## 10. 最佳实践
 
@@ -1338,6 +1380,7 @@ python3 -m aitoolman monitor \
 - **模板变量**：使用 `{{ variable }}` 和其他 Jinja2 模板语法
 - **上下文控制**：尽量少用上下文消息，优先优化提示词质量
 - **工具描述**：为工具提供清晰、具体的描述和参数说明；不提供无用工具
+- **标签分组**：根据业务场景将模型分组为不同标签，业务代码使用标签而非具体模型名，便于后续统一调整模型
 
 ### 10.3 错误处理
 ```python
@@ -1345,8 +1388,11 @@ try:
     result = await app['module'](...)
     result.raise_for_status()  # 检查完成状态
     processed_data = result.data
+except LLMNoAvailableModelError as e:
+    # 无匹配可用模型：调整标签或扩容模型资源
+    pass
 except LLMLengthLimitError as e:
-    # 处理长度限制：分段处理或换模型
+    # 处理长度限制：分段处理或换大模型
     pass
 except LLMApiRequestError as e:
     # API 错误：重试或直接报错
@@ -1363,6 +1409,7 @@ except LLMResponseFormatError as e:
 - **资源管理**：使用 `ResourceManager` 避免超额请求
 - **缓存策略**：对重复查询实现结果缓存
 - **嵌套任务**：多层嵌套任务场景下使用 `release_worker()` 释放配额，避免死锁，提升并发利用率
+- **模型路由**：根据任务特性选择合适的标签组合，平衡成本、速度和效果
 
 ### 10.5 调试技巧
 - **通道监听**：创建自定义Channel并传入请求，使用 `print_channel_output` 实时查看 LLM 输出
@@ -1370,3 +1417,4 @@ except LLMResponseFormatError as e:
 - **逐步执行**：复杂工作流可先测试单个任务
 - **提供商日志**：启用 `logging.DEBUG` 查看原始 API 交互
 - **单元测试**：使用 `MockLLMClient` 模拟LLM返回，无需调用外部服务即可验证业务逻辑
+- **模型解析验证**：使用`resolve_model`接口验证标签匹配的实际模型，调试路由规则

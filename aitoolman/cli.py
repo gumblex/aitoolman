@@ -48,7 +48,9 @@ def subparser_client(subparsers):
 
     subp.add_argument(
         '-a', '--auth', help='ZeroMQ ROUTER auth token')
-    subp.add_argument('-m', '--model', required=True, help='Model name to use')
+    subp.add_argument(
+        '-m', '--model', required=True, action='append',
+        help='Model name/tag to use, can specify multiple for model routing')
 
     # Inputs
     subp.add_argument(
@@ -85,26 +87,26 @@ def subparser_client(subparsers):
 def subparser_code_edit(subparsers):
     subp = subparsers.add_parser(
         'code-edit',
-        description="LLM代码修改工具 - 使用AI助手修改代码文件",
+        description="LLM Code Editing Tool - Modify code files with AI assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-使用示例:
-# 单文件处理
+Usage Examples:
+# Single file processing
 python3 -m aitoolman code-edit -i input.py -o output.py --llm-config llm_provider.toml
 
-# 多文件处理（输出到目录）
+# Multi-file processing (output to directory)
 python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir --llm-config llm_provider.toml
 
-# 使用参考文件
+# Use reference files
 python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py --llm-config llm_provider.toml
 
-# 批处理模式（不实时显示思考过程）
+# Batch mode (no real-time reasoning display)
 python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 --llm-config llm_provider.toml
 
-# 覆盖现有文件
+# Overwrite existing files
 python3 -m aitoolman code-edit -i input.py -o input.py --overwrite --llm-config llm_provider.toml
 
-# 使用远程ZMQ服务
+# Use remote ZMQ service
 python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --auth TOKEN --model Code-Model  
         """.strip()
     )
@@ -113,64 +115,64 @@ python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://loc
         help="Print debug log"
     )
 
-    # LLM客户端配置（二选一）
+    # LLM client configuration (one required)
     group = subp.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "-c", "--config", type=str,
-        help="LLM客户端配置文件路径（TOML格式）"
+        help="Path to LLM client configuration file (TOML format)"
     )
     group.add_argument(
         "-z", "--zmq-endpoint", type=str,
-        help="ZeroMQ服务端点（如: tcp://localhost:5555）"
+        help="ZeroMQ service endpoint (e.g., tcp://localhost:5555)"
     )
     subp.add_argument(
         "-a", "--auth", type=str,
-        help="ZeroMQ认证令牌"
+        help="ZeroMQ authentication token"
     )
     subp.add_argument(
-        "-m", "--model", type=str, required=True,
-        help="指定模型名称（如: Kimi-K2, DeepSeek-v3）"
+        "-m", "--model", type=str, required=True, action='append',
+        help="Model name/tag to use, can specify multiple for model routing"
     )
 
     subp.add_argument(
         "-r", "--reference", type=str, nargs='+', default=[],
-        help="参考文件路径（提供上下文，可多个）"
+        help="Reference file paths (provide context, supports multiple files)"
     )
     subp.add_argument(
         "-i", "--input", type=str, nargs='+', default=[],
-        help="输入文件路径（支持多个文件，如：-i file.py file2.py）"
+        help="Input file paths (supports multiple files, e.g., -i file.py file2.py)"
     )
     subp.add_argument(
         "-o", "--output", type=str, required=False,
-        help="输出文件路径：可以是单个文件名（单文件）或目录路径（多文件）"
+        help="Output path: can be a single filename (for single output) or directory path (for multiple outputs)"
     )
     subp.add_argument(
         "-O", "--raw-output", type=str, required=False,
-        help="原始输出内容保存文件名"
+        help="File path to save raw LLM output content"
     )
     subp.add_argument(
         "-p", "--prompt", type=str, required=False,
-        help="提示词文件路径"
+        help="Path to custom prompt file"
     )
     subp.add_argument(
         '-M', '--media', nargs='*', type=str,
-        help='图片/视频文件路径（多模态）'
+        help='Image/video file paths (for multimodal models)'
     )
     subp.add_argument(
         '-L', '--size-limit', type=int, default=204800,
-        help='文件大小限制（字节），默认 200KB，设为0则不限'
+        help='File size limit in bytes, default 200KB, set to 0 to disable limit'
     )
     subp.add_argument(
         "--batch", action="store_true",
-        help="批处理模式（不实时显示思考过程）"
+        help="Batch mode (disable real-time reasoning output)"
     )
     subp.add_argument(
         "--no-system", action="store_true",
-        help="不使用系统提示词"
+        help="Do not add built-in system prompt"
     )
     subp.add_argument(
         "--overwrite", action="store_true",
-        help="覆盖现有文件（默认情况下会生成.new后缀的文件）"
+        help="Overwrite existing files (default: generate new files with .new suffix)"
     )
     return subp
 
@@ -191,6 +193,35 @@ def subparser_monitor(subparsers):
     subp.add_argument(
         '--db-path',
         help='SQLite database path for DB monitor')
+    return subp
+
+
+def subparser_manage(subparsers):
+    subp = subparsers.add_parser('manage', description='Manage LLM ZMQ Server')
+    subp.add_argument(
+        "-v", "--verbose", action='count', default=0,
+        help="Print debug log"
+    )
+    subp.add_argument('-z', '--zmq-endpoint', type=str, required=True, help='ZeroMQ ROUTER endpoint')
+    subp.add_argument('-a', '--auth', type=str, help='Management auth token')
+
+    manage_subparsers = subp.add_subparsers(dest='manage_action', required=True, help='Management action')
+
+    # list_models subcommand
+    list_p = manage_subparsers.add_parser('list_models', help='List available models')
+    list_p.add_argument('-t', '--tag', type=str, help='Filter models by tag')
+
+    # update_config subcommand
+    update_p = manage_subparsers.add_parser('update_config', help='Update full server config')
+    update_p.add_argument('-c', '--config', type=str, required=True, help='Path to new TOML config file')
+
+    # change_api_status subcommand
+    status_p = manage_subparsers.add_parser('change_api_status', help='Enable/disable a model')
+    status_p.add_argument('-m', '--model', type=str, required=True, help='Model name to change status')
+    status_group = status_p.add_mutually_exclusive_group(required=True)
+    status_group.add_argument('--enable', action='store_true', help='Enable the model')
+    status_group.add_argument('--disable', action='store_true', help='Disable the model')
+
     return subp
 
 
@@ -245,21 +276,28 @@ async def _run_client_session(args):
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON for --body: " + args.body)
 
-        # 5. Construct LLMDirectRequest
+        # 5. Construct messages
+        messages = [Message(
+            role="user",
+            content=prompt_text,
+            media_content=media_content_list if media_content_list else None
+        )]
+
+        # Resolve actual model
+        actual_model = await client.resolve_model(args.model, messages=messages)
+        logger.info(f"Resolved actual model: {actual_model}")
+
+        # 6. Construct LLMDirectRequest
         output_channel = _channel.Channel()
         direct_request = LLMDirectRequest(
-            model_name=args.model,
-            messages=[Message(
-                role="user",
-                content=prompt_text,
-                media_content=media_content_list if media_content_list else None
-            )],
+            model_name=actual_model,
+            messages=messages,
             options=options,
             stream=not args.batch,
             output_channel=output_channel,
         )
 
-        # 6. Handle Output
+        # 7. Handle Output
         output_task = None
 
         if not args.no_think:
@@ -272,10 +310,10 @@ async def _run_client_session(args):
             output_task = asyncio.create_task(_channel.print_channel_output(
                 output_channel, {'response': 'response'}))
 
-        # 7. Execute Request
+        # 8. Execute Request
         response = await app.call(direct_request)
 
-        # 8. Cleanup
+        # 9. Cleanup
         if output_task:
             await output_task
         response.raise_for_status()
@@ -303,12 +341,12 @@ async def _run_code_edit_session(args):
         raise ValueError("Either --config or --zmq-endpoint must be provided.")
 
     async with client:
-        # 初始化应用
+        # Initialize application
         app_config = util.load_config_str(code_editor.APP_CONFIG)
         llm_app = _app.LLMApplication(client, app_config)
         llm_app.add_processor("extract_code_blocks", code_editor.extract_code_blocks)
 
-        # 处理文件
+        # Process files
         result = await code_editor.process_files(
             llm_app=llm_app,
             model_name=args.model,
@@ -325,6 +363,28 @@ async def _run_code_edit_session(args):
         if args.raw_output:
             with open(args.raw_output, 'w', encoding='utf-8') as f:
                 f.write(result.text)
+
+
+async def _run_manage_session(args):
+    from .zmqclient import LLMZmqClient
+    client = LLMZmqClient(args.zmq_endpoint, args.auth)
+    async with client:
+        if args.manage_action == 'list_models':
+            models = await client.list_models(tag=args.tag)
+            print(f"Available models (tag={args.tag or '(all)'}):")
+            for model in models:
+                print(f"\n- Name: {model.name}")
+                print(f"  API Type: {model.api_type}")
+                print(f"  Parallel: {model.parallel}")
+                print(f"  Tags: {', '.join(f'{k}({v:.2f})' for k, v in model.tags.items())}")
+        elif args.manage_action == 'update_config':
+            new_config = util.load_config(args.config)
+            await client.update_config(new_config)
+            logger.info("Config updated successfully")
+        elif args.manage_action == 'change_api_status':
+            enabled = args.enable
+            await client.change_api_status(args.model, enabled)
+            logger.info(f"Model {args.model} {'enabled' if enabled else 'disabled'} successfully")
 
 
 def run_server(args):
@@ -355,6 +415,10 @@ def run_monitor(args):
     monitor.start()
 
 
+def run_manage(args):
+    asyncio.run(_run_manage_session(args))
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -367,6 +431,7 @@ def main():
     subparser_client(subparsers)
     subparser_code_edit(subparsers)
     subparser_monitor(subparsers)
+    subparser_manage(subparsers)
 
     args = parser.parse_args()
     if args.verbose:

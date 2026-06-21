@@ -4,13 +4,13 @@ import asyncio
 import logging
 import sqlite3
 import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 import zmq
 import zmq.asyncio
 
 from . import util
-from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, ToolCall, Message
+from .model import LLMProviderRequest, LLMProviderResponse, ToolCall, Message, ModelInfo, LLMPermissionDeniedError
 from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
 
@@ -27,7 +27,7 @@ class LLMZmqClient(LLMClient):
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
         self.listener_task: Optional[asyncio.Task] = None
         self.connected = False
-        self.auth_future: Optional[asyncio.Future] = None  # 认证等待Future
+        self._rpc_futures: Dict[str, asyncio.Future] = {}
 
     async def connect(self):
         """连接服务器并启动监听"""
@@ -36,9 +36,6 @@ class LLMZmqClient(LLMClient):
         self.socket.connect(self.router_endpoint)
         self.listener_task = asyncio.create_task(self.listen_responses())
         self.connected = True
-
-        if self.auth_token:
-            await self.authenticate()
         logger.info(f"Connected to {self.router_endpoint}")
 
     async def initialize(self):
@@ -51,6 +48,11 @@ class LLMZmqClient(LLMClient):
         # 取消所有活跃请求
         for request_id in list(self.active_requests.keys()):
             await self.cancel(request_id)
+        # 清理RPC futures
+        for future in self._rpc_futures.values():
+            if not future.done():
+                future.cancel()
+        self._rpc_futures.clear()
         # 停止监听
         if self.listener_task:
             self.listener_task.cancel()
@@ -77,8 +79,8 @@ class LLMZmqClient(LLMClient):
                 msg_type = json_data.get('type')
                 request_id = json_data.get('request_id')
 
-                if msg_type == 'auth_response':
-                    await self.handle_auth_response(request_id, json_data.get('success', False))
+                if msg_type == 'rpc_response':
+                    self.handle_rpc_response(request_id, json_data)
                     continue
                 elif msg_type == 'error':
                     logger.error(f"Server error: {json_data.get('error')}")
@@ -101,36 +103,6 @@ class LLMZmqClient(LLMClient):
                 break
             except Exception as e:
                 logger.exception("Error in listener task")
-
-    async def authenticate(self):
-        """发送认证消息并等待响应"""
-        request_id = util.get_id()
-        self.auth_future = asyncio.Future()
-
-        auth_msg = {
-            'type': 'auth',
-            'request_id': request_id,
-            'token': self.auth_token
-        }
-        await self.socket.send_multipart([
-            b'',
-            util.encode_message(auth_msg)
-        ])
-
-        # 等待认证响应（超时1秒）
-        try:
-            await asyncio.wait_for(self.auth_future, timeout=1)
-            if self.auth_future.result():
-                logger.info("Authentication successful")
-            else:
-                raise RuntimeError("Authentication failed")
-        except asyncio.TimeoutError:
-            raise RuntimeError("Authentication timeout")
-
-    async def handle_auth_response(self, request_id: str, success: bool):
-        """处理认证响应"""
-        if self.auth_future and not self.auth_future.done():
-            self.auth_future.set_result(success)
 
     async def handle_channel_write(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理channel写入消息"""
@@ -182,7 +154,7 @@ class LLMZmqClient(LLMClient):
             self,
             model_name: str,
             messages: List[Message],
-            tools: Dict[str, Dict[str, Any]] = None,
+            tools: Optional[Dict[str, Dict[str, Any]]] = None,
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
@@ -213,6 +185,7 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
             util.encode_message(request_msg)
         ])
         return request
@@ -235,6 +208,7 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
             util.encode_message(cancel_msg)
         ])
         await request.output_channel.write_complete()
@@ -251,6 +225,7 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
             util.encode_message(cancel_msg)
         ])
         for req in self.active_requests.values():
@@ -274,8 +249,76 @@ class LLMZmqClient(LLMClient):
         }
         await self.socket.send_multipart([
             b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
             util.encode_message(audit_msg)
         ])
+
+    async def _send_rpc(self, method: str, kwargs: Dict[str, Any]) -> Any:
+        """发送RPC请求并等待响应"""
+        if not self.connected:
+            raise RuntimeError("Client not connected")
+
+        request_id = util.get_id()
+        future = asyncio.Future()
+        self._rpc_futures[request_id] = future
+
+        rpc_msg = {
+            'type': 'rpc',
+            'request_id': request_id,
+            'method': method,
+            'kwargs': kwargs
+        }
+        await self.socket.send_multipart([
+            b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
+            util.encode_message(rpc_msg)
+        ])
+
+        try:
+            return await asyncio.wait_for(future, timeout=10.0)
+        except asyncio.TimeoutError:
+            self._rpc_futures.pop(request_id, None)
+            raise RuntimeError("RPC request timeout")
+
+    def handle_rpc_response(self, request_id: str, json_data: Dict[str, Any]):
+        """处理RPC响应"""
+        future = self._rpc_futures.pop(request_id, None)
+        if future and not future.done():
+            if 'error_type' in json_data:
+                error_type = json_data['error_type']
+                error_msg = json_data['error_text']
+                if error_type == 'LLMPermissionDeniedError':
+                    future.set_exception(LLMPermissionDeniedError(error_msg))
+                else:
+                    future.set_exception(RuntimeError(error_msg))
+            else:
+                future.set_result(json_data.get('result'))
+
+    async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
+        """异步列出匹配的可用模型"""
+        result = await self._send_rpc('list_models', {'tag': tag})
+        return [ModelInfo(**info) for info in result]
+
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str:
+        """异步解析模型"""
+        if isinstance(tags, str):
+            tags = [tags]
+        kwargs = {'tags': tags}
+        if messages is not None:
+            kwargs['messages'] = [m.to_dict() for m in messages]
+        return await self._send_rpc('resolve_model', kwargs)
+
+    async def update_config(self, new_config: Dict[str, Any]):
+        await self._send_rpc('update_config', {'new_config': new_config})
+
+    async def update_api_config(self, model_name: str, model_config: Dict[str, Any]):
+        await self._send_rpc('update_api_config', {'model_name': model_name, 'model_config': model_config})
+
+    async def change_api_status(self, model_name: str, enabled: bool):
+        await self._send_rpc('change_api_status', {'model_name': model_name, 'enabled': enabled})
+
+    async def update_model_tag(self, tag: str, models: List[str]):
+        await self._send_rpc('update_model_tag', {'tag': tag, 'models': models})
 
 
 class LLMMonitor:

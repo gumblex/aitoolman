@@ -1,14 +1,17 @@
 import abc
 import json
+import math
 import time
 import asyncio
 import logging
 import typing
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Set
 
 from . import postprocess, util
+from .util import calculate_rank_weights, estimate_text_tokens
 from .channel import ChannelEvent
-from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall
+from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall, ModelInfo, LLMNoAvailableModelError
+
 from .resmanager import ResourceManager
 
 import httpx
@@ -325,7 +328,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             response.finish_reason = choice["finish_reason"]
 
         # 7. 增量累积工具调用内容
-        for tool_delta in delta.get("tool_calls", []):
+        for tool_delta in delta.get("tool_calls") or ():
             tool_id = tool_delta.get("id")
             if tool_id:
                 tool_item = tool_delta.copy()
@@ -691,22 +694,10 @@ class LLMProviderManager:
         "openai": OpenAICompatibleFormat,
         "anthropic": AnthropicFormat,
     }
+    default_rank_adjust_ratio: float = 0.25
 
     def __init__(self, config: Dict[str, Any]):
-        logger = logging.getLogger(__name__ + '.' + self.__class__.__name__)
-
-        self.default_config = config['default']
-        self.api_config = config['api']
-        self.model_alias = config.get('model_alias', {})
-        for key in self.api_config.keys():
-            if key not in self.model_alias:
-                self.model_alias[key] = key
-
-        self.timeout = self.default_config['timeout']
-        self.max_retries = self.default_config['max_retries']
-        self.default_parallel = self.default_config['parallel']
-        self.retry_duration = self.default_config.get('retry_duration', 0.5)
-        self.retry_factor = self.default_config.get('retry_factor', 1.5)
+        self._apply_config(config)
 
         self.http_client = httpx.AsyncClient(
             timeout=self.timeout, http2=True,
@@ -719,12 +710,187 @@ class LLMProviderManager:
         # 活跃请求列表（用于取消操作）
         self.active_requests: Dict[str, RequestTask] = {}
 
+    def _apply_config(self, config: Dict[str, Any]):
+        """应用全量配置（为初始化和热更新提供统一逻辑）"""
+        self.default_config = config['default']
+        self.api_config = config['api']
+        self.disabled_models: Set[str] = set()
+
+        # 合并 model_tag 和 model_alias
+        self.model_tag = config.get('model_tag', {})
+        for alias_name, model_name in config.get('model_alias', {}).items():
+            if alias_name not in self.model_tag:
+                self.model_tag[alias_name] = [model_name]
+            elif model_name not in self.model_tag[alias_name]:
+                self.model_tag[alias_name].append(model_name)
+
+        # 校验 model_tag 中的模型名
+        for tag, models in self.model_tag.items():
+            for m in models:
+                if m not in self.api_config:
+                    raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
+
+        # 解析默认值
+        default_max_input_tokens = self.default_config.get('max_input_tokens')
+        default_bytes_per_token = self.default_config.get('bytes_per_token', 4.0)
+
+        # 为每个模型补全新增字段
+        for model_name, model_config in self.api_config.items():
+            model_config.setdefault('max_input_tokens', default_max_input_tokens)
+            model_config.setdefault('bytes_per_token', default_bytes_per_token)
+            if not model_config.get('enable', True):
+                self.disabled_models.add(model_name)
+
+        self.rank_adjust_ratio = self.default_config.get(
+            'rank_adjust_ratio', LLMProviderManager.default_rank_adjust_ratio)
+
+        # 预计算标签权重
+        self.model_tag_weights: Dict[str, Dict[str, float]] = {}
+        self._calculate_all_tag_weights()
+
+        self.timeout = self.default_config['timeout']
+        self.max_retries = self.default_config['max_retries']
+        self.default_parallel = self.default_config['parallel']
+        self.retry_duration = self.default_config.get('retry_duration', 0.5)
+        self.retry_factor = self.default_config.get('retry_factor', 1.5)
+
     def _parse_model_capacities(self) -> Dict[str, int]:
         """从配置中解析各模型的并行处理能力"""
         capacities = {}
         for model_name, model_config in self.api_config.items():
             capacities[model_name] = model_config.get("parallel", self.default_parallel)
         return capacities
+
+    def _calculate_all_tag_weights(self):
+        """预计算所有模型-标签的权重"""
+        self.model_tag_weights = {
+            tag: calculate_rank_weights(models, self.rank_adjust_ratio)
+            for tag, models in self.model_tag.items()
+        }
+
+    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None) -> str:
+        """解析出最终使用的真实模型名
+
+        Args:
+            input_tags: 标签/模型名/别名列表
+            messages: 可选消息列表，用于Token数估算过滤
+
+        Returns:
+            真实模型名
+
+        Raises:
+            LLMNoAvailableModelError: 无可用模型
+        """
+        if not input_tags:
+            raise LLMNoAvailableModelError("No tags provided.")
+        # 1. 精确匹配优先
+        for tag in input_tags:
+            if tag in self.api_config and tag not in self.disabled_models:
+                return tag
+
+        # 2. 标签匹配与权重计算
+        tag_matched: Dict[str, Dict[str, float]] = {}
+        for tag in input_tags:
+            if tag in self.model_tag_weights:
+                tag_matched[tag] = self.model_tag_weights[tag]
+            elif tag in self.api_config:
+                tag_matched[tag] = {tag: 1.0}
+
+        if not tag_matched:
+            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
+
+        # 取交集
+        all_model_sets = [set(weights.keys()) for weights in tag_matched.values()]
+        if not all_model_sets:
+            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
+
+        common_models = all_model_sets[0]
+        for s in all_model_sets[1:]:
+            common_models = common_models & s
+
+        # 过滤禁用模型
+        common_models = common_models - self.disabled_models
+
+        if not common_models:
+            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
+
+        # 3. Token限制过滤
+        if messages is not None:
+            for model_name in list(common_models):
+                model_config = self.api_config.get(model_name, {})
+                max_input_tokens = model_config.get('max_input_tokens')
+                if max_input_tokens is not None:
+                    bytes_per_token = model_config.get('bytes_per_token', self.rank_adjust_ratio)
+                    estimated_tokens = estimate_text_tokens(messages, bytes_per_token)
+                    if estimated_tokens > max_input_tokens:
+                        common_models.discard(model_name)
+
+            if not common_models:
+                raise LLMNoAvailableModelError(
+                    f"No available model within token limit for tags: {input_tags}")
+
+        # 4. 权重求和取最高
+        model_total_weights: Dict[str, float] = {}
+        for model_name in common_models:
+            model_total_weights[model_name] = math.fsum(
+                math.log(tag_weights.get(model_name, 1e-8))
+                for tag_weights in tag_matched.values()
+            )
+
+        best_model = max(common_models, key=lambda m: (
+            model_total_weights[m],
+            self.api_config[m].get('parallel', self.default_parallel)
+        ))
+        return best_model
+
+    def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
+        """列出匹配的可用模型
+
+        Args:
+            tag: 可选标签/模型名/别名，无tag返回所有可用模型
+
+        Returns:
+            ModelInfo列表，按权重降序排列
+        """
+        if tag is None:
+            models = []
+            for name, config in self.api_config.items():
+                if name in self.disabled_models:
+                    continue
+                models.append(self._make_model_info(name))
+            return models
+
+        if tag in self.api_config and tag not in self.disabled_models:
+            return [self._make_model_info(tag)]
+
+        if tag in self.model_tag_weights:
+            matched_models = [m for m in self.model_tag_weights[tag].keys()
+                             if m not in self.disabled_models]
+            matched_models.sort(
+                key=lambda m: self.model_tag_weights[tag][m],
+                reverse=True
+            )
+            return [self._make_model_info(m) for m in matched_models]
+        return []
+
+    def _make_model_info(self, model_name: str) -> ModelInfo:
+        """构造ModelInfo对象"""
+        config = self.api_config[model_name]
+        api_type = config.get("type", self.default_config.get('api_type', 'openai'))
+        body_options = config.get('body_options', self.default_config.get('body_options') or {})
+
+        tags = {}
+        for tag_name, tag_weights in self.model_tag_weights.items():
+            if model_name in tag_weights:
+                tags[tag_name] = tag_weights[model_name]
+
+        return ModelInfo(
+            name=model_name,
+            parallel=config.get('parallel', self.default_parallel),
+            api_type=api_type,
+            body_options=body_options,
+            tags=tags,
+        )
 
     async def initialize(self):
         """初始化ZeroMQ sockets和HTTP客户端"""
@@ -915,9 +1081,9 @@ class LLMProviderManager:
         """核心API调用入口，返回完整的LLM响应对象"""
 
         # 校验模型配置
-        real_model_name = self.model_alias.get(request.model_name)
+        real_model_name = request.model_name
         model_config = self.api_config.get(real_model_name, {}).copy()
-        if not real_model_name or not model_config:
+        if not model_config:
             await self._end_request_with_error(
                 request, response,
                 f"Model not found: {request.model_name}",
@@ -1071,6 +1237,51 @@ class LLMProviderManager:
         logger.info(
             "[Client: %s, Context: %s] Cancelled %d/%d requests",
             client_id, context_id, cancelled_count, total_count)
+
+    def update_config(self, new_config: Dict[str, Any]):
+        """热更新全量配置，不中断现有请求"""
+        self._apply_config(new_config)
+        # 替换 resource_manager
+        self.resource_manager = ResourceManager(self._parse_model_capacities())
+
+    def update_api_config(self, model_name: str, model_config: Dict[str, Any]):
+        """更新单个模型配置"""
+        if model_name not in self.api_config:
+            self.api_config[model_name] = model_config.copy()
+            default_max_input_tokens = self.default_config.get('max_input_tokens')
+            default_bytes_per_token = self.default_config.get('bytes_per_token', 4.0)
+            model_config.setdefault('max_input_tokens', default_max_input_tokens)
+            model_config.setdefault('bytes_per_token', default_bytes_per_token)
+        else:
+            self.api_config[model_name] = model_config.copy()
+
+        # 更新 disabled_models
+        if not model_config.get('enable', True):
+            self.disabled_models.add(model_name)
+        else:
+            self.disabled_models.discard(model_name)
+
+        # 重新计算权重
+        self._calculate_all_tag_weights()
+        # 更新 resource_manager 的容量
+        self.resource_manager = ResourceManager(self._parse_model_capacities())
+
+    def change_api_status(self, model_name: str, enabled: bool):
+        """启用/禁用模型"""
+        if model_name not in self.api_config:
+            raise ValueError(f"Model '{model_name}' not found")
+        if enabled:
+            self.disabled_models.discard(model_name)
+        else:
+            self.disabled_models.add(model_name)
+
+    def update_model_tag(self, tag: str, models: List[str]):
+        """更新 model_tag"""
+        for m in models:
+            if m not in self.api_config:
+                raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
+        self.model_tag[tag] = models
+        self._calculate_all_tag_weights()
 
     async def cleanup(self):
         """清理资源"""
