@@ -83,7 +83,7 @@ class LLMClient(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str:
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]:
         """解析出最终使用的真实模型名
 
         Args:
@@ -157,7 +157,7 @@ class LLMLocalClient(LLMClient):
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
         return self.provider_manager.list_models(tag)
 
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str:
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]:
         if not tags:
             raise LLMNoAvailableModelError("No tags provided.")
         if isinstance(tags, str):

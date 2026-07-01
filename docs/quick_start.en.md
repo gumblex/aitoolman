@@ -118,6 +118,9 @@ class LLMModuleRequest(typing.NamedTuple):
     module_name: str                    # Module name
     template_params: Dict[str, Any]     # Template parameters
     model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, override module default configuration
+    # Model routing rank. If the value exceeds the total number of available models,
+    # perform modulo operation on the value with the count of available models.
+    model_rank: int = 0
     context_messages: List[Message] = []  # Context messages
     media_content: Optional[List[MediaContent]] = None  # Multimedia content
 
@@ -630,7 +633,8 @@ class LLMClient(abc.ABC):
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str: ... # Resolve optimal model
+    # Resolve actual candidate models
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]: ...
 ```
 
 #### 4.2.2 Local Client
@@ -711,8 +715,9 @@ class LLMProviderManager:
 
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
-    
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> str: ... # Route to select optimal model
+
+    # Select candidate models
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
 ```
 

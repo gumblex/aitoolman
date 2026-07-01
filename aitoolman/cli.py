@@ -209,7 +209,8 @@ def subparser_manage(subparsers):
 
     # list_models subcommand
     list_p = manage_subparsers.add_parser('list_models', help='List available models')
-    list_p.add_argument('-t', '--tag', type=str, help='Filter models by tag')
+    list_p.add_argument('-t', '--tag', type=str, action='append',
+                        help='Filter models by tag, can specify multiple')
 
     # update_config subcommand
     update_p = manage_subparsers.add_parser('update_config', help='Update full server config')
@@ -284,8 +285,12 @@ async def _run_client_session(args):
         )]
 
         # Resolve actual model
-        actual_model = await client.resolve_model(args.model, messages=messages)
-        logger.info(f"Resolved actual model: {actual_model}")
+        model_names = await client.resolve_model(args.model, messages=messages)
+        actual_model = model_names[0]
+        logger.info("Resolved model from candidates: %s", ', '.join(
+            (f'[{m}]' if i == 0 else m)
+            for i, m in enumerate(model_names)
+        ))
 
         # 6. Construct LLMDirectRequest
         output_channel = _channel.Channel()
@@ -371,7 +376,7 @@ async def _run_manage_session(args):
     async with client:
         if args.manage_action == 'list_models':
             models = await client.list_models(tag=args.tag)
-            print(f"Available models (tag={args.tag or '(all)'}):")
+            print(f"Available models of tag: {args.tag or '(all)'}")
             for model in models:
                 print(f"\n- Name: {model.name}")
                 print(f"  API Type: {model.api_type}")

@@ -299,7 +299,7 @@ class LLMZmqClient(LLMClient):
         result = await self._send_rpc('list_models', {'tag': tag})
         return [ModelInfo(**info) for info in result]
 
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str:
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]:
         """异步解析模型"""
         if isinstance(tags, str):
             tags = [tags]

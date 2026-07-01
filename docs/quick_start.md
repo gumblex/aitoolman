@@ -118,6 +118,7 @@ class LLMModuleRequest(typing.NamedTuple):
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
     model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，覆盖模块默认配置
+    model_rank: int = 0   # 模型路由排名，如超过可用个数用个数取模
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
 
@@ -635,7 +636,8 @@ class LLMClient(abc.ABC):
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> str: ... # 解析最优模型
+    # 解析实际候选模型
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]: ...
 ```
 
 #### 4.2.2 本地客户端
@@ -716,8 +718,9 @@ class LLMProviderManager:
 
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
-    
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> str: ... # 路由选择最优模型
+
+    # 解析候选模型
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
 ```
 

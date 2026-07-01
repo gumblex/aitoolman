@@ -233,7 +233,8 @@ class LLMApplication:
         model_tags = (module_request.model_name or config.model)
         if not model_tags:
             raise LLMNoAvailableModelError("No model name or tags provided.")
-        model_name = await self.client.resolve_model(model_tags, messages)
+        model_names = await self.client.resolve_model(model_tags, messages)
+        model_name = model_names[module_request.model_rank % len(model_names)]
         return LLMDirectRequest(
             model_name=model_name,
             messages=messages,

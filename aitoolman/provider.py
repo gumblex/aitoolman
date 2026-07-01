@@ -5,7 +5,7 @@ import time
 import asyncio
 import logging
 import typing
-from typing import Optional, Dict, Any, List, Callable, Set
+from typing import Optional, Dict, Any, List, Callable, Set, Union
 
 from . import postprocess, util
 from .util import calculate_rank_weights, estimate_text_tokens
@@ -768,7 +768,7 @@ class LLMProviderManager:
             for tag, models in self.model_tag.items()
         }
 
-    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None) -> str:
+    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None) -> List[str]:
         """解析出最终使用的真实模型名
 
         Args:
@@ -786,7 +786,7 @@ class LLMProviderManager:
         # 1. 精确匹配优先
         for tag in input_tags:
             if tag in self.api_config and tag not in self.disabled_models:
-                return tag
+                return [tag]
 
         # 2. 标签匹配与权重计算
         tag_matched: Dict[str, Dict[str, float]] = {}
@@ -837,22 +837,22 @@ class LLMProviderManager:
                 for tag_weights in tag_matched.values()
             )
 
-        best_model = max(common_models, key=lambda m: (
+        best_models = sorted(common_models, key=lambda m: (
             model_total_weights[m],
             self.api_config[m].get('parallel', self.default_parallel)
-        ))
-        return best_model
+        ), reverse=True)
+        return best_models
 
-    def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
+    def list_models(self, tags: Union[str, List[str], None] = None) -> List[ModelInfo]:
         """列出匹配的可用模型
 
         Args:
-            tag: 可选标签/模型名/别名，无tag返回所有可用模型
+            tags: 可选标签/模型名/别名，无tag返回所有可用模型
 
         Returns:
             ModelInfo列表，按权重降序排列
         """
-        if tag is None:
+        if not tags:
             models = []
             for name, config in self.api_config.items():
                 if name in self.disabled_models:
@@ -860,18 +860,12 @@ class LLMProviderManager:
                 models.append(self._make_model_info(name))
             return models
 
-        if tag in self.api_config and tag not in self.disabled_models:
-            return [self._make_model_info(tag)]
-
-        if tag in self.model_tag_weights:
-            matched_models = [m for m in self.model_tag_weights[tag].keys()
-                             if m not in self.disabled_models]
-            matched_models.sort(
-                key=lambda m: self.model_tag_weights[tag][m],
-                reverse=True
-            )
-            return [self._make_model_info(m) for m in matched_models]
-        return []
+        if isinstance(tags, str):
+            input_tags = [tags]
+        else:
+            input_tags = tags
+        model_names = self.resolve_model(input_tags)
+        return list(map(self._make_model_info, model_names))
 
     def _make_model_info(self, model_name: str) -> ModelInfo:
         """构造ModelInfo对象"""

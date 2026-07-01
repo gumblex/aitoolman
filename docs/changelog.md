@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+### 新增
+- LLMModuleRequest 增加 model_rank 参数，选择第几个候选模型
+
+### 修改
+- resolve_model 均返回所有候选模型列表 `List[str]`
+
 ## 0.5.0
 
 ### 新增

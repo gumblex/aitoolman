@@ -367,6 +367,7 @@ class LLMModuleRequest(typing.NamedTuple):
     template_params: Dict[str, Any]
     # 模型名称或模型标签（多个取并集）
     model_name: Union[str, List[str], None] = None
+    model_rank: int = 0
     context_messages: List[Message] = []
     media_content: Optional[List[MediaContent]] = None
 

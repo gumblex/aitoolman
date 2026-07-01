@@ -175,14 +175,14 @@ class TestResolveModel(unittest.TestCase):
         """精确匹配优先，传入真实模型名直接返回"""
         manager = LLMProviderManager(make_test_config())
         result = manager.resolve_model(['model-a'])
-        self.assertEqual(result, 'model-a')
+        self.assertEqual(result, ['model-a'])
 
     def test_resolve_model_tag_match(self):
         """标签匹配，返回权重最高的模型"""
         manager = LLMProviderManager(make_test_config())
         result = manager.resolve_model(['fast'])
         # model-a is first in 'fast' tag, so it has highest weight
-        self.assertEqual(result, 'model-a')
+        self.assertEqual(result[0], 'model-a')
 
     def test_resolve_model_multiple_tags(self):
         """多标签交集匹配"""
@@ -190,7 +190,7 @@ class TestResolveModel(unittest.TestCase):
         # 'fast' has model-a, model-b; 'cheap' has model-b
         # intersection is model-b
         result = manager.resolve_model(['fast', 'cheap'])
-        self.assertEqual(result, 'model-b')
+        self.assertEqual(result[0], 'model-b')
 
     def test_resolve_model_disabled(self):
         """禁用模型不参与路由"""
@@ -208,7 +208,7 @@ class TestResolveModel(unittest.TestCase):
         # 'fast' tag has model-a (no limit) and model-b (1000 token limit)
         # model-b should be filtered out, leaving model-a
         result = manager.resolve_model(['fast'], messages)
-        self.assertEqual(result, 'model-a')
+        self.assertEqual(result[0], 'model-a')
 
     def test_resolve_model_no_available(self):
         """无可用模型抛出 LLMNoAvailableModelError"""
@@ -220,7 +220,7 @@ class TestResolveModel(unittest.TestCase):
         """原 model_alias 自动转为标签"""
         manager = LLMProviderManager(make_test_config())
         result = manager.resolve_model(['alias_a'])
-        self.assertEqual(result, 'model-a')
+        self.assertEqual(result[0], 'model-a')
 
 
 class TestListModels(unittest.TestCase):
@@ -294,7 +294,7 @@ class TestConfigUpdate(unittest.TestCase):
         manager.update_model_tag('fast', ['model-b', 'model-a'])
         result = manager.resolve_model(['fast'])
         # Now model-b is first, so it has highest weight
-        self.assertEqual(result, 'model-b')
+        self.assertEqual(result, ['model-b', 'model-a'])
 
 
 class TestCalculateTagWeights(unittest.TestCase):
