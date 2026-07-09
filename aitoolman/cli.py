@@ -211,10 +211,12 @@ def subparser_manage(subparsers):
     list_p = manage_subparsers.add_parser('list_models', help='List available models')
     list_p.add_argument('-t', '--tag', type=str, action='append',
                         help='Filter models by tag, can specify multiple')
+    list_p.add_argument('--json', action='store_true',
+                        help='Output JSON format')
 
     # update_config subcommand
     update_p = manage_subparsers.add_parser('update_config', help='Update full server config')
-    update_p.add_argument('-c', '--config', type=str, required=True, help='Path to new TOML config file')
+    update_p.add_argument('config', type=str, help='Path to new TOML config file')
 
     # change_api_status subcommand
     status_p = manage_subparsers.add_parser('change_api_status', help='Enable/disable a model')
@@ -376,12 +378,17 @@ async def _run_manage_session(args):
     async with client:
         if args.manage_action == 'list_models':
             models = await client.list_models(tag=args.tag)
-            print(f"Available models of tag: {args.tag or '(all)'}")
-            for model in models:
-                print(f"\n- Name: {model.name}")
-                print(f"  API Type: {model.api_type}")
-                print(f"  Parallel: {model.parallel}")
-                print(f"  Tags: {', '.join(f'{k}({v:.2f})' for k, v in model.tags.items())}")
+            if args.json:
+                print(json.dumps([m._asdict() for m in models], ensure_ascii=False, indent=1))
+            else:
+                print(f"Available models of tag: {args.tag or '(all)'}")
+                for model in models:
+                    print(f"\n- Name: {model.name}")
+                    print(f"  URL: {model.url}")
+                    print(f"  Model Name: {model.model}")
+                    print(f"  API Type: {model.api_type}")
+                    print(f"  Parallel: {model.parallel}")
+                    print(f"  Tags: {', '.join(f'{k}({v:.2f})' for k, v in model.tags.items())}")
         elif args.manage_action == 'update_config':
             new_config = util.load_config(args.config)
             await client.update_config(new_config)

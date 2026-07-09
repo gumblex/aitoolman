@@ -694,6 +694,7 @@ class LLMProviderManager:
         "openai": OpenAICompatibleFormat,
         "anthropic": AnthropicFormat,
     }
+    default_bytes_per_token: float = 4.0
     default_rank_adjust_ratio: float = 0.25
 
     def __init__(self, config: Dict[str, Any]):
@@ -730,14 +731,7 @@ class LLMProviderManager:
                 if m not in self.api_config:
                     raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
 
-        # 解析默认值
-        default_max_input_tokens = self.default_config.get('max_input_tokens')
-        default_bytes_per_token = self.default_config.get('bytes_per_token', 4.0)
-
-        # 为每个模型补全新增字段
         for model_name, model_config in self.api_config.items():
-            model_config.setdefault('max_input_tokens', default_max_input_tokens)
-            model_config.setdefault('bytes_per_token', default_bytes_per_token)
             if not model_config.get('enable', True):
                 self.disabled_models.add(model_name)
 
@@ -748,9 +742,9 @@ class LLMProviderManager:
         self.model_tag_weights: Dict[str, Dict[str, float]] = {}
         self._calculate_all_tag_weights()
 
-        self.timeout = self.default_config['timeout']
-        self.max_retries = self.default_config['max_retries']
-        self.default_parallel = self.default_config['parallel']
+        self.timeout: float = self.default_config.get('timeout', 600.0)
+        self.max_retries: int = self.default_config.get('max_retries', 0)
+        self.default_parallel: int = self.default_config.get('parallel', 10)
         self.retry_duration = self.default_config.get('retry_duration', 0.5)
         self.retry_factor = self.default_config.get('retry_factor', 1.5)
 
@@ -818,9 +812,13 @@ class LLMProviderManager:
         if messages is not None:
             for model_name in list(common_models):
                 model_config = self.api_config.get(model_name, {})
-                max_input_tokens = model_config.get('max_input_tokens')
+                max_input_tokens = model_config.get(
+                    'max_input_tokens', self.default_config.get('max_input_tokens'))
                 if max_input_tokens is not None:
-                    bytes_per_token = model_config.get('bytes_per_token', self.rank_adjust_ratio)
+                    bytes_per_token = model_config.get(
+                        'bytes_per_token',
+                        self.default_config.get('bytes_per_token', self.default_bytes_per_token)
+                    )
                     estimated_tokens = estimate_text_tokens(messages, bytes_per_token)
                     if estimated_tokens > max_input_tokens:
                         common_models.discard(model_name)
@@ -880,9 +878,18 @@ class LLMProviderManager:
 
         return ModelInfo(
             name=model_name,
+            url=config['url'],
+            model=config['model'],
             parallel=config.get('parallel', self.default_parallel),
+            timeout=config.get("timeout", self.timeout),
             api_type=api_type,
             body_options=body_options,
+            max_input_tokens=config.get(
+                "max_input_tokens", self.default_config.get('max_input_tokens')),
+            bytes_per_token=config.get(
+                'bytes_per_token',
+                self.default_config.get('bytes_per_token', self.default_bytes_per_token)
+            ),
             tags=tags,
         )
 
@@ -1240,14 +1247,7 @@ class LLMProviderManager:
 
     def update_api_config(self, model_name: str, model_config: Dict[str, Any]):
         """更新单个模型配置"""
-        if model_name not in self.api_config:
-            self.api_config[model_name] = model_config.copy()
-            default_max_input_tokens = self.default_config.get('max_input_tokens')
-            default_bytes_per_token = self.default_config.get('bytes_per_token', 4.0)
-            model_config.setdefault('max_input_tokens', default_max_input_tokens)
-            model_config.setdefault('bytes_per_token', default_bytes_per_token)
-        else:
-            self.api_config[model_name] = model_config.copy()
+        self.api_config[model_name] = model_config.copy()
 
         # 更新 disabled_models
         if not model_config.get('enable', True):

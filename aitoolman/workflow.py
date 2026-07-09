@@ -313,21 +313,26 @@ class LLMWorkflow(LLMApplication):
         """
         异步上下文管理器，用于临时释放当前任务的并发配额，允许其他任务执行。
 
-        必须在任务执行期间调用（即 Task.run() 或 LLMTask.post_process() 内）。
+        如果在任务执行期间调用（即 Task.run() 或 LLMTask.post_process() 内），
+        会释放当前任务持有的并发配额，允许其他任务执行。
+        如果在任务外部调用（最外层），则不做任何操作，便于统一用户代码。
+
         典型用法：
             async with self.workflow.release_worker():
                 await self.workflow.wait_tasks(subtask1, subtask2)
         """
         held = _semaphore_held.get()
         if held <= 0:
-            raise RuntimeError("release_worker can only be called from a task that holds the worker semaphore")
-        self._semaphore.release()
-        _semaphore_held.set(0)
-        try:
+            # 在任务外部调用，直接透传，不做任何操作
             yield
-        finally:
-            await self._semaphore.acquire()
-            _semaphore_held.set(1)
+        else:
+            self._semaphore.release()
+            _semaphore_held.set(0)
+            try:
+                yield
+            finally:
+                await self._semaphore.acquire()
+                _semaphore_held.set(1)
 
     # 支持 async with
     async def __aenter__(self):
@@ -375,3 +380,11 @@ class LLMWorkflow(LLMApplication):
                 self._semaphore.release()
                 _semaphore_held.set(0)
             self._active_tasks.pop(task.task_id, None)
+
+__all__ = [
+    'TaskStatus',
+    'LLMWorkflowError',
+    'Task',
+    'LLMTask',
+    'LLMWorkflow'
+]

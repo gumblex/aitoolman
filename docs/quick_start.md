@@ -118,7 +118,7 @@ class LLMModuleRequest(typing.NamedTuple):
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
     model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，覆盖模块默认配置
-    model_rank: int = 0   # 模型路由排名，如超过可用个数用个数取模
+    model_rank: int = 0   # 模型路由候选排名（从0开始，超出自动取模，详见模型路由功能）
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
 
@@ -228,7 +228,6 @@ class FinishReason(enum.Enum):
     tool_calls = "tool_calls"         # 调用了工具
 
     # 本地原因
-    error = "error"                   # 通用错误
     error_request = "error: request"  # 请求错误
     error_format = "error: format"    # 返回格式错误
     error_app = "error: application"  # 应用错误
@@ -241,16 +240,17 @@ LLMModuleResult 或 FinishReason 中有 `raise_for_status()` 方法自动将完�
 
 ```python
 class LLMError(RuntimeError): ...
-class LLMLengthLimitError(LLMError): ...      # 响应长度限制
-class LLMContentFilterError(LLMError): ...    # 内容被审核过滤
-class LLMApiRequestError(LLMError): ...       # API 请求错误
-class LLMNoAvailableModelError(LLMApiRequestError): ... # 无可用模型错误
-class LLMPermissionDeniedError(LLMApiRequestError): ... # 权限不足错误
-class LLMResponseFormatError(LLMError): ...   # 响应格式错误
+class LLMRetriableError(LLMError): ...  # 可重试错误，建议更换同类模型重试，使用模型路由时可将model_rank+1切换下一个候选模型
+class LLMProviderConfigError(LLMError): ... # 模型提供商配置错误
+class LLMNoAvailableModelError(LLMProviderConfigError): ... # 无可用模型错误
+class LLMPermissionDeniedError(LLMProviderConfigError): ... # 权限不足错误
+class LLMLengthLimitError(LLMRetriableError): ...      # 响应长度限制
+class LLMContentFilterError(LLMRetriableError): ...    # 内容被审核过滤
+class LLMApiRequestError(LLMRetriableError): ...       # API 请求错误
+class LLMResponseFormatError(LLMRetriableError): ...   # 响应格式错误
 class LLMApplicationError(LLMError): ...      # 应用程序代码错误
 class LLMCancelledError(LLMError): ...        # 请求被取消
 class LLMUnknownError(LLMError): ...          # 未知完成原因
-class GenericError(LLMError): ...             # 通用错误
 ```
 
 ## 3. 应用层
@@ -354,7 +354,7 @@ LLMWorkflow 扩展自 LLMApplication，支持动态任务链和并行子任务�
 - 使用 `wait_tasks(*tasks)` 提交一组任务并等待它们全部完成。
 - 使用 `run(start_task)` 执行一条完整的任务链（依次跟随 `next_task`）。
 - 任务内部可以通过 `workflow.wait_tasks`/`submit` 启动支线（子任务链）并等待。
-- 使用 `release_worker()` 异步上下文管理器，在任务内部等待子任务时临时释放并发配额，避免嵌套任务死锁，提升并发利用率。
+- 使用 `release_worker()` 异步上下文管理器，在等待子任务时临时释放并发配额，避免嵌套任务死锁，提升并发利用率。
 
 #### 3.2.2 任务定义
 `Task` 是通用任务基类，支持两种使用方式：
@@ -455,7 +455,8 @@ class LLMWorkflow(LLMApplication):
     @asynccontextmanager
     async def release_worker(self):
         """
-        仅可在任务执行逻辑（run/post_process）内调用，典型场景：
+        可在任务执行逻辑（run/post_process）内调用；在外部调用不做任何操作
+        典型场景：
             async with self.workflow.release_worker():
                 await self.workflow.wait_tasks(subtask1, subtask2)
         """
@@ -723,6 +724,31 @@ class LLMProviderManager:
     def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
 ```
+
+### 5.3 模型路由
+框架内置灵活的模型路由机制，通过标签分组实现业务代码与具体模型的解耦，支持多标签匹配、自动权重计算、Token超限过滤、多候选降级重试等能力，便于统一调整模型资源、平衡成本和效果。
+
+#### 5.3.1 配置方式
+在提供商配置文件的 `[model_tag]` 段定义标签与模型的映射关系，每个标签下的模型列表按推荐优先级排序（越靠前权重越高）。业务代码中直接使用标签，无需关心底层具体模型，支持随时调整模型组合而不修改业务代码。
+详细配置说明参考《[配置文件文档](./config.md)》的 model_tag 部分。
+
+#### 5.3.2 路由算法
+输入标签列表（`input_tags`）后，系统按以下规则计算最优候选模型列表：
+1. **精确匹配优先**：遍历 input_tags，若存在与真实模型名完全匹配的项，直接返回该模型（单元素列表）
+2. **标签交集匹配**：查找每个输入标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/别名视为单元素集合，权重为1）
+3. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型
+4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序，返回候选模型列表
+
+#### 5.3.3 使用方式
+- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages)`，传入标签列表和可选的消息列表，得到排序后的候选模型列表
+- **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，可传入单个标签字符串或多个标签的列表，系统自动路由到最优模型
+- **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
+
+#### 5.3.4 应用场景
+- 按业务场景分组：如 `fast`（快速响应）、`precise`（高精度）、`low_cost`（低成本）、`code`（代码处理）、`multimodal`（多模态）等，业务代码直接使用场景标签
+- 多标签交叉匹配：如传入 `["code", "multimodal"]` 自动选择同时支持代码和多模态能力，在两者中最优的模型
+- 故障自动降级：主模型不可用时自动切换到备用模型，提升服务可用性
+- 成本动态调整：根据业务优先级自动选择不同成本档位的模型
 
 ## 6. 实用工具
 

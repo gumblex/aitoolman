@@ -10,7 +10,8 @@ import zmq
 import zmq.asyncio
 
 from . import util
-from .model import LLMProviderRequest, LLMProviderResponse, ToolCall, Message, ModelInfo, LLMPermissionDeniedError
+from . import model as _model
+from .model import LLMProviderRequest, LLMProviderResponse, ToolCall, Message, ModelInfo
 from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
 
@@ -287,8 +288,8 @@ class LLMZmqClient(LLMClient):
             if 'error_type' in json_data:
                 error_type = json_data['error_type']
                 error_msg = json_data['error_text']
-                if error_type == 'LLMPermissionDeniedError':
-                    future.set_exception(LLMPermissionDeniedError(error_msg))
+                if hasattr(_model, error_type):
+                    future.set_exception(getattr(_model, error_type)(error_msg))
                 else:
                     future.set_exception(RuntimeError(error_msg))
             else:

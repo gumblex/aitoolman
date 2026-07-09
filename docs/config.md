@@ -19,9 +19,9 @@
 
 | 参数               | 类型  | 默认值      | 说明                                  |
 |------------------|-----|----------|-------------------------------------|
-| `timeout`        | 整数  | 600      | HTTP 请求超时时间（秒）                      |
-| `max_retries`    | 整数  | 3        | 请求失败时的最大重试次数                        |
-| `parallel`       | 整数  | 1        | 默认模型并行处理能力（同时处理的请求数）                |
+| `timeout`        | 浮点数 | 600      | HTTP 请求超时时间（秒）                      |
+| `max_retries`    | 整数  | 0        | 请求失败时的最大重试次数                        |
+| `parallel`       | 整数  | 10       | 默认模型并行处理能力（同时处理的请求数）                |
 | `retry_duration` | 浮点数 | 0.5      | 初始重试间隔（秒）                           |
 | `retry_factor`   | 浮点数 | 1.5      | 重试间隔乘数，用于指数退避算法                     |
 | `api_type`       | 字符串 | "openai" | 默认 API 类型，可选值："openai"、"anthropic"  |
@@ -42,7 +42,7 @@
 | `model`        | 字符串 | 无（必须配置）                          | 提供商侧的模型标识符                      |
 | `parallel`     | 整数  | 继承自 `[default].parallel`         | 该模型的并行处理能力                      |
 | `headers`      | 字典  | 继承自 `[default].headers`          | 该模型特定的 HTTP 请求头                 |
-| `timeout`      | 整数  | 继承自 `[default].timeout`          | 该模型特定的超时时间                      |
+| `timeout`      | 浮点数 | 继承自 `[default].timeout`          | 该模型特定的超时时间                      |
 | `body_options` | 字典  | 继承自 `[default].body_options`     | 该模型默认的请求选项，覆盖 default 中的所有选项    |
 | `max_input_tokens` | 整数  | 继承自 `[default].max_input_tokens` | 该模型支持的最大输入Token数 |
 | `bytes_per_token`  | 浮点数 | 继承自 `[default].bytes_per_token`  | 该模型单Token对应的UTF-8字节数估算值 |

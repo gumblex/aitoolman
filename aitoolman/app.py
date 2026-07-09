@@ -85,12 +85,14 @@ class _LLMModule(NamedTuple):
             _context_messages: Optional[List[Message]] = None,
             _media_content: Optional[List[MediaContent]] = None,
             _output_channel: Optional[_channel.ChannelWriter] = None,
+            _model_rank: int = 0,
             **kwargs
     ) -> LLMModuleResult:
         return await self.app.call(LLMModuleRequest(
             module_name=self.module_name,
             template_params=kwargs,
             model_name=_model_name,
+            model_rank=_model_rank,
             context_messages=_context_messages,
             media_content=_media_content,
             output_channel=_output_channel
@@ -220,11 +222,11 @@ class LLMApplication:
             messages.append(Message.from_content(self.render_template(
                 "module/%s/system" % module_request.module_name,
                 **module_request.template_params
-            ), role='system'))
+            ), role='system').strip())
         messages.append(Message.from_content(self.render_template(
             "module/%s/user" % module_request.module_name,
             **module_request.template_params
-        ), role='user', media_content=module_request.media_content))
+        ).strip(), role='user', media_content=module_request.media_content))
         config = self.module_configs[module_request.module_name]
         if module_request.output_channel is not None:
             output_channel = module_request.output_channel

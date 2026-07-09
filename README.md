@@ -28,6 +28,7 @@ aitoolman is a developer-focused LLM (Large Language Model) application framewor
 - **Flexible Workflow Orchestration**: Supports serial, parallel, and dynamic workflows, where execution paths are determined dynamically to easily handle complex multi-step tasks.
 - **Native Tool Call Support**: Supports classic function call patterns, or leverages tool calls to implement intent recognition.
 - **Microservice Architecture**: Deploy LLM schedulers as independent services for unified resource management, key isolation, and global auditing.
+- **Model Routing**: Group models by tags, support multi-tag matching and automatic weight calculation, and simplify unified adjustment of model resources to balance cost and performance.
 
 ## Use Cases
 aitoolman is suitable for various scenarios requiring controllable, reliable LLM integration:

@@ -462,14 +462,43 @@ class TestReleaseWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
         self.assertEqual(task.output_data, 2 + 4)  # 1*2 + 2*2
 
-    async def test_release_worker_outside_task_raises(self):
-        """在任务外部调用 release_worker 应抛出 RuntimeError"""
+    async def test_release_worker_outside_task_noop(self):
+        """在任务外部调用 release_worker 不抛异常，且不做任何操作（透传）"""
         client = mock_llmclient.MockLLMClient()
         app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG)
 
-        with self.assertRaises(RuntimeError):
-            async with app.release_worker():
-                pass
+        # 在最外层调用，不抛出 RuntimeError
+        async with app.release_worker():
+            task = SuccessTask({"x": 5})
+            await app.wait_tasks(task)
+
+        self.assertEqual(task.status, aitoolman.TaskStatus.COMPLETED)
+        self.assertEqual(task.output_data, 10)
+
+    async def test_release_worker_mixed_usage(self):
+        """测试在任务内部和外部混合使用 release_worker"""
+        max_parallel = 1
+        client = mock_llmclient.MockLLMClient()
+        app = aitoolman.LLMWorkflow(client, config_dict=TEST_CONFIG, max_parallel_tasks=max_parallel)
+
+        class InnerTask(aitoolman.Task):
+            async def run(self):
+                return self.input_data['x'] * 3
+
+        class ParentTask(aitoolman.Task):
+            async def run(self):
+                # 在任务内部调用 release_worker
+                async with self.workflow.release_worker():
+                    sub = InnerTask({"x": 2})
+                    await self.workflow.wait_tasks(sub)
+                return sub.output_data
+
+        # 在最外层调用 release_worker，此时不释放任何配额（因为没有持有）
+        async with app.release_worker():
+            parent = ParentTask()
+            await app.wait_tasks(parent)
+            self.assertEqual(parent.status, aitoolman.TaskStatus.COMPLETED)
+            self.assertEqual(parent.output_data, 6)
 
     async def test_release_worker_nested_subtasks(self):
         """release_worker 支持多层嵌套子任务"""

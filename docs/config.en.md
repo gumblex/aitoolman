@@ -18,19 +18,19 @@ Configure network ports for the ZeroMQ server.
 ### 1.2 [default] Section
 Default configuration inherited by all model configurations.
 
-| Parameter         | Type    | Default Value       | Description                                                                 |
-|-------------------|---------|---------------------|-----------------------------------------------------------------------------|
-| `timeout`         | Integer | 600                 | HTTP request timeout duration (seconds)                                     |
-| `max_retries`     | Integer | 3                   | Maximum number of retries when request fails                                |
-| `parallel`        | Integer | 1                   | Default model parallel processing capacity (number of concurrent requests)  |
-| `retry_duration`  | Float   | 0.5                 | Initial retry interval (seconds)                                             |
-| `retry_factor`    | Float   | 1.5                 | Retry interval multiplier for exponential backoff algorithm                 |
-| `api_type`        | String  | "openai"            | Default API type, available options: "openai", "anthropic"                  |
-| `headers`         | Dict    | `{}`                | Default HTTP request headers, universal authentication info can be configured here |
-| `body_options`    | Dict    | `{}`                | Default request options such as max_tokens, temperature, etc.               |
-| `max_input_tokens` | Integer | None (No limit)     | Maximum input token count supported by the model                            |
-| `bytes_per_token`  | Float   | 4.0                 | Estimated UTF-8 bytes per token, used for token count estimation            |
-| `rank_adjust_ratio`| Float   | 0.25                | Weight adjustment parameter for rank weight calculation in model routing    |
+| Parameter         | Type    | Default Value   | Description                                                                 |
+|-------------------|---------|-----------------|-----------------------------------------------------------------------------|
+| `timeout`         | Float   | 600             | HTTP request timeout duration (seconds)                                     |
+| `max_retries`     | Integer | 0               | Maximum number of retries when request fails                                |
+| `parallel`        | Integer | 10              | Default model parallel processing capacity (number of concurrent requests)  |
+| `retry_duration`  | Float   | 0.5             | Initial retry interval (seconds)                                             |
+| `retry_factor`    | Float   | 1.5             | Retry interval multiplier for exponential backoff algorithm                 |
+| `api_type`        | String  | "openai"        | Default API type, available options: "openai", "anthropic"                  |
+| `headers`         | Dict    | `{}`            | Default HTTP request headers, universal authentication info can be configured here |
+| `body_options`    | Dict    | `{}`            | Default request options such as max_tokens, temperature, etc.               |
+| `max_input_tokens` | Integer | None (No limit) | Maximum input token count supported by the model                            |
+| `bytes_per_token`  | Float   | 4.0             | Estimated UTF-8 bytes per token, used for token count estimation            |
+| `rank_adjust_ratio`| Float   | 0.25            | Weight adjustment parameter for rank weight calculation in model routing    |
 
 
 ### 1.3 [api."Model Name"] Section
@@ -43,7 +43,7 @@ Specific configuration for each model, model names can be customized.
 | `model`           | String  | None (Required)                             | Model identifier on the provider's side                                               |
 | `parallel`        | Integer | Inherited from `[default].parallel`         | Parallel processing capacity for this model                                           |
 | `headers`         | Dict    | Inherited from `[default].headers`          | Model-specific HTTP request headers                                                   |
-| `timeout`         | Integer | Inherited from `[default].timeout`          | Model-specific timeout duration                                                       |
+| `timeout`         | Float   | Inherited from `[default].timeout`          | Model-specific timeout duration                                                       |
 | `body_options`    | Dict    | Inherited from `[default].body_options`     | Default request options for this model, overrides all options in `[default]`. |
 | `max_input_tokens` | Integer | Inherited from `[default].max_input_tokens` | Maximum input token count for this model            |
 | `bytes_per_token`  | Float   | Inherited from `[default].bytes_per_token`  | Estimated UTF-8 bytes per token for this model      |

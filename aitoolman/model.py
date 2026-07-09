@@ -16,32 +16,42 @@ class LLMError(RuntimeError):
     pass
 
 
-class LLMLengthLimitError(LLMError):
-    """Error when response reaches length limit"""
+class LLMRetriableError(LLMError):
+    """LLM Request errors that should be retried"""
     pass
 
 
-class LLMContentFilterError(LLMError):
-    """Error when content is filtered"""
+class LLMProviderConfigError(LLMError):
+    """Provider config errors"""
     pass
 
 
-class LLMApiRequestError(LLMError):
-    """Error with the request"""
-    pass
-
-
-class LLMNoAvailableModelError(LLMApiRequestError):
+class LLMNoAvailableModelError(LLMProviderConfigError):
     """Error when no available model is found"""
     pass
 
 
-class LLMPermissionDeniedError(LLMApiRequestError):
+class LLMPermissionDeniedError(LLMProviderConfigError):
     """Error when permission denied"""
     pass
 
 
-class LLMResponseFormatError(LLMError):
+class LLMLengthLimitError(LLMRetriableError):
+    """Error when response reaches length limit"""
+    pass
+
+
+class LLMContentFilterError(LLMRetriableError):
+    """Error when content is filtered"""
+    pass
+
+
+class LLMApiRequestError(LLMRetriableError):
+    """Error with the request"""
+    pass
+
+
+class LLMResponseFormatError(LLMRetriableError):
     """Error with response format"""
     pass
 
@@ -58,11 +68,6 @@ class LLMCancelledError(LLMError):
 
 class LLMUnknownError(LLMError):
     """Error for unknown finish reasons"""
-    pass
-
-
-class GenericError(LLMError):
-    """Generic error"""
     pass
 
 
@@ -204,9 +209,14 @@ class Message(typing.NamedTuple):
 class ModelInfo(typing.NamedTuple):
     """模型元数据"""
     name: str                  # 真实模型名（api配置段的键名）
+    url: str
+    model: str
     parallel: int              # 模型并行度配置
+    timeout: float             # 超时时间
     api_type: str              # API格式：openai/anthropic
     body_options: Dict[str, Any] # 模型请求默认参数
+    max_input_tokens: int      # 支持的最大输入Token数
+    bytes_per_token: float     # 单Token对应的UTF-8字节数估算值
     tags: Dict[str, float]     # 关联的所有标签及对应权重
 
 
@@ -299,8 +309,6 @@ class FinishReason(enum.Enum):
     tool_calls = "tool_calls"
 
     # 本地原因
-    # 通用错误
-    error = "error"
     # 请求错误
     error_request = "error: request"
     # 返回格式错误
@@ -343,8 +351,6 @@ class FinishReason(enum.Enum):
             raise LLMCancelledError(error_text or "Request cancelled")
         elif finish_reason_enum == FinishReason.unknown:
             raise LLMUnknownError(error_text or "Unknown error")
-        elif finish_reason_enum == FinishReason.error:
-            raise GenericError(error_text or "Generic error")
         else:
             raise LLMUnknownError(f"Unrecognized finish reason: {finish_reason}")
 
@@ -490,3 +496,31 @@ class LLMModuleRequestState(typing.NamedTuple):
     module_request: Optional[LLMModuleRequest]
     direct_request: LLMDirectRequest
     provider_request: LLMProviderRequest
+
+
+__all__ = [
+    "LLMError",
+    "LLMRetriableError",
+    "LLMProviderConfigError",
+    "LLMNoAvailableModelError",
+    "LLMPermissionDeniedError",
+    "LLMLengthLimitError",
+    "LLMContentFilterError",
+    "LLMApiRequestError",
+    "LLMResponseFormatError",
+    "LLMApplicationError",
+    "LLMCancelledError",
+    "LLMUnknownError",
+    "MediaContent",
+    "MessageRole",
+    "Message",
+    "ModelInfo",
+    "ToolCall",
+    "LLMProviderResponse",
+    "LLMProviderRequest",
+    "FinishReason",
+    "LLMDirectRequest",
+    "LLMModuleRequest",
+    "LLMModuleResult",
+    "LLMModuleRequestState",
+]

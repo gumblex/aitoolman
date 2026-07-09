@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+### 修改
+- workflow.release_worker 支持在最外层使用（无动作）
+- 修复模型默认配置项读取
+- render_direct_request 去除空白
+- 修改 manage 命令行工具
+
 ## 0.5.1
 ### 新增
 - LLMModuleRequest 增加 model_rank 参数，选择第几个候选模型

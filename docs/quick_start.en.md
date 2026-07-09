@@ -118,8 +118,7 @@ class LLMModuleRequest(typing.NamedTuple):
     module_name: str                    # Module name
     template_params: Dict[str, Any]     # Template parameters
     model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, override module default configuration
-    # Model routing rank. If the value exceeds the total number of available models,
-    # perform modulo operation on the value with the count of available models.
+    # Model routing candidate rank (starts from 0, automatically applies modulo when exceeded, see Model Routing feature for details)
     model_rank: int = 0
     context_messages: List[Message] = []  # Context messages
     media_content: Optional[List[MediaContent]] = None  # Multimedia content
@@ -229,7 +228,6 @@ class FinishReason(enum.Enum):
     tool_calls = "tool_calls"         # Tool calls invoked
 
     # Local reasons
-    error = "error"                   # General error
     error_request = "error: request"  # Request error
     error_format = "error: format"    # Response format error
     error_app = "error: application"  # Application error
@@ -242,16 +240,17 @@ The `raise_for_status()` method in LLMModuleResult or FinishReason automatically
 
 ```python
 class LLMError(RuntimeError): ...
-class LLMLengthLimitError(LLMError): ...      # Response length limit reached
-class LLMContentFilterError(LLMError): ...    # Content filtered by moderation
-class LLMApiRequestError(LLMError): ...       # API request error
-class LLMNoAvailableModelError(LLMApiRequestError): ... # No available model error
-class LLMPermissionDeniedError(LLMApiRequestError): ... # Permission denied error
-class LLMResponseFormatError(LLMError): ...   # Response format error
+class LLMRetriableError(LLMError): ...  # Retriable error, it is recommended to retry with a similar model. When using model routing, increment model_rank to switch to the next candidate model
+class LLMProviderConfigError(LLMError): ... # Model provider configuration error
+class LLMNoAvailableModelError(LLMProviderConfigError): ... # No available model error
+class LLMPermissionDeniedError(LLMProviderConfigError): ... # Permission denied error
+class LLMLengthLimitError(LLMRetriableError): ...      # Response length limit reached
+class LLMContentFilterError(LLMRetriableError): ...    # Content filtered by moderation
+class LLMApiRequestError(LLMRetriableError): ...       # API request error
+class LLMResponseFormatError(LLMRetriableError): ...   # Response format error
 class LLMApplicationError(LLMError): ...      # Application code error
 class LLMCancelledError(LLMError): ...        # Request cancelled
 class LLMUnknownError(LLMError): ...          # Unknown completion reason
-class GenericError(LLMError): ...             # General error
 ```
 
 ## 3. Application Layer
@@ -355,7 +354,7 @@ Core concepts:
 - Use `wait_tasks(*tasks)` to submit a set of tasks and wait for all of them to complete.
 - Use `run(start_task)` to execute a complete task chain (following `next_task` in sequence).
 - Tasks can start sub-task chains and wait for completion internally via `workflow.wait_tasks`/`submit`.
-- Use the `release_worker()` async context manager to temporarily release concurrency quotas when waiting for subtasks inside a task, avoiding nested task deadlocks and improving concurrency utilization.
+- Use the `release_worker()` async context manager to temporarily release concurrency quotas when waiting for subtasks, avoiding nested task deadlocks and improving concurrency utilization.
 
 #### 3.2.2 Task Definition
 `Task` is a generic task base class that supports two usage methods:
@@ -457,7 +456,9 @@ class LLMWorkflow(LLMApplication):
     @asynccontextmanager
     async def release_worker(self):
         """
-        Can only be called within the task execution logic (run/post_process), typical scenario:
+        Can be called within the task execution logic (run/post_process)
+        When called from outside, do nothing
+        Typical scenario:
             async with self.workflow.release_worker():
                 await self.workflow.wait_tasks(subtask1, subtask2)
         """
@@ -720,6 +721,31 @@ class LLMProviderManager:
     def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
 ```
+
+### 5.3 Model Routing
+The framework has a built-in flexible model routing mechanism that decouples business code from specific models through tag grouping. It supports multi-tag matching, automatic weight calculation, token over-limit filtering, multi-candidate degradation retry and other capabilities, facilitating unified adjustment of model resources and balancing cost and effect.
+
+#### 5.3.1 Configuration Method
+Define the mapping between tags and models in the `[model_tag]` section of the provider configuration file. The model list under each tag is sorted by recommendation priority (the higher the ranking, the higher the weight). Business code directly uses tags without concerning the underlying specific models, and supports adjusting model combinations at any time without modifying business code.
+For detailed configuration instructions, refer to the [Configuration File Documentation](./config.md) model_tag section.
+
+#### 5.3.2 Routing Algorithm
+After inputting the tag list (`input_tags`), the system calculates the optimal candidate model list according to the following rules:
+1. **Exact match first**: Traverse input_tags. If there is an item that exactly matches the actual model name, return the model directly (single-element list).
+2. **Tag intersection matching**: Find the model set and corresponding weight for each input tag, and take the intersection of models corresponding to all tags (a single model name/alias is treated as a single-element set with weight 1).
+3. **Token limit filtering**: If the `messages` parameter is provided, automatically estimate the total number of input tokens, and filter out models configured with `max_input_tokens` where the total token count exceeds the limit.
+4. **Weight sorting**: Sum the weights of each model across all tags, sort by total weight in descending order, and return the candidate model list.
+
+#### 5.3.3 Usage
+- **resolve_model interface**: Directly call `client.resolve_model(tags, messages)`, pass in the tag list and optional message list to get the sorted candidate model list.
+- **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, you can pass in a single tag string or a list of multiple tags, and the system will automatically route to the optimal model.
+- **model_rank parameter**: Used to select the Nth model in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied. When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing.
+
+#### 5.3.4 Application Scenarios
+- Group by business scenario: such as `fast` (fast response), `precise` (high precision), `low_cost` (low cost), `code` (code processing), `multimodal` (multimodal), etc. Business code directly uses scenario tags.
+- Multi-tag cross matching: For example, passing `["code", "multimodal"]` will automatically select the optimal model that supports both code and multimodal capabilities.
+- Automatic fault degradation: Automatically switch to the backup model when the primary model is unavailable, improving service availability.
+- Dynamic cost adjustment: Automatically select models of different cost tiers according to business priority.
 
 ## 6. Utility Tools
 
