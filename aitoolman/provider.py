@@ -1219,8 +1219,9 @@ class LLMProviderManager:
             except KeyError:
                 pass
 
-    async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None):
+    async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None) -> List[str]:
         """取消指定客户端/上下文的所有请求"""
+        cancelled_ids = []
         cancelled_count = 0
         total_count = 0
 
@@ -1234,10 +1235,12 @@ class LLMProviderManager:
                 except asyncio.CancelledError:
                     cancelled_count += 1
                 del self.active_requests[request_id]
+                cancelled_ids.append(request_id)
 
         logger.info(
             "[Client: %s, Context: %s] Cancelled %d/%d requests",
             client_id, context_id, cancelled_count, total_count)
+        return cancelled_ids
 
     def update_config(self, new_config: Dict[str, Any]):
         """热更新全量配置，不中断现有请求"""

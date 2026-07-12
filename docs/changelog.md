@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+### 新增
+- 新增 LLMClient.cancel_all
+
 ## 0.5.2
 ### 修改
 - workflow.release_worker 支持在最外层使用（无动作）

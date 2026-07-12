@@ -264,8 +264,11 @@ class TestConfigUpdate(unittest.TestCase):
 
     def test_update_api_config(self):
         """单模型配置更新"""
-        manager = LLMProviderManager(make_test_config())
-        manager.update_api_config('model-a', {'parallel': 10})
+        test_config = make_test_config()
+        manager = LLMProviderManager(test_config)
+        updated = test_config['api']['model-a'].copy()
+        updated.update({'parallel': 10})
+        manager.update_api_config('model-a', updated)
         models = manager.list_models()
         model_a = [m for m in models if m.name == 'model-a'][0]
         self.assertEqual(model_a.parallel, 10)

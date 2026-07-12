@@ -188,6 +188,14 @@ class LLMZmqServer:
         # 清理活跃请求
         del self.active_requests[request.request_id]
 
+    async def _send_client_message(self, client_id: str, message: Dict[str, Any]) -> None:
+        """向指定客户端发送ZeroMQ路由消息"""
+        await self.router_socket.send_multipart([
+            client_id.encode('utf-8'),
+            b'',
+            util.encode_message(message)
+        ])
+
     async def send_channel_write(self, request_id: str, channel_type: str, mode: str, text: str):
         """发送channel写入消息给客户端"""
         request = self.active_requests.get(request_id)
@@ -202,11 +210,7 @@ class LLMZmqServer:
             'mode': mode,
             'text': text
         }
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
+        await self._send_client_message(client_id, message)
 
     async def send_response(self, client_id: str, request_id: str, response: LLMProviderResponse):
         """发送完整响应消息"""
@@ -235,11 +239,7 @@ class LLMZmqServer:
             }
         }
         # logger.debug("send_msg: %s", message)
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
+        await self._send_client_message(client_id, message)
 
     async def send_error(self, client_id: str, request_id: str, error: str):
         """发送错误消息"""
@@ -248,11 +248,7 @@ class LLMZmqServer:
             'request_id': request_id,
             'error': error
         }
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
+        await self._send_client_message(client_id, message)
 
     async def publish_audit_log(self, request: LLMProviderRequest):
         """发布审计日志到PUB socket"""
@@ -368,11 +364,7 @@ class LLMZmqServer:
             message['error_text'] = f"{type(error).__qualname__}: {str(error)}"
         else:
             message['result'] = result
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
+        await self._send_client_message(client_id, message)
 
 
     async def handle_cancel(self, client_id: str, request_id: str):
@@ -386,7 +378,9 @@ class LLMZmqServer:
 
     async def handle_cancel_all(self, client_id: str, context_id: Optional[str]):
         """处理取消所有请求"""
-        await self.provider_manager.cancel_all_requests(client_id, context_id)
+        cancelled_ids = await self.provider_manager.cancel_all_requests(client_id, context_id)
+        for request_id in cancelled_ids:
+            await self.send_cancel_ack(client_id, request_id)
         logger.info(f"Cancelled all requests for client {client_id} (context {context_id})")
 
     async def send_cancel_ack(self, client_id: str, request_id: str):
@@ -395,11 +389,7 @@ class LLMZmqServer:
             'type': 'cancel_ack',
             'request_id': request_id
         }
-        await self.router_socket.send_multipart([
-            client_id.encode('utf-8'),
-            b'',
-            util.encode_message(message)
-        ])
+        await self._send_client_message(client_id, message)
 
     async def handle_audit_event(self, client_id: str, json_data: Dict[str, Any]):
         """处理审计事件消息并发布到PUB接口"""

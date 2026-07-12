@@ -66,6 +66,10 @@ class LLMClient(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def cancel_all(self, context_id: Optional[str] = None):
+        pass
+
+    @abc.abstractmethod
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         """记录用户自定义审计事件，kwargs 应能序列化为 JSON"""
         pass
@@ -141,6 +145,9 @@ class LLMLocalClient(LLMClient):
 
     async def cancel(self, request_id: str):
         await self.provider_manager.cancel_request(request_id)
+
+    async def cancel_all(self, context_id: Optional[str] = None):
+        await self.provider_manager.cancel_all_requests(self.client_id, context_id)
 
     async def initialize(self):
         await self.provider_manager.initialize()

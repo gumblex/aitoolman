@@ -67,6 +67,19 @@ class LLMZmqClient(LLMClient):
         self.connected = False
         logger.debug("Client closed")
 
+    async def _send_message(self, msg_type: str, **kwargs) -> None:
+        """封装发送ZMQ多帧消息
+        Args:
+            msg_type: 消息类型，对应消息体的type字段
+            **kwargs: 消息体的其他字段
+        """
+        msg = {'type': msg_type, **kwargs}
+        await self.socket.send_multipart([
+            b'',
+            self.auth_token.encode('utf-8') if self.auth_token else b'',
+            util.encode_message(msg)
+        ])
+
     async def listen_responses(self):
         """监听服务器响应"""
         while self.connected:
@@ -173,22 +186,17 @@ class LLMZmqClient(LLMClient):
         self.active_requests[request.request_id] = request
 
         # 发送请求消息
-        request_msg = {
-            'type': 'request',
-            'client_id': request.client_id,
-            'context_id': request.context_id,
-            'request_id': request.request_id,
-            'model_name': request.model_name,
-            'messages': [m.to_dict() for m in request.messages],
-            'tools': request.tools,
-            'options': request.options,
-            'stream': request.stream
-        }
-        await self.socket.send_multipart([
-            b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(request_msg)
-        ])
+        await self._send_message(
+            'request',
+            client_id=request.client_id,
+            context_id=request.context_id,
+            request_id=request.request_id,
+            model_name=request.model_name,
+            messages=[m.to_dict() for m in request.messages],
+            tools=request.tools,
+            options=request.options,
+            stream=request.stream
+        )
         return request
 
     async def cancel(self, request_id: str):
@@ -202,16 +210,11 @@ class LLMZmqClient(LLMClient):
             return
 
         # 发送取消消息
-        cancel_msg = {
-            'type': 'cancel',
-            'client_id': self.client_id,
-            'request_id': request_id
-        }
-        await self.socket.send_multipart([
-            b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(cancel_msg)
-        ])
+        await self._send_message(
+            'cancel',
+            client_id=self.client_id,
+            request_id=request_id
+        )
         await request.output_channel.write_complete()
 
     async def cancel_all(self, context_id: Optional[str] = None):
@@ -219,16 +222,11 @@ class LLMZmqClient(LLMClient):
         if not self.connected:
             raise RuntimeError("Client not connected")
 
-        cancel_msg = {
-            'type': 'cancel_all',
-            'client_id': self.client_id,
-            'context_id': context_id
-        }
-        await self.socket.send_multipart([
-            b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(cancel_msg)
-        ])
+        await self._send_message(
+            'cancel_all',
+            client_id=self.client_id,
+            context_id=context_id
+        )
         for req in self.active_requests.values():
             try:
                 await req.output_channel.write_complete()
@@ -240,19 +238,14 @@ class LLMZmqClient(LLMClient):
         if not self.connected:
             raise RuntimeError("Client not connected")
 
-        audit_msg = {
-            'type': 'audit_event',
-            'client_id': self.client_id,
-            'context_id': context_id,
-            'event_type': event_type,
-            'data': kwargs,
-            'timestamp': time.time()
-        }
-        await self.socket.send_multipart([
-            b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(audit_msg)
-        ])
+        await self._send_message(
+            'audit_event',
+            client_id=self.client_id,
+            context_id=context_id,
+            event_type=event_type,
+            data=kwargs,
+            timestamp=time.time()
+        )
 
     async def _send_rpc(self, method: str, kwargs: Dict[str, Any]) -> Any:
         """发送RPC请求并等待响应"""
@@ -263,17 +256,12 @@ class LLMZmqClient(LLMClient):
         future = asyncio.Future()
         self._rpc_futures[request_id] = future
 
-        rpc_msg = {
-            'type': 'rpc',
-            'request_id': request_id,
-            'method': method,
-            'kwargs': kwargs
-        }
-        await self.socket.send_multipart([
-            b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(rpc_msg)
-        ])
+        await self._send_message(
+            'rpc',
+            request_id=request_id,
+            method=method,
+            kwargs=kwargs
+        )
 
         try:
             return await asyncio.wait_for(future, timeout=10.0)

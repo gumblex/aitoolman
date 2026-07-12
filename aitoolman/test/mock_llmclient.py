@@ -248,6 +248,9 @@ class MockLLMClient(_client.LLMClient):
     async def cancel(self, request_id: str):
         pass
 
+    async def cancel_all(self, context_id: Optional[str] = None):
+        pass
+
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         self.events.append(AuditEvent(context_id, event_type, kwargs))
 
