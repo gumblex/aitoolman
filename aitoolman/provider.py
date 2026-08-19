@@ -4,6 +4,7 @@ import math
 import time
 import asyncio
 import logging
+import random
 import typing
 from typing import Optional, Dict, Any, List, Callable, Set, Union
 
@@ -727,7 +728,7 @@ class LLMProviderManager:
 
         # 校验 model_tag 中的模型名
         for tag, models in self.model_tag.items():
-            for m in models:
+            for m in self._flatten_model_list(models):
                 if m not in self.api_config:
                     raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
 
@@ -761,6 +762,17 @@ class LLMProviderManager:
             tag: calculate_rank_weights(models, self.rank_adjust_ratio)
             for tag, models in self.model_tag.items()
         }
+
+    @staticmethod
+    def _flatten_model_list(models: List[Union[str, List[str]]]) -> List[str]:
+        """将可能包含嵌套列表的模型列表展平为模型名列表"""
+        result = []
+        for item in models:
+            if isinstance(item, list):
+                result.extend(item)
+            else:
+                result.append(item)
+        return result
 
     def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None) -> List[str]:
         """解析出最终使用的真实模型名
@@ -837,7 +849,7 @@ class LLMProviderManager:
 
         best_models = sorted(common_models, key=lambda m: (
             model_total_weights[m],
-            self.api_config[m].get('parallel', self.default_parallel)
+            random.random()
         ), reverse=True)
         return best_models
 
@@ -1272,9 +1284,9 @@ class LLMProviderManager:
         else:
             self.disabled_models.add(model_name)
 
-    def update_model_tag(self, tag: str, models: List[str]):
+    def update_model_tag(self, tag: str, models: List[Union[str, List[str]]]):
         """更新 model_tag"""
-        for m in models:
+        for m in self._flatten_model_list(models):
             if m not in self.api_config:
                 raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
         self.model_tag[tag] = models

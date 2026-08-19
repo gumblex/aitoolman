@@ -56,13 +56,15 @@ Additional notes:
 
 
 ### 1.4 [model_tag] Section
-Model tag configuration for model routing and grouped scheduling.
+Model tag configuration for model routing and grouped scheduling, sorted by priority. Try to define all needed tags here.
+
+Business code can use tags without caring about underlying specific models, which supports flexible switching and routing. Model routing supports passing multiple tags at the same time, the system will automatically match all available models that satisfy all tags, and select the optimal model combined with input token limit and model priority. For example, passing `["code", "multimodal"]` will automatically select multimodal models that support code use cases, passing `["low_cost", "fast"]` will automatically select low cost and low latency models, to adapt to all kinds of cross scenarios.
 
 Original `[model_alias]` config (`alias = model_name`) will be merged into `[model_tag]`. Each alias is a tag, corresponding to a single-item list.
 
-| Parameter   | Type           | Default Value | Description                                                                                                     |
-|-------------|----------------|---------------|-----------------------------------------------------------------------------------------------------------------|
-| (Tag Name)  | List of String | None          | Key is the tag name, value is a list of model names. List order determines priority (earlier entries have higher weight). Model names must exist in the [api] section |
+`"Tag Name" = List of strings (supports one level of nesting)`
+
+Key is the tag name, value is a list of model names. List order determines recommendation priority (earlier entries have higher weight). Model names must exist in the `[api]` section. Elements can be strings or string lists. Models in a nested list share the rank weight of their position, and same-weight models will be shuffled randomly. This can be used to rotate usage of identical/similar models across multiple providers.
 
 **Example:**
 ```toml
@@ -70,12 +72,15 @@ Original `[model_alias]` config (`alias = model_name`) will be merged into `[mod
 image = ['doubao-seed-2.0-pro']
 cheap = ['doubao-seed-2.0-mini','qwen-flash']
 fast = ['deepseek-v4-flash','qwen-flash']
+low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
+# Use models from multiple providers in rotation
+"deepseek-v4-flash" = [["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
 ```
 
 **Weight Calculation:**
-Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
+Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. All models in a nested list share the rank weight of their position. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
 
-### 1.6 Configuration Example
+### 1.5 Configuration Example
 
 ```toml
 [server]
@@ -93,10 +98,12 @@ retry_factor = 1.5
 api_type = "openai"
 
 [model_tag]
-"creative" = ["deepseek-v4-pro"]
-"code" = ["glm-5.1", "deepseek-v4-pro", "kimi-k2.5"]
-"fast" = ["deepseek-v4-flash", "Doubao-Seed-2.0-lite"]
+"low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
+"fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]
+"creative" = ["deepseek-v4-pro", "kimi-k2.5"]
 "precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]
+"code" = ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]
+"multimodal" = ["Doubao-Seed-2.0-pro", "doubao-seed-2.0-mini", "qwen-vl"]
 
 [api."deepseek-v4-pro"]
 url = "https://api.deepseek.com/chat/completions"
@@ -139,7 +146,7 @@ Specific configuration for each module, module names can be customized.
 | Parameter           | Type    | Default Value                                       | Description                                                                            |
 |---------------------|---------|-----------------------------------------------------|----------------------------------------------------------------------------------------|
 | `description`       | String  | `''`                                                | Description text for this module                                                       |
-| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module                                                |
+| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module, also supports a list of multiple tags         |
 | `stream`            | Boolean | Inherited from `[module_default].stream`            | Whether this module uses streaming output                                              |
 | `post_processor`    | String  | Inherited from `[module_default].post_processor`    | Post-processor for this module                                                         |
 | `options`           | Dict    | Inherited from `[module_default].options`           | Request options for this module                                                        |
@@ -157,9 +164,9 @@ Global templates, can be rendered using `LLMApplication.render_template`.
 ### 2.4 [model_alias] Section
 Application-layer model alias configuration, which is used for flexible configuration of specific models.
 
-| Parameter | Type   | Default Value | Description                   |
-|-----------|--------|---------------|-------------------------------|
-| (Alias)   | String | None          | Maps to the actual model name |
+| Parameter | Type                    | Default Value | Description                                     |
+|-----------|-------------------------|---------------|-------------------------------------------------|
+| (Alias)   | String / List of String | None          | Maps to the actual model name or tag names list |
 
 ### 2.5 Template Syntax
 Templates use Jinja2 syntax, supporting variable substitution and basic control structures.
@@ -197,7 +204,7 @@ stream = false
 template.user = """{{content}}"""
 
 [module.summerize]
-model = "Precise-Model"  # Using model alias
+model = "precise"  # Using model tag
 template.user = """Article Title: {{title}}
 Article Content: <article>{{content}}</article>
 Based on the article content:
@@ -206,16 +213,16 @@ Based on the article content:
 3. Summarize this article"""
 
 [module.creative_writing]
-model = "Creative-Model"  # Using model alias
+model = "creative"  # Using model tag
 template.user = """Please write an article about {{topic}} in {{style}} style, with approximately {{word_count}} words"""
 options = {temperature = 0.8, max_tokens = 2000}
 
 [module.code_generator]
-model = "Code-Model"  # Using model alias
+model = "code"  # Using model tag
 template.user = """Please write a code example for {{functionality}} using {{language}} language, with detailed comments"""
 
 [module.task_adder]
-model = "Fast-Model"  # Using model alias
+model = ["fast", "low_cost"]  # Use multiple tags to filter models that satisfy both conditions
 stream = true
 template.user = "As a schedule assistant, you can help users add to-do items. Analyze the user's instruction: if there are specific to-do items, call the tool; if not, ask the user to provide detailed information about the task. User says: {{user_input}}"
 
@@ -267,12 +274,7 @@ result = await app['task_adder'](
 ### 3.3 Dynamically Adding Configuration
 ```python
 # Dynamically add module configuration
-app.config['module']['new_module'] = {
-    'model': 'Cheap-Model',  # Using model alias
-    'template': {
-        'user': '{{query}}'
-    }
-}
+app.add_module(ModuleConfig(...))
 
 # Dynamically add post-processor
 app.add_processor('custom_parser', lambda x: x.split('\n'))
@@ -280,7 +282,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. Notes
 
-1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_provider.toml`, or an alias defined in the `[model_alias]` section.
+1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_provider.toml`, a tag defined in the `[model_tag]` section, or an alias defined in the `[model_alias]` section.
 
 2. **Template Variables**: Variables used in templates must be provided during invocation, otherwise rendering will fail.
 
@@ -288,4 +290,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. When `messages` are provided, token count is automatically estimated and models exceeding the limit are filtered out.
+5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.

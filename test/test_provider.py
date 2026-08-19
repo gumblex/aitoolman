@@ -320,5 +320,181 @@ class TestCalculateTagWeights(unittest.TestCase):
         self.assertEqual(alias_weights, {'model-a': 1.0})
 
 
+
+def make_nested_test_config():
+    """包含嵌套模型列表的测试配置"""
+    return {
+        'default': {
+            'timeout': 30,
+            'max_retries': 2,
+            'parallel': 1,
+            'api_type': 'openai',
+        },
+        'api': {
+            'model-a': {
+                'type': 'openai',
+                'model': 'model-a',
+                'url': 'http://localhost:8000/v1/chat/completions',
+                'parallel': 2,
+            },
+            'model-b': {
+                'type': 'openai',
+                'model': 'model-b',
+                'url': 'http://localhost:8001/v1/chat/completions',
+                'parallel': 4,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
+            'model-d': {
+                'type': 'openai',
+                'model': 'model-d',
+                'url': 'http://localhost:8003/v1/chat/completions',
+                'parallel': 2,
+            },
+            'model-e': {
+                'type': 'openai',
+                'model': 'model-e',
+                'url': 'http://localhost:8004/v1/chat/completions',
+                'parallel': 2,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
+            'model-f1': {
+                'type': 'openai',
+                'model': 'model-f1',
+                'url': 'http://localhost:8004/v1/chat/completions',
+                'parallel': 2,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
+            'model-f2': {
+                'type': 'openai',
+                'model': 'model-f2',
+                'url': 'http://localhost:8004/v1/chat/completions',
+                'parallel': 2,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
+            'model-f3': {
+                'type': 'openai',
+                'model': 'model-f3',
+                'url': 'http://localhost:8004/v1/chat/completions',
+                'parallel': 2,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
+        },
+        'model_tag': {
+            'low_cost': ['model-a', 'model-b', ['model-d', 'model-e']],
+            'fast': ['model-a', 'model-b'],
+            'cheap': ['model-b', ['model-d', 'model-e']],
+            'same': [['model-f1', 'model-f2', 'model-f3']],
+        },
+        'model_alias': {},
+    }
+
+
+class TestNestedModelList(unittest.TestCase):
+    """嵌套模型列表功能测试"""
+
+    def test_nested_tag_weights(self):
+        """嵌套组内模型共享排名权重"""
+        manager = LLMProviderManager(make_nested_test_config())
+        weights = manager.model_tag_weights['low_cost']
+        # model-d 和 model-e 共享位置2的权重，应该相等
+        self.assertEqual(weights['model-d'], weights['model-e'])
+        # model-a (位置0) 权重最高
+        self.assertGreater(weights['model-a'], weights['model-b'])
+        # model-b (位置1) 权重高于 model-d/e (位置2)
+        self.assertGreater(weights['model-b'], weights['model-d'])
+        self.assertGreaterEqual(sum(weights.values()), 1.0)
+
+    def test_nested_resolve_model(self):
+        """嵌套标签解析返回所有可用模型"""
+        manager = LLMProviderManager(make_nested_test_config())
+        result = manager.resolve_model(['low_cost'])
+        # model-a 权重最高，排第一
+        self.assertEqual(result[0], 'model-a')
+        # model-d 和 model-e 都应在结果中
+        self.assertIn('model-d', result)
+        self.assertIn('model-e', result)
+
+    def test_nested_multiple_tags(self):
+        """多标签交集匹配嵌套列表"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # 'low_cost' 有 model-a, model-b, model-d, model-e
+        # 'cheap' 有 model-b, model-d, model-e
+        # 交集为 model-b, model-d, model-e
+        result = manager.resolve_model(['low_cost', 'cheap'])
+        self.assertIn('model-b', result)
+        self.assertIn('model-d', result)
+        self.assertIn('model-e', result)
+        self.assertNotIn('model-a', result)
+
+    def test_nested_token_filter(self):
+        """Token限制过滤嵌套组模型"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # model-b 和 model-e 有 max_input_tokens=1000, bytes_per_token=4.0
+        long_text = "a" * 5000  # 5000 bytes / 4.0 = 1250 tokens > 1000
+        messages = [Message.from_content(long_text, role="user")]
+        result = manager.resolve_model(['low_cost'], messages)
+        # model-b 和 model-e 被过滤，剩 model-a 和 model-d
+        self.assertIn('model-a', result)
+        self.assertIn('model-d', result)
+        self.assertNotIn('model-b', result)
+        self.assertNotIn('model-e', result)
+
+    def test_nested_mixed_list(self):
+        """平面与嵌套列表混用兼容"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # 'fast' 标签为纯平面列表，行为不变
+        result_fast = manager.resolve_model(['fast'])
+        self.assertEqual(result_fast[0], 'model-a')
+        # 'cheap' 标签包含嵌套列表
+        result_cheap = manager.resolve_model(['cheap'])
+        self.assertEqual(result_cheap[0], 'model-b')
+
+    def test_nested_random_selection(self):
+        """同权重模型随机轮流选择"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # 'cheap' 标签: model-b (位置0, 权重高), [model-d, model-e] (位置1, 共享权重)
+        # model-d 和 model-e 权重相同，排序应随机
+        results = set()
+        for _ in range(20):
+            result = manager.resolve_model(['cheap'])
+            if len(result) >= 3:
+                results.add((result[1], result[2]))
+        # 应至少观察到两种不同的顺序（随机性验证）
+        self.assertGreater(len(results), 1)
+
+    def test_nested_random_selection_same_group(self):
+        """同权重模型随机轮流选择"""
+        manager = LLMProviderManager(make_nested_test_config())
+        results = set()
+        for _ in range(100):
+            result = manager.resolve_model(['same'])
+            results.add(tuple(result))
+        self.assertEqual(len(results), 6)
+
+    def test_nested_disabled_model(self):
+        """嵌套组中禁用模型不参与路由"""
+        config = make_nested_test_config()
+        config['api']['model-d']['enable'] = False
+        manager = LLMProviderManager(config)
+        result = manager.resolve_model(['low_cost'])
+        self.assertNotIn('model-d', result)
+        self.assertIn('model-e', result)
+
+    def test_backward_compatibility(self):
+        """向后兼容：原有平面列表配置仍正常工作"""
+        manager = LLMProviderManager(make_test_config())
+        # 原有 fast 标签行为不变
+        result = manager.resolve_model(['fast'])
+        self.assertEqual(result[0], 'model-a')
+        # 原有权重计算不变
+        fast_weights = manager.model_tag_weights['fast']
+        self.assertGreater(fast_weights['model-a'], fast_weights['model-b'])
+
+
 if __name__ == '__main__':
     unittest.main()
