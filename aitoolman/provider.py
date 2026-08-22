@@ -743,7 +743,8 @@ class LLMProviderManager:
         self.model_tag_weights: Dict[str, Dict[str, float]] = {}
         self._calculate_all_tag_weights()
 
-        self.timeout: float = self.default_config.get('timeout', 600.0)
+        self.timeout: float = self.default_config.get('timeout', 10.0)
+        self.timeout_batch: float = self.default_config.get('timeout_batch', 300.0)
         self.max_retries: int = self.default_config.get('max_retries', 0)
         self.default_parallel: int = self.default_config.get('parallel', 10)
         self.retry_duration = self.default_config.get('retry_duration', 0.5)
@@ -774,12 +775,17 @@ class LLMProviderManager:
                 result.append(item)
         return result
 
-    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None) -> List[str]:
+    def get_queue_length(self, model_name: str) -> int:
+        """获取模型当前并发负载量（活跃请求数 + 等待队列长度）"""
+        return self.resource_manager.get_queue_length(model_name)
+
+    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]:
         """解析出最终使用的真实模型名
 
         Args:
             input_tags: 标签/模型名/别名列表
             messages: 可选消息列表，用于Token数估算过滤
+            context_id: 可选上下文 ID，用于稳定随机排序的种子
 
         Returns:
             真实模型名
@@ -847,9 +853,11 @@ class LLMProviderManager:
                 for tag_weights in tag_matched.values()
             )
 
+        rng = random.Random(context_id or None)
         best_models = sorted(common_models, key=lambda m: (
             model_total_weights[m],
-            random.random()
+            -self.get_queue_length(m),
+            rng.random()
         ), reverse=True)
         return best_models
 
@@ -894,6 +902,7 @@ class LLMProviderManager:
             model=config['model'],
             parallel=config.get('parallel', self.default_parallel),
             timeout=config.get("timeout", self.timeout),
+            timeout_batch=config.get("timeout_batch", self.timeout_batch),
             api_type=api_type,
             body_options=body_options,
             max_input_tokens=config.get(
@@ -968,7 +977,7 @@ class LLMProviderManager:
                 url=model_config["url"],
                 json=request_body,
                 headers=model_config.get("headers", {}),
-                timeout=model_config.get("timeout", self.timeout)
+                timeout=model_config.get("timeout_batch", self.timeout_batch)
             )
         except Exception as e:
             logger.warning("_handle_batch_request error.", exc_info=True)

@@ -11,13 +11,15 @@ import zmq.asyncio
 
 from . import util
 from . import model as _model
-from .model import LLMProviderRequest, LLMProviderResponse, ToolCall, Message, ModelInfo
+from .model import LLMProviderRequest, LLMProviderResponse, LLMApiRequestError, ToolCall, Message, ModelInfo
 from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
 
 logger = logging.getLogger(__name__)
 
 class LLMZmqClient(LLMClient):
+    zmq_timeout = 10.0
+
     def __init__(self, router_endpoint: str, auth_token: Optional[str] = None):
         super().__init__()
         self.router_endpoint = router_endpoint
@@ -264,7 +266,7 @@ class LLMZmqClient(LLMClient):
         )
 
         try:
-            return await asyncio.wait_for(future, timeout=10.0)
+            return await asyncio.wait_for(future, timeout=self.zmq_timeout)
         except asyncio.TimeoutError:
             self._rpc_futures.pop(request_id, None)
             raise RuntimeError("RPC request timeout")
@@ -288,14 +290,22 @@ class LLMZmqClient(LLMClient):
         result = await self._send_rpc('list_models', {'tag': tag})
         return [ModelInfo(**info) for info in result]
 
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]:
+    async def resolve_model(
+            self,
+            tags: Union[str, List[str]],
+            messages: Optional[List[Message]] = None,
+            context_id: Optional[str] = None
+    ) -> List[str]:
         """异步解析模型"""
         if isinstance(tags, str):
             tags = [tags]
-        kwargs = {'tags': tags}
+        kwargs = {'tags': tags, 'context_id': context_id or self.client_id}
         if messages is not None:
             kwargs['messages'] = [m.to_dict() for m in messages]
-        return await self._send_rpc('resolve_model', kwargs)
+        try:
+            return await self._send_rpc('resolve_model', kwargs)
+        except asyncio.TimeoutError:
+            raise LLMApiRequestError("resolve_model RPC request timeout")
 
     async def update_config(self, new_config: Dict[str, Any]):
         await self._send_rpc('update_config', {'new_config': new_config})

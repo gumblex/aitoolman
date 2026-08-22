@@ -20,7 +20,8 @@ Default configuration inherited by all model configurations.
 
 | Parameter         | Type    | Default Value   | Description                                                                 |
 |-------------------|---------|-----------------|-----------------------------------------------------------------------------|
-| `timeout`         | Float   | 600             | HTTP request timeout duration (seconds)                                     |
+| `timeout`         | Float   | 10              | Network activity timeout duration (seconds), used by models with stream=true  |
+| `timeout_batch`   | Float   | 300             | Network activity timeout duration (seconds), used by models with stream=false |
 | `max_retries`     | Integer | 0               | Maximum number of retries when request fails                                |
 | `parallel`        | Integer | 10              | Default model parallel processing capacity (number of concurrent requests)  |
 | `retry_duration`  | Float   | 0.5             | Initial retry interval (seconds)                                             |
@@ -43,7 +44,8 @@ Specific configuration for each model, model names can be customized.
 | `model`           | String  | None (Required)                             | Model identifier on the provider's side                                               |
 | `parallel`        | Integer | Inherited from `[default].parallel`         | Parallel processing capacity for this model                                           |
 | `headers`         | Dict    | Inherited from `[default].headers`          | Model-specific HTTP request headers                                                   |
-| `timeout`         | Float   | Inherited from `[default].timeout`          | Model-specific timeout duration                                                       |
+| `timeout`         | Float   | Inherited from `[default].timeout`          | Model-specific timeout duration for stream=true requests                            |
+| `timeout_batch`   | Float   | Inherited from `[default].timeout_batch`    | Model-specific timeout duration for stream=false requests                           |
 | `body_options`    | Dict    | Inherited from `[default].body_options`     | Default request options for this model, overrides all options in `[default]`. |
 | `max_input_tokens` | Integer | Inherited from `[default].max_input_tokens` | Maximum input token count for this model            |
 | `bytes_per_token`  | Float   | Inherited from `[default].bytes_per_token`  | Estimated UTF-8 bytes per token for this model      |
@@ -90,7 +92,8 @@ zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
 zmq_manage_token = "YOUR_MANAGE_TOKEN"  # Management auth token (optional)
 
 [default]
-timeout = 600
+timeout = 10
+timeout_batch = 300
 max_retries = 3
 parallel = 1
 retry_duration = 0.5

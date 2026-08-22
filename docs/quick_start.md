@@ -738,12 +738,17 @@ class LLMProviderManager:
 1. **精确匹配优先**：遍历 input_tags，若存在与真实模型名完全匹配的项，直接返回该模型（单元素列表）
 2. **标签交集匹配**：查找每个输入标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/别名视为单元素集合，权重为1）
 3. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型
-4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序，返回候选模型列表
+4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序
+5. **排队长度排序**：权重相同的同级模型，按当前排队任务数从低到高排序，优先选择排队较少的模型
+6. **稳定随机排序**：若权重和并发量仍相同，以 `context_id`（如有）或 `client_id` 为随机种子进行稳定排序，同一上下文的多次调用结果稳定，不同上下文之间实现负载均衡
+
+返回候选模型列表
 
 #### 5.3.3 使用方式
-- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages)`，传入标签列表和可选的消息列表，得到排序后的候选模型列表
+- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages, context_id=context_id)`，传入标签列表、可选的消息列表和上下文 ID（可选），得到排序后的候选模型列表
 - **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，可传入单个标签字符串或多个标签的列表，系统自动路由到最优模型
 - **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
+- **context_id 参数**：`resolve_model` 的 `context_id` 参数用于作为稳定随机排序的随机种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id` 作为种子
 
 #### 5.3.4 应用场景
 - 按业务场景分组：如 `fast`（快速响应）、`precise`（高精度）、`low_cost`（低成本）、`code`（代码处理）、`multimodal`（多模态）等，业务代码直接使用场景标签
@@ -831,7 +836,8 @@ zmq_manage_token = "YOUR_MANAGE_TOKEN" # 管理权限认证令牌（可选）
 
 # 默认配置
 [default]
-timeout = 600
+timeout = 10          # 流式请求（stream=True）超时，网络活动超时
+timeout_batch = 300   # 批量请求（stream=False）超时
 max_retries = 3
 parallel = 1
 api_type = "openai"

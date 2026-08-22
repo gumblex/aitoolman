@@ -213,6 +213,7 @@ class ModelInfo(typing.NamedTuple):
     model: str
     parallel: int              # 模型并行度配置
     timeout: float             # 超时时间
+    timeout_batch: float        # 批量请求超时时间
     api_type: str              # API格式：openai/anthropic
     body_options: Dict[str, Any] # 模型请求默认参数
     max_input_tokens: int      # 支持的最大输入Token数

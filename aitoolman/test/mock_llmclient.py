@@ -257,7 +257,7 @@ class MockLLMClient(_client.LLMClient):
     async def list_models(self, tag: Optional[str] = None):
         return []
 
-    async def resolve_model(self, tags: Union[str, List[str]], messages = None) -> str:
+    async def resolve_model(self, tags: Union[str, List[str]], messages = None, context_id: str = None) -> str:
         return 'test_model'
 
     async def update_config(self, new_config: Dict[str, Any]):

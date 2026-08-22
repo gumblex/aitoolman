@@ -735,12 +735,17 @@ After inputting the tag list (`input_tags`), the system calculates the optimal c
 1. **Exact match first**: Traverse input_tags. If there is an item that exactly matches the actual model name, return the model directly (single-element list).
 2. **Tag intersection matching**: Find the model set and corresponding weight for each input tag, and take the intersection of models corresponding to all tags (a single model name/alias is treated as a single-element set with weight 1).
 3. **Token limit filtering**: If the `messages` parameter is provided, automatically estimate the total number of input tokens, and filter out models configured with `max_input_tokens` where the total token count exceeds the limit.
-4. **Weight sorting**: Sum the weights of each model across all tags, sort by total weight in descending order, and return the candidate model list.
+4. **Weight Sorting**: Sum the weight of each model across all matched tags, and sort the models in descending order of total weight
+5. **Queue Length Sorting**: For models at the same tier with identical total weight, sort them in ascending order of the current number of pending queued tasks, to prioritize models with shorter queues
+6. **Stable Random Sorting**: If the total weight and queue length of models are still exactly the same, use `context_id` (if available) or `client_id` as the random seed for stable sorting. Multiple calls under the same context will return consistent results, while load balancing is achieved across different contexts
+
+The sorted candidate model list will be returned after the above processing.
 
 #### 5.3.3 Usage
-- **resolve_model interface**: Directly call `client.resolve_model(tags, messages)`, pass in the tag list and optional message list to get the sorted candidate model list.
+- **resolve_model Interface**: Directly call `client.resolve_model(tags, messages, context_id=context_id)`, pass in the tag list, optional message list and optional context ID, to get the sorted candidate model list
 - **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, you can pass in a single tag string or a list of multiple tags, and the system will automatically route to the optimal model.
 - **model_rank parameter**: Used to select the Nth model in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied. When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing.
+- **context_id Parameter**: The `context_id` parameter of the `resolve_model` interface acts as the random seed for stable random sorting, ensuring that multiple calls with the same `context_id` return consistent results. If it is not explicitly passed, `client_id` will be used as the seed by default
 
 #### 5.3.4 Application Scenarios
 - Group by business scenario: such as `fast` (fast response), `precise` (high precision), `low_cost` (low cost), `code` (code processing), `multimodal` (multimodal), etc. Business code directly uses scenario tags.
@@ -827,7 +832,8 @@ zmq_manage_token = "YOUR_MANAGE_TOKEN" # Management permission authentication to
 
 # Default Configuration
 [default]
-timeout = 600
+timeout = 10          # Streaming request (stream=True) timeout, network activity timeout
+timeout_batch = 300   # Batch request (stream=False) timeout
 max_retries = 3
 parallel = 1
 api_type = "openai"

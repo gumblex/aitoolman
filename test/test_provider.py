@@ -2,6 +2,7 @@ import json
 import asyncio
 import logging
 import unittest
+from unittest import mock
 
 from httpx_sse import ServerSentEvent
 
@@ -494,6 +495,34 @@ class TestNestedModelList(unittest.TestCase):
         # 原有权重计算不变
         fast_weights = manager.model_tag_weights['fast']
         self.assertGreater(fast_weights['model-a'], fast_weights['model-b'])
+
+    def test_nested_resolve_model_load_balancing(self):
+        """同级模型按并发量升序排序"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # model-f1/f2/f3 在 'same' 标签中共享权重，模拟不同并发负载
+        queue_map = {'model-f1': 3, 'model-f2': 1, 'model-f3': 2}
+        with mock.patch.object(manager, 'get_queue_length', side_effect=lambda name: queue_map.get(name, 0)):
+            result = manager.resolve_model(['same'], context_id='test-context')
+        # 并发量少的模型排在前面：f2(1) -> f3(2) -> f1(3)
+        self.assertEqual(result, ['model-f2', 'model-f3', 'model-f1'])
+
+    def test_nested_resolve_model_stable_with_context_id(self):
+        """相同 context_id 输出稳定"""
+        manager = LLMProviderManager(make_nested_test_config())
+        results = set()
+        for _ in range(10):
+            result = manager.resolve_model(['same'], context_id='stable-ctx')
+            results.add(tuple(result))
+        self.assertEqual(len(results), 1)
+
+    def test_nested_resolve_model_different_context_id(self):
+        """不同 context_id 输出多样"""
+        manager = LLMProviderManager(make_nested_test_config())
+        results = set()
+        for i in range(20):
+            result = manager.resolve_model(['same'], context_id='ctx-%d' % i)
+            results.add(tuple(result))
+        self.assertGreater(len(results), 1)
 
 
 if __name__ == '__main__':

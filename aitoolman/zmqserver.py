@@ -326,7 +326,8 @@ class LLMZmqServer:
             elif method == 'resolve_model':
                 result = self.provider_manager.resolve_model(
                     kwargs.get('tags', []),
-                    [Message.from_dict(m) for m in kwargs.get('messages')] if kwargs.get('messages') else None
+                    [Message.from_dict(m) for m in kwargs.get('messages')] if kwargs.get('messages') else None,
+                    context_id=kwargs.get('context_id', '')
                 )
             elif method == 'update_config':
                 self.provider_manager.update_config(kwargs['new_config'])
