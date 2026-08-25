@@ -1,10 +1,8 @@
 import json
-import asyncio
-import logging
 import unittest
 from unittest import mock
 
-from httpx_sse import ServerSentEvent
+from aitoolman.sse import ServerSentEvent
 
 from aitoolman.provider import OpenAICompatibleFormat, LLMProviderManager
 from aitoolman.model import LLMProviderRequest, LLMProviderResponse, LLMNoAvailableModelError, Message
@@ -105,7 +103,7 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         )
 
         event = self.format_strategy.parse_stream_event(
-            response, ServerSentEvent(data="[DONE]"))
+            response, ServerSentEvent(data=b"[DONE]"))
         self.assertTrue(event.is_end)
 
     def test_parse_stream_chunk_valid_data(self):

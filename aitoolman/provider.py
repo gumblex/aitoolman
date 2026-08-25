@@ -8,16 +8,15 @@ import random
 import typing
 from typing import Optional, Dict, Any, List, Callable, Set, Union
 
-from . import postprocess, util
-from .util import calculate_rank_weights, estimate_text_tokens
+from . import sse
+from . import util
+from . import postprocess
+from .util import calculate_rank_weights, calc_message_length, estimate_text_token
 from .channel import ChannelEvent
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall, ModelInfo, LLMNoAvailableModelError
-
 from .resmanager import ResourceManager
 
 import httpx
-import httpx_sse
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -95,7 +94,7 @@ class LLMFormatStrategy(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: sse.ServerSentEvent) -> ProviderStreamEvent:
         """
         解析流式响应的单个chunk
         返回值：(是否结束, 内容片段, 推理片段, 工具调用列表)
@@ -275,15 +274,15 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         response.completion_tokens = usage.get("completion_tokens")
         response.response_message = self.parse_response_message(response, message)
 
-    def parse_stream_event(self, response: LLMProviderResponse, event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
+    def parse_stream_event(self, response: LLMProviderResponse, event: sse.ServerSentEvent) -> ProviderStreamEvent:
         """解析OpenAI流式响应（含工具调用增量累积）"""
         # 1. 处理空行
-        line = event.data.strip()
-        if not line:
+        line_bytes: bytes = event.data.strip()
+        if not line_bytes:
             return ProviderStreamEvent.empty()
 
         # 2. 处理流式结束标记（统一返回工具调用）
-        if line == "[DONE]":
+        if line_bytes == b"[DONE]":
             # 转换累积的工具调用为ToolCall列表
             final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
             response_message = {
@@ -304,9 +303,9 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
         # 3. 解析JSON格式的chunk
         try:
-            chunk_data = json.loads(line)
+            chunk_data = util.decode_json(line_bytes)
         except json.JSONDecodeError:
-            logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line)
+            logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line_bytes)
             return ProviderStreamEvent.empty()
 
         logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
@@ -582,21 +581,21 @@ class AnthropicFormat(LLMFormatStrategy):
         response.completion_tokens = usage.get("output_tokens")
 
     def parse_stream_event(self, response: LLMProviderResponse,
-                           event: httpx_sse.ServerSentEvent) -> ProviderStreamEvent:
+                           event: sse.ServerSentEvent) -> ProviderStreamEvent:
         """Parse streaming response chunk"""
         logger.debug('[%s] stream event: %s', response.request_id, event)
         # Handle event type
         event_type = event.event
-        line = event.data.strip()
+        line_bytes: bytes = event.data.strip()
         if event_type == "error":
             response.finish_reason = FinishReason.error_request.value
-            response.error_text = line
+            response.error_text = line_bytes.decode('utf-8')
             logger.error("[%s: Anthropic] Stream error: %s",
-                         response.request_id, line)
+                         response.request_id, response.error_text)
             return ProviderStreamEvent(True, "", "", [], None)
 
         # Handle stream end
-        if line == "[DONE]" or event_type == "message_stop":
+        if line_bytes == b"[DONE]" or event_type == "message_stop":
             final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
             response_message = {
                 "content": self.stream_content_buffer,
@@ -617,14 +616,14 @@ class AnthropicFormat(LLMFormatStrategy):
 
             return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
 
-        if not line:
+        if not line_bytes:
             return ProviderStreamEvent.empty()
 
         try:
-            chunk_data = json.loads(line)
+            chunk_data = util.decode_json(line_bytes)
         except json.JSONDecodeError:
             logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
-                           response.request_id, line)
+                           response.request_id, line_bytes)
             return ProviderStreamEvent.empty()
 
         # Handle token usage
@@ -828,6 +827,7 @@ class LLMProviderManager:
 
         # 3. Token限制过滤
         if messages is not None:
+            msg_length = calc_message_length(messages)
             for model_name in list(common_models):
                 model_config = self.api_config.get(model_name, {})
                 max_input_tokens = model_config.get(
@@ -837,7 +837,7 @@ class LLMProviderManager:
                         'bytes_per_token',
                         self.default_config.get('bytes_per_token', self.default_bytes_per_token)
                     )
-                    estimated_tokens = estimate_text_tokens(messages, bytes_per_token)
+                    estimated_tokens = estimate_text_token(msg_length, bytes_per_token)
                     if estimated_tokens > max_input_tokens:
                         common_models.discard(model_name)
 
@@ -1036,9 +1036,8 @@ class LLMProviderManager:
             ) as http_response:
                 http_response.raise_for_status()
 
-                event_source = httpx_sse.EventSource(http_response)
                 # 逐行解析流式响应（SSE格式：data: ...）
-                async for sse_event in event_source.aiter_sse():
+                async for sse_event in sse.aiter_sse(http_response):
                     if request.is_cancelled:
                         response.finish_reason = FinishReason.cancelled.value
                         response.error_text = 'cancelled'

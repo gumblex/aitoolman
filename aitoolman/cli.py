@@ -275,7 +275,7 @@ async def _run_client_session(args):
         options = {}
         if args.body:
             try:
-                options = json.loads(args.body)
+                options = util.decode_json(args.body)
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON for --body: " + args.body)
 

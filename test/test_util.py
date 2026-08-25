@@ -1,5 +1,5 @@
 import unittest
-from aitoolman.util import calculate_rank_weights, estimate_text_tokens
+from aitoolman.util import calculate_rank_weights, calc_message_length, estimate_text_token, MessageLength
 from aitoolman.model import Message
 
 
@@ -37,31 +37,68 @@ class TestCalculateRankWeights(unittest.TestCase):
         self.assertGreater(result['b'], result['c'])
 
 
-class TestEstimateTextTokens(unittest.TestCase):
-    def test_estimate_text_tokens_basic(self):
-        """基本文本Token估算"""
+class TestCalcMessageLengthAndEstimateTextToken(unittest.TestCase):
+    def test_text_basic(self):
+        """基本文本长度计算与Token估算"""
         messages = [Message.from_content("Hello world", role="user")]
-        result = estimate_text_tokens(messages)
-        # "Hello world" = 11 bytes, 11/4.0 = 2.75 -> ceil = 3
-        self.assertGreaterEqual(result, 3)
+        length = calc_message_length(messages)
+        # "user" (4 bytes) + "Hello world" (11 bytes) = 15 bytes
+        self.assertEqual(length.text_bytes, 15)
+        self.assertEqual(length.message_num, 1)
+        self.assertEqual(length.fragment_num, 2)  # role, content
+        self.assertEqual(length.image_num, 0)
+        self.assertEqual(length.video_num, 0)
 
-    def test_estimate_text_tokens_empty(self):
-        """无内容消息返回0"""
+        # ceil(15/4.0) = 4, (1+2) = 3. Total = 7
+        result = estimate_text_token(length, 4.0, 1300, 50000)
+        self.assertEqual(result, 7)
+
+    def test_text_empty(self):
+        """无内容消息Token估算"""
         messages = [Message.from_content("", role="user")]
-        result = estimate_text_tokens(messages)
+        length = calc_message_length(messages)
+        # "user" (4 bytes), content is "" so not counted as fragment
+        self.assertEqual(length.text_bytes, 4)
+        self.assertEqual(length.message_num, 1)
+        self.assertEqual(length.fragment_num, 1)  # only role
+        # ceil(4/4) = 1, (1+1) = 2. Total = 3
+        result = estimate_text_token(length, 4.0, 1300, 50000)
         self.assertEqual(result, 3)
 
-    def test_estimate_text_tokens_custom_ratio(self):
+    def test_text_custom_bytes_per_token(self):
         """自定义 bytes_per_token 参数"""
         messages = [Message.from_content("Hello world", role="user")]
-        result = estimate_text_tokens(messages, bytes_per_token=2.0)
-        self.assertGreaterEqual(result, 6)
+        length = calc_message_length(messages)
+        # ceil(15/2.0) = 8, (1+2) = 3. Total = 11
+        result = estimate_text_token(length, bytes_per_token=2.0)
+        self.assertEqual(result, 11)
 
-    def test_estimate_text_tokens_multibyte(self):
+    def test_text_multibyte(self):
         """包含中文等多字节字符的估算"""
         messages = [Message.from_content("你好世界", role="user")]
-        result = estimate_text_tokens(messages)
-        self.assertGreaterEqual(result, 3)
+        length = calc_message_length(messages)
+        # "user" (4) + "你好世界" (12) = 16 bytes
+        self.assertEqual(length.text_bytes, 16)
+        # ceil(16/4) = 4, (1+2) = 3. Total = 7
+        result = estimate_text_token(length, 4.0, 1300, 50000)
+        self.assertEqual(result, 7)
+
+    def test_multimedia_token_estimation(self):
+        """包含图片和视频的Token估算"""
+        length = MessageLength(
+            text_bytes=10,
+            message_num=1,
+            fragment_num=2,
+            image_num=2,
+            video_num=1
+        )
+        # text: ceil(10/4)=3
+        # special: 1+2=3
+        # image: 2 * 1300 = 2600
+        # video: 1 * 50000 = 50000
+        # total = 3 + 3 + 2600 + 50000 = 15606
+        result = estimate_text_token(length, 4.0, 1300, 50000)
+        self.assertEqual(result, 15606)
 
 
 if __name__ == '__main__':

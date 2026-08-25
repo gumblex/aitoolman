@@ -23,7 +23,7 @@ class LLMZmqClient(LLMClient):
     def __init__(self, router_endpoint: str, auth_token: Optional[str] = None):
         super().__init__()
         self.router_endpoint = router_endpoint
-        self.auth_token = auth_token
+        self.auth_token: bytes = auth_token.encode('utf-8') if auth_token else b''
         self.ctx = zmq.asyncio.Context()
         self.socket = self.ctx.socket(zmq.DEALER)
         self.socket.setsockopt_string(zmq.IDENTITY, self.client_id)
@@ -75,11 +75,11 @@ class LLMZmqClient(LLMClient):
             msg_type: 消息类型，对应消息体的type字段
             **kwargs: 消息体的其他字段
         """
-        msg = {'type': msg_type, **kwargs}
         await self.socket.send_multipart([
             b'',
-            self.auth_token.encode('utf-8') if self.auth_token else b'',
-            util.encode_message(msg)
+            self.auth_token,
+            msg_type.encode('utf-8'),
+            util.encode_message(kwargs)
         ])
 
     async def listen_responses(self):
@@ -87,29 +87,37 @@ class LLMZmqClient(LLMClient):
         while self.connected:
             try:
                 message = await self.socket.recv_multipart()
-                if len(message) != 2:
-                    logger.error(f"Invalid response format: {len(message)} parts")
+                if len(message) != 3:
+                    logger.error(f"Invalid response format, please upgrade: {len(message)} parts")
                     continue
 
-                json_data = json.loads(message[1].decode('utf-8'))
-                msg_type = json_data.get('type')
-                request_id = json_data.get('request_id')
+                msg_type = message[1].decode('utf-8')
+                json_data = util.decode_json(message[2])
 
                 if msg_type == 'rpc_response':
+                    request_id = json_data.get('request_id')
                     self.handle_rpc_response(request_id, json_data)
                     continue
                 elif msg_type == 'error':
                     logger.error(f"Server error: {json_data.get('error')}")
                     continue
+                elif msg_type == 'channel_write':
+                    for msg in json_data:
+                        req_id = msg.get('request_id')
+                        request = self.active_requests.get(req_id)
+                        if not request:
+                            logger.warning(f"channel_write for unknown request {req_id}")
+                            continue
+                        await self.handle_channel_write(request, msg)
+                    continue
 
+                request_id = json_data.get('request_id')
                 request = self.active_requests.get(request_id)
                 if not request:
                     logger.warning(f"Response for unknown request {request_id}")
                     continue
 
-                if msg_type == 'channel_write':
-                    await self.handle_channel_write(request, json_data)
-                elif msg_type == 'response':
+                if msg_type == 'response':
                     await self.handle_response(request, json_data)
                 elif msg_type == 'cancel_ack':
                     await self.handle_cancel_ack(request)
@@ -121,7 +129,7 @@ class LLMZmqClient(LLMClient):
                 logger.exception("Error in listener task")
 
     async def handle_channel_write(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
-        """处理channel写入消息"""
+        """处理channel写入消息（单条消息）"""
         channel_name = json_data['channel']
         text = json_data['text']
 
@@ -269,7 +277,7 @@ class LLMZmqClient(LLMClient):
             return await asyncio.wait_for(future, timeout=self.zmq_timeout)
         except asyncio.TimeoutError:
             self._rpc_futures.pop(request_id, None)
-            raise RuntimeError("RPC request timeout")
+            raise TimeoutError("RPC request timeout")
 
     def handle_rpc_response(self, request_id: str, json_data: Dict[str, Any]):
         """处理RPC响应"""
@@ -304,7 +312,7 @@ class LLMZmqClient(LLMClient):
             kwargs['messages'] = [m.to_dict() for m in messages]
         try:
             return await self._send_rpc('resolve_model', kwargs)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise LLMApiRequestError("resolve_model RPC request timeout")
 
     async def update_config(self, new_config: Dict[str, Any]):
@@ -337,20 +345,6 @@ class LLMMonitor:
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.SUB)
         self.running = False
-
-    def _truncate_text(self, text: str, max_len: int = 200) -> str:
-        """截断文本"""
-        if not text:
-            return ""
-        if len(text) <= max_len:
-            return text
-        return text[:max_len] + "..."
-
-    def _format_time(self, timestamp: Optional[float]) -> str:
-        """格式化时间"""
-        if timestamp is None:
-            return "N/A"
-        return f"{timestamp:.3f}s"
 
     def on_llm_request(self, data: Dict[str, Any]):
         """处理LLM请求审计消息"""
@@ -449,12 +443,12 @@ class LLMMonitor:
             try:
                 message = self.socket.recv_multipart()
                 if len(message) >= 2:
-                    topic = message[0].decode('utf-8')
-                    if topic == "llm_request":
-                        data = json.loads(message[1].decode('utf-8'))
+                    topic = message[0]
+                    if topic == b"llm_request":
+                        data = util.decode_json(message[1])
                         self.on_llm_request(data)
-                    elif topic == "audit_event":
-                        data = json.loads(message[1].decode('utf-8'))
+                    elif topic == b"audit_event":
+                        data = util.decode_json(message[1])
                         self.on_audit_event(data)
             except zmq.ZMQError as e:
                 if self.running:

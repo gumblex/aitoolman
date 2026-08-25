@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aitoolman"
-version = "0.5.5"
+version = "0.6.0"
 authors = [
   { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
 ]
 description = "Controllable and Transparent LLM Application Framework"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -24,7 +24,6 @@ license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
   "httpx[http2]",
-  "httpx-sse",
   "jinja2",
   "json-repair",
   "pyzmq",
@@ -32,6 +31,7 @@ dependencies = [
   "fix-llm-xml>=1.1",
   "tomli; python_version < '3.11'",
   "tornado; sys_platform == 'win32'",
+  "orjson",
 ]
 
 [project.optional-dependencies]

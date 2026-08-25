@@ -2,7 +2,7 @@ import json
 import secrets
 import asyncio
 import logging
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 
 import zmq
 import zmq.asyncio
@@ -39,6 +39,8 @@ class LLMZmqServer:
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
         self.zmq_auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # ZeroMQ路由认证令牌
         self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
+        self.router_lock = asyncio.Lock()
+        self.channel_msg_buffer: Dict[str, List[Dict[str, Any]]] = {}
         self.running = False
 
     async def initialize(self):
@@ -78,20 +80,19 @@ class LLMZmqServer:
 
     async def process_message(self, message: List[bytes]):
         """解析并处理客户端消息"""
-        # 兼容3段和4段消息格式
-        if len(message) == 4:
-            client_id = message[0].decode('utf-8')
-            auth_token = message[2].decode('utf-8')
-            json_data = json.loads(message[3].decode('utf-8'))
-        elif len(message) == 3:
-            client_id = message[0].decode('utf-8')
-            auth_token = ''
-            json_data = json.loads(message[2].decode('utf-8'))
-        else:
-            logger.error(f"Invalid message format: {len(message)} parts")
+        try:
+            if len(message) == 5:
+                client_id = message[0].decode('utf-8')
+                auth_token = message[2].decode('utf-8')
+                msg_type = message[3].decode('utf-8')
+                json_data = util.decode_json(message[4])
+            else:
+                logger.error(f"Invalid message format, please upgrade.")
+                return
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to parse message, please upgrade: {e}")
             return
 
-        msg_type = json_data.get('type')
         request_id = json_data.get('request_id')
 
         logger.debug("[%s] Request: %s", client_id, json_data)
@@ -188,34 +189,60 @@ class LLMZmqServer:
         # 清理活跃请求
         del self.active_requests[request.request_id]
 
-    async def _send_client_message(self, client_id: str, message: Dict[str, Any]) -> None:
+    async def _send_client_message(self, client_id: str, msg_type: str, message: Any) -> None:
         """向指定客户端发送ZeroMQ路由消息"""
         await self.router_socket.send_multipart([
             client_id.encode('utf-8'),
             b'',
+            msg_type.encode('utf-8'),
             util.encode_message(message)
         ])
 
+    async def _flush_channel_messages(self):
+        while True:
+            has_messages = False
+            for client_id in tuple(self.channel_msg_buffer.keys()):
+                batch = self.channel_msg_buffer.pop(client_id)
+                if batch:
+                    has_messages = True
+                    await self._send_client_message(client_id, 'channel_write', batch)
+            if not has_messages:
+                break
+
     async def send_channel_write(self, request_id: str, channel_type: str, mode: str, text: str):
-        """发送channel写入消息给客户端"""
+        """发送channel写入消息给客户端（批量合并发送，乐观锁机制）
+
+        - 其他 msg_type 通过 _send_client_message 直接发送，不受 channel_write 影响
+        - channel_write 使用 router_lock 控制：
+          - 如果没有正在发送的，直接发送（含 channel_msg_buffer 内容）
+          - 如果有正在发送的，放入 channel_msg_buffer，由发送方在 while 循环中取走
+        - while 循环确保缓冲区中所有消息最终都会被发送，无遗留
+        """
         request = self.active_requests.get(request_id)
         if not request:
             logger.warning("[%s] Request not found for channel write", request_id)
             return
         client_id = request.client_id
         message = {
-            'type': 'channel_write',
             'request_id': request_id,
             'channel': channel_type,
             'mode': mode,
             'text': text
         }
-        await self._send_client_message(client_id, message)
+
+        if client_id in self.channel_msg_buffer:
+            self.channel_msg_buffer[client_id].append(message)
+        else:
+            self.channel_msg_buffer[client_id] = [message]
+        # 如果有正在发送的协程，当前消息会被它在 while 循环中取走
+        if self.router_lock.locked():
+            return
+        async with self.router_lock:
+            await self._flush_channel_messages()
 
     async def send_response(self, client_id: str, request_id: str, response: LLMProviderResponse):
         """发送完整响应消息"""
         message = {
-            'type': 'response',
             'request_id': request_id,
             'response': {
                 'client_id': response.client_id,
@@ -239,7 +266,8 @@ class LLMZmqServer:
             }
         }
         # logger.debug("send_msg: %s", message)
-        await self._send_client_message(client_id, message)
+        async with self.router_lock:
+            await self._send_client_message(client_id, 'response', message)
 
     async def send_error(self, client_id: str, request_id: str, error: str):
         """发送错误消息"""
@@ -248,7 +276,8 @@ class LLMZmqServer:
             'request_id': request_id,
             'error': error
         }
-        await self._send_client_message(client_id, message)
+        async with self.router_lock:
+            await self._send_client_message(client_id, 'response', message)
 
     async def publish_audit_log(self, request: LLMProviderRequest):
         """发布审计日志到PUB socket"""
@@ -357,7 +386,6 @@ class LLMZmqServer:
     async def send_rpc_response(self, client_id: str, request_id: str, result: Any = None, error: Optional[Exception] = None):
         """发送RPC响应"""
         message = {
-            'type': 'rpc_response',
             'request_id': request_id,
         }
         if error is not None:
@@ -365,7 +393,8 @@ class LLMZmqServer:
             message['error_text'] = f"{type(error).__qualname__}: {str(error)}"
         else:
             message['result'] = result
-        await self._send_client_message(client_id, message)
+        async with self.router_lock:
+            await self._send_client_message(client_id, 'rpc_response', message)
 
 
     async def handle_cancel(self, client_id: str, request_id: str):
@@ -386,11 +415,9 @@ class LLMZmqServer:
 
     async def send_cancel_ack(self, client_id: str, request_id: str):
         """发送取消确认"""
-        message = {
-            'type': 'cancel_ack',
-            'request_id': request_id
-        }
-        await self._send_client_message(client_id, message)
+        message = {'request_id': request_id}
+        async with self.router_lock:
+            await self._send_client_message(client_id, 'cancel_ack', message)
 
     async def handle_audit_event(self, client_id: str, json_data: Dict[str, Any]):
         """处理审计事件消息并发布到PUB接口"""
@@ -408,6 +435,7 @@ class LLMZmqServer:
 
     async def cleanup(self):
         """清理资源"""
+        await self._flush_channel_messages()
         await self.provider_manager.cleanup()
         self.router_socket.close()
         self.pub_socket.close()

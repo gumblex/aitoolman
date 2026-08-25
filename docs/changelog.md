@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0
+### 修改
+- 提高 ZeroMQ RPC 性能，修改 ZeroMQ 协议
+- 提高 SSE 解析性能
+
+## 0.5.6
+### 修改
+- 提高 resolve_model 性能（估算 token 数）
+- 修复 ZeroMQ 报错问题
+
 ## 0.5.5
 ### 新增
 - 模型配置中，新增 `timeout_batch` 为批量请求（stream=False）的网络活动超时
