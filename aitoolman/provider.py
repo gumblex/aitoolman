@@ -148,7 +148,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             tool_id = raw_tool.get("id")
             tool_type = raw_tool.get("type", "function")
             function = raw_tool.get("function", {})
-            name = function.get("name")
+            name = function.get("name", '')
             arguments_text = function.get("arguments", "")
             arguments = postprocess.parse_json(arguments_text)
 
@@ -403,7 +403,7 @@ class AnthropicFormat(LLMFormatStrategy):
         result = []
         for raw_tool in tool_calls:
             tool_id = raw_tool.get("id")
-            name = raw_tool.get("name")
+            name = raw_tool.get("name", '')
             input_data = raw_tool.get("input", {})
             arguments_text = json.dumps(input_data) if input_data else ""
             result.append(ToolCall(
@@ -848,10 +848,10 @@ class LLMProviderManager:
         # 4. 权重求和取最高
         model_total_weights: Dict[str, float] = {}
         for model_name in common_models:
-            model_total_weights[model_name] = math.fsum(
+            model_total_weights[model_name] = round(sum(
                 math.log(tag_weights.get(model_name, 1e-8))
                 for tag_weights in tag_matched.values()
-            )
+            ), 6)
 
         rng = random.Random(context_id or None)
         best_models = sorted(common_models, key=lambda m: (

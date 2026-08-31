@@ -282,16 +282,16 @@ class LLMApplication:
         )
 
     async def post_process(self, request_state: LLMModuleRequestState) -> LLMModuleResult:
-        """等待请求完成并进行后处理"""
-        # 等待响应
-        response = await request_state.provider_request.response
-        result = LLMModuleResult.from_response(request_state.direct_request, response)
-
+        if not request_state.has_response():
+            await request_state.wait_response()
+        result = LLMModuleResult.from_response(
+            request_state.direct_request,
+            request_state.provider_request.response.result()
+        )
         if request_state.module_request is not None:
             result.module_name = request_state.module_request.module_name
             result.request_params = request_state.module_request.template_params
 
-        # 执行后处理
         post_processor = request_state.direct_request.post_processor
         if result.status == FinishReason.stop:
             if post_processor is not None:
@@ -321,6 +321,7 @@ class LLMApplication:
     async def call(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleResult:
         """发送请求并等待结果"""
         request_state = await self.send_request(request)
+        await request_state.wait_response()
         return await self.post_process(request_state)
 
     @classmethod

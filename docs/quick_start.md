@@ -157,6 +157,25 @@ class LLMModuleResult:
         """运行工具调用，并返回下一次请求参数 LLMDirectRequest"""
 ```
 
+### 应用层请求状态
+`LLMModuleRequestState` 表示应用层请求的中间状态，由 `LLMApplication.send_request` 返回，包含模块请求、实际发送的直接请求和底层提供商请求。通过它可以手动控制请求的等待与后处理。
+
+```python
+class LLMModuleRequestState(typing.NamedTuple):
+    """应用层请求响应（中间结果）"""
+    module_request: Optional[LLMModuleRequest]    # 原始模块请求（无则为 None）
+    direct_request: LLMDirectRequest              # 实际发送的请求
+    provider_request: LLMProviderRequest          # 底层提供商请求
+
+    def has_response(self) -> bool:
+        """检查响应是否已就绪（不阻塞）"""
+        return self.provider_request.response.done()
+
+    async def wait_response(self) -> LLMProviderResponse:
+        """等待响应完成，返回 LLMProviderResponse"""
+        return await self.provider_request.response
+```
+
 
 ### 数据接口层请求/响应
 用于与LLM提供商交互，上层应用无需关注。
@@ -289,13 +308,20 @@ result: LLMModuleResult = await app['module_name'](
 )
 ```
 
-通用请求入口，支持传入模块请求或直接请求，适合需要动态构造请求的场景。
+通用请求入口，支持传入模块请求或直接请求，适合需要动态构造请求的场景。`call` 方法内部等价于依次执行 `send_request` → `wait_response` → `post_process`，一般情况下使用 `call` 即可完成整个请求流程。如果需要在发送请求后先处理其他事务、并发等待多个请求、在响应返回前执行中断逻辑，或对后处理进行自定义控制，也可以手动拆解这三个步骤：
+
 ```python
-# 直接调用 LLM（绕过模块配置）
+# 一键调用（等同于 send_request + wait_response + post_process）
 async def call(
     self,
     request: Union[LLMModuleRequest, LLMDirectRequest]
 ) -> LLMModuleResult: ...
+
+# 手动分步调用
+request_state = await app.send_request(request)
+# ... 可在此并发处理其他任务 ...
+response = await request_state.wait_response()   # 等待响应完成
+result = await app.post_process(request_state)   # 后处理（内部会复用已完成的响应）
 ```
 
 渲染指定名称的模板，用于自定义生成消息内容。

@@ -158,6 +158,25 @@ class LLMModuleResult:
         """Execute tool calls and return next request parameters"""
 ```
 
+### Application Layer Request State
+`LLMModuleRequestState` represents the intermediate state of the application layer request, returned by `LLMApplication.send_request`, containing the module request, the actual sent direct request, and the underlying provider request. You can manually control the waiting and post-processing of the request through it.
+
+```python
+class LLMModuleRequestState(typing.NamedTuple):
+    """Application layer request response (intermediate result)"""
+    module_request: Optional[LLMModuleRequest]    # Original module request (None if not exists)
+    direct_request: LLMDirectRequest              # Actually sent request
+    provider_request: LLMProviderRequest          # Underlying provider request
+
+    def has_response(self) -> bool:
+        """Check if the response is ready (non-blocking)"""
+        return self.provider_request.response.done()
+
+    async def wait_response(self) -> LLMProviderResponse:
+        """Wait for the response to complete, return LLMProviderResponse"""
+        return await self.provider_request.response
+```
+
 
 ### Data Interface Layer Request/Response
 Used for interacting with LLM providers, no need for upper-layer applications to focus.
@@ -289,13 +308,19 @@ result: LLMModuleResult = await app['module_name'](
 )
 ```
 
-General request entry, supports passing module requests or direct requests, suitable for dynamically constructing requests.
+General request entry, supports passing module requests or direct requests, suitable for dynamically constructing request scenarios. The `call` method internally executes `send_request` → `wait_response` → `post_process` in sequence. In most cases, using `call` can complete the entire request process. If you need to process other transactions after sending the request first, wait for multiple requests concurrently, execute interruption logic before the response returns, or customize the post-processing control, you can also manually break down these three steps:
 ```python
-# Directly call LLM (bypasses module configuration)
+# One-click call (equivalent to send_request + wait_response + post_process)
 async def call(
     self,
     request: Union[LLMModuleRequest, LLMDirectRequest]
 ) -> LLMModuleResult: ...
+
+# Manually call step by step
+request_state = await app.send_request(request)
+# ... You can process other tasks concurrently here ...
+response = await request_state.wait_response()   # Wait for the response to complete
+result = await app.post_process(request_state)   # Post-process (reuses the already completed response internally)
 ```
 
 Render a template with the specified name, used for custom message content generation.
@@ -935,7 +960,7 @@ tools.add_task.type = "function"
 tools.add_task.description = "Add schedule"
 
 tools.add_task.param.datetime.type = "string"
-tools.add_task.param.datetime.description = "Date and time, e.g., 2025-12-31 12:34:56"
+tools.add_task.param.datetime.description = "Date and time, e.g. 2025-12-31 12:34:56"
 tools.add_task.param.datetime.required = false
 
 tools.add_task.param.content.type = "string"

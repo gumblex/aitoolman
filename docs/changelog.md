@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+### 新增
+- `LLMModuleRequestState` 新增 `has_response()` 和 `wait_response()` 方法，支持手动等待请求完成，便于实现并发、中断、自定义后处理等场景。
+
+### 修改
+- `LLMApplication.call` 现在分解为 `send_request` + `wait_response` + `post_process` 三个步骤，可手动调用以进行更细粒度的控制。
+- 修复模型路由权重计算中的浮点精度问题
+
 ## 0.6.0
 ### 修改
 - 提高 ZeroMQ RPC 性能，修改 ZeroMQ 协议

@@ -401,7 +401,7 @@ class LLMZmqServer:
         """处理取消请求"""
         request = self.active_requests.get(request_id)
         if not request or request.client_id != client_id:
-            logger.warning(f"Invalid cancel request for {request_id}")
+            logger.warning("[%s] Invalid cancel request", request_id)
             return
         await self.provider_manager.cancel_request(request_id)
         await self.send_cancel_ack(client_id, request_id)
