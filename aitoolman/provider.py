@@ -778,11 +778,45 @@ class LLMProviderManager:
         """获取模型当前并发负载量（活跃请求数 + 等待队列长度）"""
         return self.resource_manager.get_queue_length(model_name)
 
+    def _resolve_tag_weights(self, input_tags: List[str]) -> Dict[str, Dict[str, float]]:
+        """解析标签并计算权重，支持 tag:rank 语法动态调整排序"""
+        tag_matched: Dict[str, Dict[str, float]] = {}
+        for tag_input in input_tags:
+            # 解析 tag:rank 语法
+            tag_name = tag_input
+            rank = None
+            if ':' in tag_input:
+                parts = tag_input.rsplit(':', 1)
+                try:
+                    rank = int(parts[1])
+                    tag_name = parts[0]
+                except ValueError:
+                    tag_name = tag_input
+
+            if tag_name in self.model_tag_weights:
+                if rank is not None:
+                    # 有 rank 调整：动态重算权重
+                    models = self.model_tag[tag_name]
+                    num_items = len(models)
+                    if num_items > 1:
+                        shift = (rank - 1) % num_items
+                        if shift > 0:
+                            models = models[shift:] + models[:shift]
+                        tag_matched[tag_name] = calculate_rank_weights(
+                            models, self.rank_adjust_ratio)
+                    else:
+                        tag_matched[tag_name] = self.model_tag_weights[tag_name]
+                else:
+                    tag_matched[tag_name] = self.model_tag_weights[tag_name]
+            elif tag_name in self.api_config:
+                tag_matched[tag_name] = {tag_name: 1.0}
+        return tag_matched
+
     def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]:
         """解析出最终使用的真实模型名
 
         Args:
-            input_tags: 标签/模型名/别名列表
+            input_tags: 标签/模型名/别名列表，支持 tag:rank 语法动态调整排序
             messages: 可选消息列表，用于Token数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
 
@@ -800,12 +834,7 @@ class LLMProviderManager:
                 return [tag]
 
         # 2. 标签匹配与权重计算
-        tag_matched: Dict[str, Dict[str, float]] = {}
-        for tag in input_tags:
-            if tag in self.model_tag_weights:
-                tag_matched[tag] = self.model_tag_weights[tag]
-            elif tag in self.api_config:
-                tag_matched[tag] = {tag: 1.0}
+        tag_matched = self._resolve_tag_weights(input_tags)
 
         if not tag_matched:
             raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")

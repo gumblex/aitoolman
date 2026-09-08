@@ -82,6 +82,28 @@ low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deeps
 **Weight Calculation:**
 Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. All models in a nested list share the rank weight of their position. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
 
+**tag:rank Syntax:**
+
+When calling `resolve_model`, you can append a `:rank` suffix to a tag name to dynamically adjust the model priority order within that tag. The syntax is `tag_name:rank`, where `rank` is an integer.
+
+- `rank=1`: No adjustment, keeps original order (equivalent to not using rank)
+- `rank=2`: Moves the 1st item to the end, making the 2nd item highest priority
+- `rank=N`: Moves the first N-1 items to the end, making the N-th item highest priority
+- Ranks exceeding the range automatically wrap around using modulo (e.g., with 4 models, rank=6 is equivalent to rank=2)
+
+Shifting operates at the outer element level of the list, with nested lists treated as single elements that shift together. Models within a nested list share the weight of that position.
+
+**Example:**
+```python
+# Assuming "code" tag is configured as ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]
+# Passing ['code:2'] → qwen3.7-max has highest priority
+# Passing ['code:3'] → deepseek-v4-pro has highest priority
+# Passing ['code:5'] → Equivalent to rank=1, glm-5.1 has highest priority
+# Mixed usage: ['code:2', 'image:3'] each tag adjusts independently
+```
+
+Tags without the `:rank` suffix behave exactly as before. The `tag:rank` syntax applies only to tag names, not to direct model names.
+
 ### 1.5 Configuration Example
 
 ```toml
@@ -293,4 +315,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.
+5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. Supports `tag:rank` syntax to dynamically adjust model priority within tags (see Section 1.4 for details). When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.

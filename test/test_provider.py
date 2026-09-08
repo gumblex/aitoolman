@@ -523,5 +523,212 @@ class TestNestedModelList(unittest.TestCase):
         self.assertGreater(len(results), 1)
 
 
+class TestTagRankSyntax(unittest.TestCase):
+    """tag:rank 语法功能测试"""
+
+    def test_tag_rank_no_rank_suffix_unchanged(self):
+        """不使用 :rank 后缀的标签行为完全不变，rank=1 等同于不使用 rank"""
+        manager = LLMProviderManager(make_nested_test_config())
+        result_no_rank = manager.resolve_model(['low_cost'], context_id='test-ctx')
+        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
+        self.assertEqual(result_no_rank, result_rank_1)
+
+    def test_tag_rank_rank_2_moves_first_to_end(self):
+        """rank=2 将第1项移到末尾，第2项变为最高优先"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost: [model-a, model-b, [model-d, model-e]]
+        # rank=2 后顺序: [model-b, [model-d, model-e], model-a]
+        result = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
+        # model-b 现在是最高优先
+        self.assertEqual(result[0], 'model-b')
+        # model-a 移到末尾
+        self.assertEqual(result[-1], 'model-a')
+
+    def test_tag_rank_rank_3_moves_first_two_to_end(self):
+        """rank=3 将前2项移到末尾，第3项变为最高优先"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost: [model-a, model-b, [model-d, model-e]]
+        # rank=3 后顺序: [[model-d, model-e], model-a, model-b]
+        # model-d 和 model-e 共享位置0的权重（最高）
+        result = manager.resolve_model(['low_cost:3'], context_id='fixed-ctx')
+        # model-a 和 model-b 权重低于 model-d/model-e
+        self.assertNotIn(result[0], ['model-a', 'model-b'])
+        # 第一位应是嵌套组内的模型
+        self.assertIn(result[0], ['model-d', 'model-e'])
+
+    def test_tag_rank_overflow_modulo(self):
+        """超出范围的 rank 自动取模循环（4个模型传 rank=6 等同于 rank=2）"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost 有3个元素
+        # rank=4 等同于 rank=1 (shift = 3 % 3 = 0)
+        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
+        result_rank_4 = manager.resolve_model(['low_cost:4'], context_id='test-ctx')
+        self.assertEqual(result_rank_1, result_rank_4)
+        # rank=5 等同于 rank=2 (shift = 4 % 3 = 1)
+        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
+        result_rank_5 = manager.resolve_model(['low_cost:5'], context_id='test-ctx')
+        self.assertEqual(result_rank_2, result_rank_5)
+
+    def test_tag_rank_nested_list_as_single_element(self):
+        """嵌套列表视为单个元素整体移位"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost: [model-a, model-b, [model-d, model-e]]
+        # rank=3 后: [[model-d, model-e], model-a, model-b]
+        # 嵌套组 [model-d, model-e] 整体移到第一位
+        result = manager.resolve_model(['low_cost:3'], context_id='nested-test')
+        # 第一位应是 model-d 或 model-e（嵌套组内的模型）
+        self.assertIn(result[0], ['model-d', 'model-e'])
+        # model-a 和 model-b 应在后面
+        self.assertIn('model-a', result)
+        self.assertIn('model-b', result)
+
+    def test_tag_rank_multiple_tags_independent(self):
+        """混合使用多个标签，各标签独立调整"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost:2 → [model-b, [model-d, model-e], model-a]
+        # fast (无rank) → [model-a, model-b]
+        # 交集为 model-a, model-b
+        result = manager.resolve_model(['low_cost:2', 'fast'], context_id='test-ctx')
+        self.assertIn('model-a', result)
+        self.assertIn('model-b', result)
+        # model-b 在 low_cost:2 中权重最高，在 fast 中权重第二
+        # model-a 在 low_cost:2 中权重最低，在 fast 中权重最高
+        # 两者权重相近，但 model-b 在 low_cost:2 的提升应使其排名靠前
+        self.assertEqual(result[0], 'model-b')
+
+    def test_tag_rank_multiple_tags_both_adjusted(self):
+        """多个标签都使用 rank 调整，各自独立计算"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost:2 → [model-b, [model-d, model-e], model-a]
+        # fast:2 → [model-b, model-a]
+        # 交集为 model-a, model-b
+        # model-b 在两个标签中都是最高优先
+        result = manager.resolve_model(['low_cost:2', 'fast:2'], context_id='test-ctx')
+        self.assertEqual(result[0], 'model-b')
+
+    def test_tag_rank_invalid_rank_fallback(self):
+        """rank 部分非整数时，整个字符串作为标签名查找"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # "low_cost:abc" 中 abc 无法转为整数
+        # 回退为查找名为 "low_cost:abc" 的标签/模型，不存在则抛出异常
+        with self.assertRaises(LLMNoAvailableModelError):
+            manager.resolve_model(['low_cost:abc'])
+
+    def test_tag_rank_weights_verification(self):
+        """验证 rank 调整后的权重计算正确"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # 原始 low_cost 权重: model-a 最高
+        original_weights = manager.model_tag_weights['low_cost']
+        self.assertGreater(original_weights['model-a'], original_weights['model-b'])
+
+        # rank=2 后: model-b 应成为最高权重
+        tag_matched = manager._resolve_tag_weights(['low_cost:2'])
+        adjusted_weights = tag_matched['low_cost']
+        self.assertGreater(adjusted_weights['model-b'], adjusted_weights['model-a'])
+        # model-a 移到末尾，权重最低
+        self.assertLess(adjusted_weights['model-a'], adjusted_weights['model-b'])
+
+    def test_tag_rank_single_element_tag(self):
+        """单元素标签使用 rank 不影响结果"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # same 标签只有1个嵌套元素 [[model-f1, model-f2, model-f3]]
+        # rank=2 时，由于只有1个元素，shift=0，不调整
+        result_rank_1 = manager.resolve_model(['same:1'], context_id='test-ctx')
+        result_rank_2 = manager.resolve_model(['same:2'], context_id='test-ctx')
+        # 两者结果应相同（都包含所有模型）
+        self.assertEqual(set(result_rank_1), set(result_rank_2))
+
+    def test_tag_rank_with_direct_model_name(self):
+        """tag:rank 语法不适用于直接模型名，rank 被忽略"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # model-a:2 会被解析为 tag_name="model-a", rank=2
+        # 但 model-a 不是标签，是直接模型名，rank 被忽略
+        # 精确匹配优先，直接返回 model-a
+        result = manager.resolve_model(['model-a:2'])
+        self.assertEqual(result, ['model-a'])
+
+    def test_tag_rank_fast_tag(self):
+        """测试 fast 标签（纯平面列表）的 rank 调整"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # fast: [model-a, model-b]
+        # rank=2 后: [model-b, model-a]
+        result = manager.resolve_model(['fast:2'], context_id='test-ctx')
+        self.assertEqual(result[0], 'model-b')
+        self.assertEqual(result[1], 'model-a')
+
+    def test_tag_rank_does_not_modify_original_config(self):
+        """rank 调整不影响原始配置"""
+        manager = LLMProviderManager(make_nested_test_config())
+        original_models = list(manager.model_tag['low_cost'])
+        # 使用 rank 调整
+        manager.resolve_model(['low_cost:2'])
+        manager.resolve_model(['low_cost:3'])
+        # 原始配置不应改变
+        self.assertEqual(manager.model_tag['low_cost'], original_models)
+        # 原始权重也不应改变
+        original_weights = manager.model_tag_weights['low_cost']
+        self.assertGreater(original_weights['model-a'], original_weights['model-b'])
+
+    def test_tag_rank_with_token_filter(self):
+        """rank 调整与 Token 限制过滤组合使用"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost:2 → [model-b, [model-d, model-e], model-a]
+        # model-b 和 model-e 有 max_input_tokens=1000
+        long_text = "a" * 5000  # 1250 tokens > 1000
+        messages = [Message.from_content(long_text, role="user")]
+        result = manager.resolve_model(['low_cost:2'], messages, context_id='test-ctx')
+        # model-b 和 model-e 被过滤
+        self.assertNotIn('model-b', result)
+        self.assertNotIn('model-e', result)
+        # model-d (位置1) 和 model-a (位置2) 保留
+        # model-d 权重更高（位置1 vs 位置2）
+        self.assertEqual(result[0], 'model-d')
+
+    def test_tag_rank_large_rank_value(self):
+        """较大的 rank 值正确取模循环"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost 有3个元素
+        # rank=10: shift = 9 % 3 = 0，等同于 rank=1
+        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
+        result_rank_10 = manager.resolve_model(['low_cost:10'], context_id='test-ctx')
+        self.assertEqual(result_rank_1, result_rank_10)
+        # rank=11: shift = 10 % 3 = 1，等同于 rank=2
+        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
+        result_rank_11 = manager.resolve_model(['low_cost:11'], context_id='test-ctx')
+        self.assertEqual(result_rank_2, result_rank_11)
+
+    def test_tag_rank_zero_rank(self):
+        """rank=0 等同于不调整（shift = -1 % N = N-1）"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost 有3个元素
+        # rank=0: shift = (0-1) % 3 = 2，等同于 rank=3
+        result_rank_0 = manager.resolve_model(['low_cost:0'], context_id='test-ctx')
+        result_rank_3 = manager.resolve_model(['low_cost:3'], context_id='test-ctx')
+        self.assertEqual(result_rank_0, result_rank_3)
+
+    def test_tag_rank_negative_rank(self):
+        """负数 rank 正确取模循环"""
+        manager = LLMProviderManager(make_nested_test_config())
+        # low_cost 有3个元素
+        # rank=-1: shift = (-1-1) % 3 = -2 % 3 = 1，等同于 rank=2
+        result_rank_neg1 = manager.resolve_model(['low_cost:-1'], context_id='test-ctx')
+        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
+        self.assertEqual(result_rank_neg1, result_rank_2)
+
+    def test_tag_rank_disabled_model_in_shifted_position(self):
+        """rank 调整后禁用模型仍被过滤"""
+        config = make_nested_test_config()
+        # 禁用 model-b（在 low_cost 中位置1）
+        config['api']['model-b']['enable'] = False
+        manager = LLMProviderManager(config)
+        # low_cost:2 → [model-b(disabled), [model-d, model-e], model-a]
+        # model-b 被过滤后剩 model-a, model-d, model-e
+        result = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
+        self.assertNotIn('model-b', result)
+        # model-d/model-e 在位置1，model-a 在位置2
+        # model-d/model-e 权重高于 model-a
+        self.assertIn(result[0], ['model-d', 'model-e'])
+
+
 if __name__ == '__main__':
     unittest.main()

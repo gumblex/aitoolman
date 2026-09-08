@@ -117,7 +117,7 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
-    model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，覆盖模块默认配置
+    model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，支持 tag:rank 语法（如 code:2），覆盖模块默认配置
     model_rank: int = 0   # 模型路由候选排名（从0开始，超出自动取模，详见模型路由功能）
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
@@ -762,9 +762,9 @@ class LLMProviderManager:
 #### 5.3.2 路由算法
 输入标签列表（`input_tags`）后，系统按以下规则计算最优候选模型列表：
 1. **精确匹配优先**：遍历 input_tags，若存在与真实模型名完全匹配的项，直接返回该模型（单元素列表）
-2. **标签交集匹配**：查找每个输入标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/别名视为单元素集合，权重为1）
+2. **标签交集匹配**：查找每个输入标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/别名视为单元素集合，权重为1）。若标签使用 `tag:rank` 语法（如 `fast:2`），会先按指定排名循环移位模型列表再计算权重
 3. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型
-4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序
+4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序。使用 tag:rank 语法时，权重计算会根据 rank 值调整模型在标签内的排序位置（详见 [配置文件文档](./config.md)）
 5. **排队长度排序**：权重相同的同级模型，按当前排队任务数从低到高排序，优先选择排队较少的模型
 6. **稳定随机排序**：若权重和并发量仍相同，以 `context_id`（如有）或 `client_id` 为随机种子进行稳定排序，同一上下文的多次调用结果稳定，不同上下文之间实现负载均衡
 
@@ -775,12 +775,24 @@ class LLMProviderManager:
 - **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，可传入单个标签字符串或多个标签的列表，系统自动路由到最优模型
 - **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
 - **context_id 参数**：`resolve_model` 的 `context_id` 参数用于作为稳定随机排序的随机种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id` 作为种子
+- **tag:rank 语法**：在标签名后添加 `:rank` 后缀可调整该标签的模型排序优先级，rank 为整数。rank=1 不调整，rank=N 将前 N-1 项移到末尾，超出范围自动取模循环。例如 `code:2` 表示将 code 标签的第1项移到末尾；多个标签可分别指定 rank，如 `_model_name=["code:2", "fast:3"]`。tag:rank 仅适用于标签名，不适用于直接模型名；不使用 `:rank` 后缀时行为不变。详细规则参考《[配置文件文档](./config.md)》的 model_tag 部分
+
+
+使用示例：
+```python
+# 选择 fast 标签的第 2 优先级模型
+result = await app['module'](_model_name="fast:2", text="Hello")
+
+# 多标签交叉时混合使用 tag:rank 和普通标签
+candidates = await client.resolve_model(["code:2", "multimodal"])
+```
 
 #### 5.3.4 应用场景
 - 按业务场景分组：如 `fast`（快速响应）、`precise`（高精度）、`low_cost`（低成本）、`code`（代码处理）、`multimodal`（多模态）等，业务代码直接使用场景标签
 - 多标签交叉匹配：如传入 `["code", "multimodal"]` 自动选择同时支持代码和多模态能力，在两者中最优的模型
 - 故障自动降级：主模型不可用时自动切换到备用模型，提升服务可用性
 - 成本动态调整：根据业务优先级自动选择不同成本档位的模型
+- 标签内排序调整：使用 tag:rank 语法灵活调整标签内模型优先级，无需修改配置文件即可临时切换首选模型
 
 ## 6. 实用工具
 

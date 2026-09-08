@@ -117,7 +117,7 @@ class LLMModuleRequest(typing.NamedTuple):
     """Application layer template request parameters (module configuration)"""
     module_name: str                    # Module name
     template_params: Dict[str, Any]     # Template parameters
-    model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, override module default configuration
+    model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, supports tag:rank syntax (e.g. code:2), override module default configuration
     # Model routing candidate rank (starts from 0, automatically applies modulo when exceeded, see Model Routing feature for details)
     model_rank: int = 0
     context_messages: List[Message] = []  # Context messages
@@ -758,9 +758,9 @@ For detailed configuration instructions, refer to the [Configuration File Docume
 #### 5.3.2 Routing Algorithm
 After inputting the tag list (`input_tags`), the system calculates the optimal candidate model list according to the following rules:
 1. **Exact match first**: Traverse input_tags. If there is an item that exactly matches the actual model name, return the model directly (single-element list).
-2. **Tag intersection matching**: Find the model set and corresponding weight for each input tag, and take the intersection of models corresponding to all tags (a single model name/alias is treated as a single-element set with weight 1).
+2. **Tag intersection matching**: Find the model set and corresponding weight for each input tag, and take the intersection of models corresponding to all tags (a single model name/alias is treated as a single-element set with weight 1). If a tag uses the `tag:rank` syntax (e.g., `fast:2`), the model list is cyclically shifted by the specified rank before calculating weights.
 3. **Token limit filtering**: If the `messages` parameter is provided, automatically estimate the total number of input tokens, and filter out models configured with `max_input_tokens` where the total token count exceeds the limit.
-4. **Weight Sorting**: Sum the weight of each model across all matched tags, and sort the models in descending order of total weight
+4. **Weight Sorting**: Sum the weight of each model across all matched tags, and sort the models in descending order of total weight. When using tag:rank syntax, weight calculation adjusts the model's position within the tag based on the rank value (see [Configuration File Documentation](./config.md))
 5. **Queue Length Sorting**: For models at the same tier with identical total weight, sort them in ascending order of the current number of pending queued tasks, to prioritize models with shorter queues
 6. **Stable Random Sorting**: If the total weight and queue length of models are still exactly the same, use `context_id` (if available) or `client_id` as the random seed for stable sorting. Multiple calls under the same context will return consistent results, while load balancing is achieved across different contexts
 
@@ -771,12 +771,24 @@ The sorted candidate model list will be returned after the above processing.
 - **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, you can pass in a single tag string or a list of multiple tags, and the system will automatically route to the optimal model.
 - **model_rank parameter**: Used to select the Nth model in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied. When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing.
 - **context_id Parameter**: The `context_id` parameter of the `resolve_model` interface acts as the random seed for stable random sorting, ensuring that multiple calls with the same `context_id` return consistent results. If it is not explicitly passed, `client_id` will be used as the seed by default
+- **tag:rank Syntax**: Add a `:rank` suffix to a tag name to adjust the model ordering priority for that tag, where rank is an integer. rank=1 makes no adjustment, rank=N moves the first N-1 items to the end, values exceeding the range automatically apply modulo cycling. For example, `code:2` moves the first item of the code tag to the end; multiple tags can specify ranks independently, e.g., `_model_name=["code:2", "fast:3"]`. tag:rank only applies to tag names, not direct model names; behavior remains unchanged when the `:rank` suffix is not used. For detailed rules, refer to the model_tag section in the [Configuration File Documentation](./config.md)
+
+
+Usage example:
+```python
+# Select the 2nd priority model from the fast tag
+result = await app['module'](_model_name="fast:2", text="Hello")
+
+# Mix tag:rank and plain tags in multi-tag cross matching
+candidates = await client.resolve_model(["code:2", "multimodal"])
+```
 
 #### 5.3.4 Application Scenarios
 - Group by business scenario: such as `fast` (fast response), `precise` (high precision), `low_cost` (low cost), `code` (code processing), `multimodal` (multimodal), etc. Business code directly uses scenario tags.
 - Multi-tag cross matching: For example, passing `["code", "multimodal"]` will automatically select the optimal model that supports both code and multimodal capabilities.
 - Automatic fault degradation: Automatically switch to the backup model when the primary model is unavailable, improving service availability.
 - Dynamic cost adjustment: Automatically select models of different cost tiers according to business priority.
+- Tag-internal rank adjustment: Use tag:rank syntax to flexibly adjust model priority within a tag, enabling temporary preferred model switching without modifying configuration files.
 
 ## 6. Utility Tools
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2
+### 新增
+- `resolve_model` 支持 `tag:rank` 语法，允许动态调整标签内模型排序优先级，通过 `tag_name:rank` 格式指定标签内第 N 优先级的模型组
+
 ## 0.6.1
 ### 新增
 - `LLMModuleRequestState` 新增 `has_response()` 和 `wait_response()` 方法，支持手动等待请求完成，便于实现并发、中断、自定义后处理等场景。

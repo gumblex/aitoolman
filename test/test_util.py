@@ -96,9 +96,9 @@ class TestCalcMessageLengthAndEstimateTextToken(unittest.TestCase):
         # special: 1+2=3
         # image: 2 * 1300 = 2600
         # video: 1 * 50000 = 50000
-        # total = 3 + 3 + 2600 + 50000 = 15606
+        # total = 3 + 3 + 2600 + 50000 = 52606
         result = estimate_text_token(length, 4.0, 1300, 50000)
-        self.assertEqual(result, 15606)
+        self.assertEqual(result, 52606)
 
 
 if __name__ == '__main__':
