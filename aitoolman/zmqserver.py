@@ -2,7 +2,8 @@ import json
 import secrets
 import asyncio
 import logging
-from typing import Dict, Optional, List, Any, Tuple
+import itertools
+from typing import Dict, Optional, List, Any, Tuple, NamedTuple
 
 import zmq
 import zmq.asyncio
@@ -22,11 +23,27 @@ class ZmqServerChannel(ChannelWriter):
         self.request_id = request_id
 
     async def write(self, item: ChannelEvent, timeout: Optional[float] = None) -> None:
-        await self.server.send_channel_write(
-            self.request_id, item.topic, 'fragment', item.data)
+        await self.server.send_channel_write(self.request_id, item)
 
     async def write_eof(self, timeout: Optional[float] = None) -> None:
         pass
+
+
+class ZmqChannelMessageBuffer(NamedTuple):
+    """按 (client_id, request_id, topic) 聚合的 channel 消息缓冲"""
+    key: Tuple[str, str, str]
+    text: List[Optional[str]]
+
+    @classmethod
+    def new(cls, client_id: str, request_id: str, message: ChannelEvent) -> 'ZmqChannelMessageBuffer':
+        return cls((client_id, request_id, message.topic), [message.data])
+
+    def add(self, client_id: str, request_id: str, message: ChannelEvent) -> Optional['ZmqChannelMessageBuffer']:
+        """同 key 原地追加并返回 None；不同 key 返回新建 buffer"""
+        if self.key == (client_id, request_id, message.topic):
+            self.text.append(message.data)
+            return None
+        return ZmqChannelMessageBuffer.new(client_id, request_id, message)
 
 
 class LLMZmqServer:
@@ -40,7 +57,7 @@ class LLMZmqServer:
         self.zmq_auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # ZeroMQ路由认证令牌
         self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
         self.router_lock = asyncio.Lock()
-        self.channel_msg_buffer: Dict[str, List[Dict[str, Any]]] = {}
+        self.channel_msg_buffer: List[ZmqChannelMessageBuffer] = []
         self.running = False
 
     async def initialize(self):
@@ -200,17 +217,15 @@ class LLMZmqServer:
 
     async def _flush_channel_messages(self):
         while True:
-            has_messages = False
-            for client_id in tuple(self.channel_msg_buffer.keys()):
-                batch = self.channel_msg_buffer.pop(client_id)
-                if batch:
-                    has_messages = True
-                    await self._send_client_message(client_id, 'channel_write', batch)
-            if not has_messages:
+            if not self.channel_msg_buffer:
                 break
+            buffers, self.channel_msg_buffer = self.channel_msg_buffer, []
+            for client_id, group in itertools.groupby(buffers, key=lambda b: b.key[0]):
+                body = [[b.key[1], b.key[2], b.text] for b in group]
+                await self._send_client_message(client_id, 'channel_write', body)
 
-    async def send_channel_write(self, request_id: str, channel_type: str, mode: str, text: str):
-        """发送channel写入消息给客户端（批量合并发送，乐观锁机制）
+    async def send_channel_write(self, request_id: str, message: ChannelEvent):
+        """发送channel写入消息给客户端（按流缓冲合并，乐观锁机制）
 
         - 其他 msg_type 通过 _send_client_message 直接发送，不受 channel_write 影响
         - channel_write 使用 router_lock 控制：
@@ -223,17 +238,15 @@ class LLMZmqServer:
             logger.warning("[%s] Request not found for channel write", request_id)
             return
         client_id = request.client_id
-        message = {
-            'request_id': request_id,
-            'channel': channel_type,
-            'mode': mode,
-            'text': text
-        }
 
-        if client_id in self.channel_msg_buffer:
-            self.channel_msg_buffer[client_id].append(message)
+        if self.channel_msg_buffer:
+            new_buffer = self.channel_msg_buffer[-1].add(client_id, request_id, message)
+            if new_buffer is not None:
+                self.channel_msg_buffer.append(new_buffer)
         else:
-            self.channel_msg_buffer[client_id] = [message]
+            self.channel_msg_buffer.append(
+                ZmqChannelMessageBuffer.new(client_id, request_id, message))
+
         # 如果有正在发送的协程，当前消息会被它在 while 循环中取走
         if self.router_lock.locked():
             return
@@ -267,6 +280,7 @@ class LLMZmqServer:
         }
         # logger.debug("send_msg: %s", message)
         async with self.router_lock:
+            await self._flush_channel_messages()
             await self._send_client_message(client_id, 'response', message)
 
     async def send_error(self, client_id: str, request_id: str, error: str):
@@ -417,6 +431,7 @@ class LLMZmqServer:
         """发送取消确认"""
         message = {'request_id': request_id}
         async with self.router_lock:
+            await self._flush_channel_messages()
             await self._send_client_message(client_id, 'cancel_ack', message)
 
     async def handle_audit_event(self, client_id: str, json_data: Dict[str, Any]):

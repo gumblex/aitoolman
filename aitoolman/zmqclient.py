@@ -102,13 +102,13 @@ class LLMZmqClient(LLMClient):
                     logger.error(f"Server error: {json_data.get('error')}")
                     continue
                 elif msg_type == 'channel_write':
-                    for msg in json_data:
-                        req_id = msg.get('request_id')
-                        request = self.active_requests.get(req_id)
+                    for request_id, topic, texts in json_data:
+                        request = self.active_requests.get(request_id)
                         if not request:
-                            logger.warning(f"channel_write for unknown request {req_id}")
+                            logger.warning(f"channel_write for unknown request {request_id}")
                             continue
-                        await self.handle_channel_write(request, msg)
+                        for text in texts:
+                            await request.output_channel.write(ChannelEvent(topic=topic, data=text))
                     continue
 
                 request_id = json_data.get('request_id')
@@ -127,16 +127,6 @@ class LLMZmqClient(LLMClient):
                 break
             except Exception as e:
                 logger.exception("Error in listener task")
-
-    async def handle_channel_write(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
-        """处理channel写入消息（单条消息）"""
-        channel_name = json_data['channel']
-        text = json_data['text']
-
-        await request.output_channel.write(ChannelEvent(
-            topic=channel_name,
-            data=text
-        ))
 
     async def handle_response(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
         """处理完整响应"""

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+### 修改
+- 提高 ZeroMQ RPC 性能，修改 ZeroMQ 协议
+- 提高 SSE 协议兼容性
+
 ## 0.6.2
 ### 新增
 - `resolve_model` 支持 `tag:rank` 语法，允许动态调整标签内模型排序优先级，通过 `tag_name:rank` 格式指定标签内第 N 优先级的模型组

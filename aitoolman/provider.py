@@ -265,7 +265,7 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
         response.response_text = message.get("content", "")
         response.response_reasoning = message.get("reasoning_content", "")
-        response.response_tool_calls = self.parse_tool_calls(message.get("tool_calls", []))
+        response.response_tool_calls = self.parse_tool_calls(message.get("tool_calls") or [])
         response.finish_reason = choice.get("finish_reason", FinishReason.stop.value)
 
         # Token统计
@@ -541,7 +541,7 @@ class AnthropicFormat(LLMFormatStrategy):
         response.response_text = ""
         response.response_reasoning = ""
 
-        content_blocks = response_data.get("content", [])
+        content_blocks = response_data.get("content") or []
         tool_calls = []
 
         for block in content_blocks:
@@ -1023,6 +1023,7 @@ class LLMProviderManager:
         try:
             format_strategy.parse_batch_response(response, response_data)
         except Exception as e:
+            logger.warning("parse_batch_response error", exc_info=True)
             await self._end_request_with_error(
                 request, response,
                 f"Failed to parse batch response: {str(e)}",
