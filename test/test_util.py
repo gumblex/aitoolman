@@ -1,5 +1,12 @@
+import json
 import unittest
-from aitoolman.util import calculate_rank_weights, calc_message_length, estimate_text_token, MessageLength
+
+import msgspec
+
+from aitoolman.util import (
+    calculate_rank_weights, calc_message_length, estimate_text_token,
+    decode_json, encode_message, MessageLength
+)
 from aitoolman.model import Message
 
 
@@ -99,6 +106,57 @@ class TestCalcMessageLengthAndEstimateTextToken(unittest.TestCase):
         # total = 3 + 3 + 2600 + 50000 = 52606
         result = estimate_text_token(length, 4.0, 1300, 50000)
         self.assertEqual(result, 52606)
+
+
+class TestDecodeJsonEncodeMessage(unittest.TestCase):
+    """decode_json / encode_message（msgspec 实现）行为测试"""
+
+    def test_decode_json_str(self):
+        """str 输入解码为 Python 对象"""
+        self.assertEqual(decode_json('{"a": 1, "b": [true, null]}'),
+                         {"a": 1, "b": [True, None]})
+
+    def test_decode_json_bytes(self):
+        """bytes 输入解码为 Python 对象"""
+        self.assertEqual(decode_json(b'{"a": 1}'), {"a": 1})
+
+    def test_decode_json_nested_structure(self):
+        """嵌套结构往返保持一致"""
+        obj = {"list": [1, 2.5, None, True], "nested": {"x": {"y": "z"}}}
+        self.assertEqual(decode_json(encode_message(obj)), obj)
+
+    def test_decode_json_non_ascii(self):
+        """非 ASCII 内容解码正确"""
+        self.assertEqual(decode_json('{"msg": "你好世界"}'), {"msg": "你好世界"})
+
+    def test_decode_json_invalid_raises(self):
+        """非法 JSON 抛出 msgspec.DecodeError"""
+        with self.assertRaises(msgspec.DecodeError):
+            decode_json('{"a": }')
+
+    def test_encode_message_returns_bytes(self):
+        """encode_message 返回 bytes 类型"""
+        result = encode_message({"a": 1})
+        self.assertIsInstance(result, bytes)
+        self.assertEqual(decode_json(result), {"a": 1})
+
+    def test_encode_message_named_tuple_to_array(self):
+        """NamedTuple 编码为 JSON 数组"""
+        length = MessageLength(text_bytes=1, message_num=2, fragment_num=3,
+                               image_num=4, video_num=5)
+        result = encode_message(length)
+        self.assertEqual(json.loads(result), [1, 2, 3, 4, 5])
+
+    def test_encode_message_non_ascii_utf8(self):
+        """非 ASCII 字符按 UTF-8 编码（不做转义）"""
+        result = encode_message({"msg": "你好"})
+        self.assertIn("你好".encode('utf-8'), result)
+        self.assertEqual(decode_json(result), {"msg": "你好"})
+
+    def test_roundtrip_none_and_empty_containers(self):
+        """None 与空容器往返一致"""
+        obj = {"a": None, "b": [], "c": {}}
+        self.assertEqual(decode_json(encode_message(obj)), obj)
 
 
 if __name__ == '__main__':

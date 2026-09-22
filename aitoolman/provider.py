@@ -17,6 +17,7 @@ from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Messag
 from .resmanager import ResourceManager
 
 import httpx
+import msgspec
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -45,6 +46,86 @@ class ProviderStreamEvent(typing.NamedTuple):
 class RequestTask(typing.NamedTuple):
     request: LLMProviderRequest
     task: asyncio.Task
+
+
+class OpenAIUsage(msgspec.Struct):
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+
+
+class OpenAIDelta(msgspec.Struct):
+    content: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    role: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+
+
+class OpenAIChoice(msgspec.Struct):
+    delta: Optional[OpenAIDelta] = None
+    finish_reason: Optional[str] = None
+    index: Optional[int] = None
+
+
+class OpenAIChunk(msgspec.Struct):
+    choices: Optional[List[OpenAIChoice]] = None
+    usage: Optional[OpenAIUsage] = None
+
+
+class AnthropicUsage(msgspec.Struct):
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
+class AnthropicMessage(msgspec.Struct):
+    id: Optional[str] = None
+    type: Optional[str] = None
+    role: Optional[str] = None
+    model: Optional[str] = None
+    content: Optional[Any] = None
+    stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
+    usage: Optional[AnthropicUsage] = None
+
+
+class AnthropicContentBlock(msgspec.Struct):
+    type: str
+    id: Optional[str] = None
+    name: Optional[str] = None
+    text: Optional[str] = None
+    thinking: Optional[str] = None
+    input: Optional[Any] = None
+
+
+class AnthropicDelta(msgspec.Struct):
+    type: Optional[str] = None
+    text: Optional[str] = None
+    thinking: Optional[str] = None
+    partial_json: Optional[str] = None
+    stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
+
+
+class AnthropicStreamEvent(msgspec.Struct):
+    type: str
+    index: Optional[int] = None
+    message: Optional[AnthropicMessage] = None
+    content_block: Optional[AnthropicContentBlock] = None
+    delta: Optional[AnthropicDelta] = None
+    usage: Optional[AnthropicUsage] = None
+
+
+# response_meta 已知字段：按 Struct 字段顺序合并非 None 值（同名后者覆盖）
+ANTHROPIC_META_FIELDS = ('id', 'type', 'role', 'model', 'stop_reason', 'stop_sequence', 'usage')
+ANTHROPIC_KNOWN_FIELDS = ('type', 'index', 'message', 'content_block', 'delta', 'usage')
+
+
+def _struct_meta_merge(source, field_names, buffer: Dict[str, Any]) -> None:
+    """按字段顺序将 Struct 中非 None 的字段合并入缓冲（Struct 值转为纯 dict）"""
+    for name in field_names:
+        value = getattr(source, name, None)
+        if value is None:
+            continue
+        buffer[name] = msgspec.structs.asdict(value) if isinstance(value, msgspec.Struct) else value
 
 
 class LLMFormatStrategy(abc.ABC):
@@ -109,6 +190,8 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers = []
+        self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
+        self._stream_chunk_decoder = msgspec.json.Decoder(type=OpenAIChunk)
 
     def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]:
         tools = []
@@ -256,6 +339,8 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
     def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
         """解析OpenAI非流式响应（含工具调用转换）"""
+        # response_meta：除 choices 外的字段原样整体存入
+        response.response_meta = {k: v for k, v in response_data.items() if k != 'choices'}
         choices = response_data.get("choices", [])
         if not choices:
             raise ValueError("No choices in response")
@@ -296,39 +381,48 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             self.stream_tool_buffers.clear()
             self.stream_content_buffer = ""
             self.stream_reasoning_buffer = ""
+            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
+            if self.stream_last_raw_event is not None:
+                response_meta = util.decode_json(self.stream_last_raw_event.data)
+                if 'choices' in response_meta:
+                    del response_meta['choices']
+                self.stream_last_raw_event = None
+                response.response_meta = response_meta
             # 设置结束标记并返回完整工具调用
             if not response.finish_reason:
                 response.finish_reason = FinishReason.stop.value
             return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
 
-        # 3. 解析JSON格式的chunk
+        # 3. 用 Struct 解析JSON格式的chunk
         try:
-            chunk_data = util.decode_json(line_bytes)
-        except json.JSONDecodeError:
+            chunk_data = self._stream_chunk_decoder.decode(line_bytes)
+        except (msgspec.DecodeError, msgspec.ValidationError):
             logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line_bytes)
             return ProviderStreamEvent.empty()
 
+        # 缓存末帧原始事件（流结束后还原未知字段）
+        self.stream_last_raw_event = event
+
         logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
 
-        # 4. 处理Token统计
-        usage = chunk_data.get("usage")
-        if usage:
-            response.prompt_tokens = usage.get("prompt_tokens")
-            response.completion_tokens = usage.get("completion_tokens")
+        # 4. 按已知字段顺序合并meta，并处理Token统计
+        if chunk_data.usage:
+            response.prompt_tokens = chunk_data.usage.prompt_tokens
+            response.completion_tokens = chunk_data.usage.completion_tokens
 
         # 5. 提取delta内容
-        choices = chunk_data.get("choices", [])
+        choices = chunk_data.choices or []
         if not choices:
             return ProviderStreamEvent.empty()
         choice = choices[0]
-        delta = choice.get("delta", {})
+        delta = choice.delta or OpenAIDelta()
 
         # 6. 处理finish_reason
-        if choice.get("finish_reason"):
-            response.finish_reason = choice["finish_reason"]
+        if choice.finish_reason:
+            response.finish_reason = choice.finish_reason
 
         # 7. 增量累积工具调用内容
-        for tool_delta in delta.get("tool_calls") or ():
+        for tool_delta in delta.tool_calls or ():
             tool_id = tool_delta.get("id")
             if tool_id:
                 tool_item = tool_delta.copy()
@@ -345,8 +439,8 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             for key, value in fn_delta.items():
                 fn_item[key] = fn_item.get(key, '') + value
 
-        content_delta = delta.get("content") or ''
-        reasoning_delta = delta.get("reasoning_content") or ''
+        content_delta = delta.content or ''
+        reasoning_delta = delta.reasoning_content or ''
 
         if content_delta:
             self.stream_content_buffer += content_delta
@@ -370,6 +464,9 @@ class AnthropicFormat(LLMFormatStrategy):
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers = []
         self.current_tool_index = -1
+        self.stream_meta_buffer: Dict[str, Any] = {}
+        self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
+        self._stream_chunk_decoder = msgspec.json.Decoder(type=AnthropicStreamEvent)
 
     def serialize_tool_description(
             self, tools_configs: Dict[str, Dict[str, Any]]
@@ -538,6 +635,8 @@ class AnthropicFormat(LLMFormatStrategy):
     def parse_batch_response(self, response: LLMProviderResponse,
                              response_data: Dict[str, Any]) -> None:
         """Parse non-streaming response"""
+        # response_meta：除 content 外的字段原样整体存入
+        response.response_meta = {k: v for k, v in response_data.items() if k != 'content'}
         response.response_text = ""
         response.response_reasoning = ""
 
@@ -605,10 +704,20 @@ class AnthropicFormat(LLMFormatStrategy):
                 response_message[
                     "reasoning_content"] = self.stream_reasoning_buffer
 
+            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
+            if self.stream_last_raw_event is not None:
+                raw = util.decode_json(self.stream_last_raw_event.data)
+                for key, value in raw.items():
+                    if key not in ANTHROPIC_KNOWN_FIELDS:
+                        self.stream_meta_buffer[key] = value
+                self.stream_last_raw_event = None
+            response.response_meta = self.stream_meta_buffer
+
             # Clear buffers
             self.stream_tool_buffers = []
             self.stream_content_buffer = ""
             self.stream_reasoning_buffer = ""
+            self.stream_meta_buffer = {}
             self.current_tool_index = -1
 
             if not response.finish_reason:
@@ -620,29 +729,47 @@ class AnthropicFormat(LLMFormatStrategy):
             return ProviderStreamEvent.empty()
 
         try:
-            chunk_data = util.decode_json(line_bytes)
-        except json.JSONDecodeError:
+            chunk_data = self._stream_chunk_decoder.decode(line_bytes)
+        except (msgspec.DecodeError, msgspec.ValidationError):
             logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
                            response.request_id, line_bytes)
             return ProviderStreamEvent.empty()
 
-        # Handle token usage
-        usage = chunk_data.get("usage")
-        if usage:
-            response.prompt_tokens = usage.get("input_tokens")
-            response.completion_tokens = usage.get("output_tokens")
+        # 缓存末帧原始事件（流结束后还原未知字段）
+        self.stream_last_raw_event = event
+
+        # message_start: 按已知字段顺序合并 message 中的 meta（content 除外）
+        if chunk_data.type == "message_start" and chunk_data.message is not None:
+            _struct_meta_merge(chunk_data.message, ANTHROPIC_META_FIELDS, self.stream_meta_buffer)
+            if chunk_data.message.usage is not None:
+                response.prompt_tokens = chunk_data.message.usage.input_tokens
+                response.completion_tokens = chunk_data.message.usage.output_tokens
+
+        # Handle token usage (顶层 usage，如 message_delta 事件)
+        usage = chunk_data.usage
+        if usage is not None:
+            response.prompt_tokens = usage.input_tokens
+            response.completion_tokens = usage.output_tokens
+            self.stream_meta_buffer['usage'] = msgspec.structs.asdict(usage)
+
+        # message_delta: 合并 delta 中的 stop_reason/stop_sequence
+        if chunk_data.type == "message_delta" and chunk_data.delta is not None:
+            for meta_key in ('stop_reason', 'stop_sequence'):
+                meta_value = getattr(chunk_data.delta, meta_key, None)
+                if meta_value is not None:
+                    self.stream_meta_buffer[meta_key] = meta_value
 
         # Handle content_block (start of new content block)
-        if "content_block" in chunk_data:
-            block = chunk_data["content_block"]
-            block_type = block.get("type")
+        if chunk_data.content_block is not None:
+            block = chunk_data.content_block
+            block_type = block.type
 
             if block_type == "tool_use":
                 # New tool call started
                 self.current_tool_index += 1
                 self.stream_tool_buffers.append({
-                    "id": block.get("id"),
-                    "name": block.get("name"),
+                    "id": block.id,
+                    "name": block.name,
                     "input": {}
                 })
 
@@ -650,24 +777,24 @@ class AnthropicFormat(LLMFormatStrategy):
         delta_text = ""
         delta_reasoning = ""
 
-        if "delta" in chunk_data:
-            delta = chunk_data["delta"]
-            delta_type = delta.get("type")
+        if chunk_data.delta is not None:
+            delta = chunk_data.delta
+            delta_type = delta.type
 
             if delta_type == "text_delta":
-                text = delta.get("text") or ''
+                text = delta.text or ''
                 delta_text = text
                 self.stream_content_buffer += text
 
             elif delta_type == "thinking_delta":
-                thinking = delta.get("thinking") or ''
+                thinking = delta.thinking or ''
                 delta_reasoning = thinking
                 self.stream_reasoning_buffer += thinking
 
             elif delta_type == "input_json_delta":
                 # Update current tool call's input
                 if self.current_tool_index >= 0 and self.stream_tool_buffers:
-                    partial_json = delta.get("partial_json") or ''
+                    partial_json = delta.partial_json or ''
                     current_tool = self.stream_tool_buffers[
                         self.current_tool_index]
                     # Accumulate partial JSON (simplified approach)
@@ -966,7 +1093,7 @@ class LLMProviderManager:
                 response = await self.http_client.post(url, **kwargs)
                 status_code = response.status_code
                 response.raise_for_status()  # 抛出HTTP错误（如4xx/5xx）
-                return response.json()
+                return util.decode_json(response.content)
 
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code

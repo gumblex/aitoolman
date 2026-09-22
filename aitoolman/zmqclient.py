@@ -1,16 +1,19 @@
-import json
+import os
 import time
 import asyncio
 import logging
 import sqlite3
 import datetime
+import textwrap
 from typing import Optional, List, Dict, Any, Union
 
+import msgspec
 import zmq
 import zmq.asyncio
 
 from . import util
 from . import model as _model
+from . import zmqprotocol
 from .model import LLMProviderRequest, LLMProviderResponse, LLMApiRequestError, ToolCall, Message, ModelInfo
 from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
@@ -69,21 +72,22 @@ class LLMZmqClient(LLMClient):
         self.connected = False
         logger.debug("Client closed")
 
-    async def _send_message(self, msg_type: str, **kwargs) -> None:
+    async def _send_message(self, msg_type: str, payload: Any) -> None:
         """封装发送ZMQ多帧消息
         Args:
-            msg_type: 消息类型，对应消息体的type字段
-            **kwargs: 消息体的其他字段
+            msg_type: 消息类型
+            payload: zmqprotocol 载荷 Struct
         """
         await self.socket.send_multipart([
             b'',
             self.auth_token,
             msg_type.encode('utf-8'),
-            util.encode_message(kwargs)
+            util.encode_message(payload)
         ])
 
     async def listen_responses(self):
         """监听服务器响应"""
+        channel_write_decoder = msgspec.json.Decoder(List[zmqprotocol.ZmqChannelMessageBuffer])
         while self.connected:
             try:
                 message = await self.socket.recv_multipart()
@@ -92,34 +96,40 @@ class LLMZmqClient(LLMClient):
                     continue
 
                 msg_type = message[1].decode('utf-8')
-                json_data = util.decode_json(message[2])
 
-                if msg_type == 'rpc_response':
-                    request_id = json_data.get('request_id')
-                    self.handle_rpc_response(request_id, json_data)
-                    continue
-                elif msg_type == 'error':
-                    logger.error(f"Server error: {json_data.get('error')}")
-                    continue
-                elif msg_type == 'channel_write':
-                    for request_id, topic, texts in json_data:
-                        request = self.active_requests.get(request_id)
+                if msg_type == 'channel_write':
+                    buffers = channel_write_decoder.decode(message[2])
+                    for buffer in buffers:
+                        request = self.active_requests.get(buffer.request_id)
                         if not request:
-                            logger.warning(f"channel_write for unknown request {request_id}")
+                            logger.warning(f"channel_write for unknown request {buffer.request_id}")
                             continue
-                        for text in texts:
-                            await request.output_channel.write(ChannelEvent(topic=topic, data=text))
+                        for text in buffer.text:
+                            await request.output_channel.write(ChannelEvent(topic=buffer.topic, data=text))
                     continue
 
-                request_id = json_data.get('request_id')
+                try:
+                    json_data = zmqprotocol.decode_server_payload(msg_type, message[2])
+                except (ValueError, msgspec.DecodeError) as e:
+                    logger.warning(f"Invalid response, please upgrade. Type: {msg_type}", exc_info=True)
+                    continue
+
+                if isinstance(json_data, zmqprotocol.RpcResponsePayload):
+                    self.handle_rpc_response(json_data.request_id, json_data)
+                    continue
+                elif isinstance(json_data, zmqprotocol.ErrorResponsePayload):
+                    logger.error(f"Server error: {json_data.error}")
+                    continue
+
+                request_id = json_data.request_id
                 request = self.active_requests.get(request_id)
                 if not request:
                     logger.warning(f"Response for unknown request {request_id}")
                     continue
 
-                if msg_type == 'response':
+                if isinstance(json_data, zmqprotocol.ResponsePayload):
                     await self.handle_response(request, json_data)
-                elif msg_type == 'cancel_ack':
+                elif isinstance(json_data, zmqprotocol.CancelAckPayload):
                     await self.handle_cancel_ack(request)
                 else:
                     logger.warning(f"Unknown response type: {msg_type}")
@@ -128,9 +138,9 @@ class LLMZmqClient(LLMClient):
             except Exception as e:
                 logger.exception("Error in listener task")
 
-    async def handle_response(self, request: LLMProviderRequest, json_data: Dict[str, Any]):
+    async def handle_response(self, request: LLMProviderRequest, payload: zmqprotocol.ResponsePayload):
         """处理完整响应"""
-        response_data = json_data['response']
+        response_data = payload.response
         # 构造LLMResponse
         if not response_data['response_text'] and not response_data['response_reasoning']:
             await request.output_channel.write(ChannelEvent('reasoning', None))
@@ -149,6 +159,7 @@ class LLMZmqClient(LLMClient):
             response_text=response_data['response_text'],
             response_reasoning=response_data['response_reasoning'],
             response_tool_calls=[ToolCall(**tc) for tc in (response_data['response_tool_calls'] or [])],
+            response_meta=response_data.get('response_meta') or {},
             finish_reason=response_data['finish_reason'],
             error_text=response_data['error_text'],
             prompt_tokens=response_data['prompt_tokens'],
@@ -188,14 +199,16 @@ class LLMZmqClient(LLMClient):
         # 发送请求消息
         await self._send_message(
             'request',
-            client_id=request.client_id,
-            context_id=request.context_id,
-            request_id=request.request_id,
-            model_name=request.model_name,
-            messages=[m.to_dict() for m in request.messages],
-            tools=request.tools,
-            options=request.options,
-            stream=request.stream
+            zmqprotocol.RequestPayload(
+                client_id=request.client_id,
+                context_id=request.context_id,
+                request_id=request.request_id,
+                model_name=request.model_name,
+                messages=[m.to_dict() for m in request.messages],
+                tools=request.tools,
+                options=request.options,
+                stream=request.stream
+            )
         )
         return request
 
@@ -212,8 +225,10 @@ class LLMZmqClient(LLMClient):
         # 发送取消消息
         await self._send_message(
             'cancel',
-            client_id=self.client_id,
-            request_id=request_id
+            zmqprotocol.CancelPayload(
+                client_id=self.client_id,
+                request_id=request_id
+            )
         )
         await request.output_channel.write_complete()
 
@@ -224,8 +239,10 @@ class LLMZmqClient(LLMClient):
 
         await self._send_message(
             'cancel_all',
-            client_id=self.client_id,
-            context_id=context_id
+            zmqprotocol.CancelAllPayload(
+                client_id=self.client_id,
+                context_id=context_id
+            )
         )
         for req in self.active_requests.values():
             try:
@@ -240,11 +257,13 @@ class LLMZmqClient(LLMClient):
 
         await self._send_message(
             'audit_event',
-            client_id=self.client_id,
-            context_id=context_id,
-            event_type=event_type,
-            data=kwargs,
-            timestamp=time.time()
+            zmqprotocol.AuditEventPayload(
+                client_id=self.client_id,
+                context_id=context_id,
+                event_type=event_type,
+                data=kwargs,
+                timestamp=time.time()
+            )
         )
 
     async def _send_rpc(self, method: str, kwargs: Dict[str, Any]) -> Any:
@@ -258,9 +277,11 @@ class LLMZmqClient(LLMClient):
 
         await self._send_message(
             'rpc',
-            request_id=request_id,
-            method=method,
-            kwargs=kwargs
+            zmqprotocol.RpcPayload(
+                request_id=request_id,
+                method=method,
+                kwargs=kwargs
+            )
         )
 
         try:
@@ -269,19 +290,19 @@ class LLMZmqClient(LLMClient):
             self._rpc_futures.pop(request_id, None)
             raise TimeoutError("RPC request timeout")
 
-    def handle_rpc_response(self, request_id: str, json_data: Dict[str, Any]):
+    def handle_rpc_response(self, request_id: str, payload: zmqprotocol.RpcResponsePayload):
         """处理RPC响应"""
         future = self._rpc_futures.pop(request_id, None)
         if future and not future.done():
-            if 'error_type' in json_data:
-                error_type = json_data['error_type']
-                error_msg = json_data['error_text']
+            if payload.error_type is not None:
+                error_type = payload.error_type
+                error_msg = payload.error_text
                 if hasattr(_model, error_type):
                     future.set_exception(getattr(_model, error_type)(error_msg))
                 else:
                     future.set_exception(RuntimeError(error_msg))
             else:
-                future.set_result(json_data.get('result'))
+                future.set_result(payload.result)
 
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
         """异步列出匹配的可用模型"""
@@ -454,60 +475,122 @@ class LLMMonitor:
 
 
 class DBLLMMonitor(LLMMonitor):
+    SQL_CREATE_TABLE_schema_version = textwrap.dedent('''
+        CREATE TABLE IF NOT EXISTS schema_version (
+        id INTEGER PRIMARY KEY,
+        major INTEGER NOT NULL DEFAULT 1,
+        minor INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    SQL_CREATE_TABLE_llm_requests = textwrap.dedent('''
+        CREATE TABLE IF NOT EXISTS llm_requests (
+            id INTEGER PRIMARY KEY,
+            client_id TEXT,
+            context_id TEXT,
+            request_id TEXT UNIQUE,
+            model_name TEXT,
+            stream INTEGER,
+            start_time REAL,
+            queue_time REAL,
+            queue_length INTEGER,
+            time_to_first_token REAL,
+            total_response_time REAL,
+            response_text TEXT,
+            response_reasoning TEXT,
+            response_tool_calls TEXT,
+            response_meta TEXT,
+            finish_reason TEXT,
+            error_text TEXT,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            request_messages TEXT,
+            request_tools TEXT,
+            request_options TEXT,
+            response_message TEXT,
+            created_at INTEGER
+        )
+    ''')
+    SQL_CREATE_TABLE_audit_events = textwrap.dedent('''
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY,
+            client_id TEXT,
+            context_id TEXT,
+            event_type TEXT,
+            data TEXT,
+            timestamp REAL
+        )
+    ''')
+    DB_VERSION = (1, 1)
+
     def __init__(self, pub_endpoint: str, pub_type: str = 'bind', verbose: bool = False, db_path: str = "llm_audit.db"):
         super().__init__(pub_endpoint, pub_type, verbose)
         self.db_path = db_path
-        self._init_database()
+        if os.path.isfile(db_path):
+            self._migrate_database()
+        else:
+            self._init_database()
 
     def _init_database(self):
-        """初始化数据库表，更新字段以匹配新的数据结构"""
-        conn = sqlite3.connect(self.db_path)
+        """初始化数据库表"""
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS llm_requests (
-                id INTEGER PRIMARY KEY,
-                client_id TEXT,
-                context_id TEXT,
-                request_id TEXT UNIQUE,
-                model_name TEXT,
-                stream INTEGER,
-                start_time REAL,
-                queue_time REAL,
-                queue_length INTEGER,
-                time_to_first_token REAL,
-                total_response_time REAL,
-                response_text TEXT,
-                response_reasoning TEXT,
-                response_tool_calls TEXT,
-                finish_reason TEXT,
-                error_text TEXT,
-                prompt_tokens INTEGER,
-                completion_tokens INTEGER,
-                request_messages TEXT,
-                request_tools TEXT,
-                request_options TEXT,
-                response_message TEXT,
-                created_at INTEGER
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id INTEGER PRIMARY KEY,
-                client_id TEXT,
-                context_id TEXT,
-                event_type TEXT,
-                data TEXT,
-                timestamp REAL
-            )
-        ''')
-        conn.commit()
+        cursor.execute("BEGIN")
+        cursor.execute(self.SQL_CREATE_TABLE_schema_version)
+        cursor.execute(
+            "INSERT OR REPLACE INTO schema_version (id, major, minor) VALUES (1, ?, ?)",
+            self.DB_VERSION
+        )
+        cursor.execute(self.SQL_CREATE_TABLE_llm_requests)
+        cursor.execute(self.SQL_CREATE_TABLE_audit_events)
+        cursor.execute("COMMIT")
+        conn.close()
+
+    def _migrate_database(self):
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        cursor = conn.cursor()
+        cursor.execute("BEGIN")
+        cursor.execute(self.SQL_CREATE_TABLE_schema_version)
+        cursor.execute("INSERT OR IGNORE INTO schema_version (id, major, minor) VALUES (1, 1, 0)")
+        cursor.execute("COMMIT")
+        cursor.execute("SELECT major, minor FROM schema_version WHERE id=1")
+        version_row = cursor.fetchone()
+        if version_row == (1, 0):
+            logger.warning("Migrating db from 1.0 to 1.1")
+            cursor.execute("BEGIN")
+            cursor.execute("ALTER TABLE llm_requests RENAME TO llm_requests_1_0")
+            cursor.execute(self.SQL_CREATE_TABLE_llm_requests)
+            cursor.execute("""
+                INSERT INTO llm_requests
+                SELECT
+                    id, client_id, context_id, request_id, model_name, stream,
+                    start_time, queue_time, queue_length, time_to_first_token,
+                    total_response_time, response_text, response_reasoning,
+                    response_tool_calls, NULL response_meta, finish_reason, error_text,
+                    prompt_tokens, completion_tokens, request_messages,
+                    request_tools, request_options, response_message, created_at
+                FROM llm_requests_1_0
+            """)
+            cursor.execute("DROP TABLE llm_requests_1_0")
+            version_row = (1, 1)
+            cursor.execute("UPDATE schema_version SET major=?, minor=? WHERE id=1", version_row)
+            cursor.execute("COMMIT")
+        cursor.execute("VACUUM")
+        logger.info("Migration done.")
         conn.close()
 
     def on_llm_request(self, data: Dict[str, Any]):
         """将审计消息存入数据库并打印"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        db_data = data.copy()
+        keys = (
+            'client_id', 'context_id', 'request_id', 'model_name', 'stream',
+            'start_time', 'queue_time', 'queue_length', 'time_to_first_token',
+            'total_response_time', 'response_text', 'response_reasoning',
+            'response_tool_calls', 'response_meta', 'finish_reason', 'error_text',
+            'prompt_tokens', 'completion_tokens', 'request_messages',
+            'request_tools', 'request_options', 'response_message',
+        )
+        db_data = {k: data.get(k) for k in keys}
         db_data['created_at'] = int(time.time())
         keys, qs, values = util.make_insert_auto(db_data)
         cursor.execute('INSERT OR REPLACE INTO llm_requests ({}) VALUES ({})'.format(keys, qs), values)
@@ -520,7 +603,8 @@ class DBLLMMonitor(LLMMonitor):
         """将审计事件存入数据库并打印"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        db_data = data.copy()
+        keys = ('client_id', 'context_id', 'event_type', 'data', 'timestamp')
+        db_data = {k: data.get(k) for k in keys}
         keys, qs, values = util.make_insert_auto(db_data)
         cursor.execute('INSERT INTO audit_events ({}) VALUES ({})'.format(keys, qs), values)
         conn.commit()

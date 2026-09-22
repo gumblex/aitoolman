@@ -268,6 +268,7 @@ class LLMProviderResponse:
     response_text: str = ""
     response_reasoning: str = ""
     response_tool_calls: List[ToolCall] = field(default_factory=list)
+    response_meta: Dict[str, Any] = field(default_factory=dict)
 
     # 完成信息
     finish_reason: Optional[str] = None

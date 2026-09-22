@@ -1,10 +1,9 @@
-import json
 import unittest
+import msgspec.json
 from unittest import mock
 
 from aitoolman.sse import ServerSentEvent
-
-from aitoolman.provider import OpenAICompatibleFormat, LLMProviderManager
+from aitoolman.provider import OpenAICompatibleFormat, AnthropicFormat, LLMProviderManager
 from aitoolman.model import LLMProviderRequest, LLMProviderResponse, LLMNoAvailableModelError, Message
 
 
@@ -123,10 +122,260 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         }
 
         event = self.format_strategy.parse_stream_event(
-            response, ServerSentEvent(data=json.dumps(chunk_data)))
+            response, ServerSentEvent(data=msgspec.json.encode(chunk_data)))
         self.assertFalse(event.is_end)
         self.assertEqual(event.content, "Hello")
         self.assertEqual(event.reasoning, "Think")
+
+    def _make_response(self, stream):
+        return LLMProviderResponse(
+            client_id="test_client",
+            context_id="test_context",
+            request_id="test_request",
+            model_name="gpt-3.5-turbo",
+            stream=stream
+        )
+
+    def test_parse_batch_response_meta(self):
+        """批式 response_meta：除 choices 外字段原样整体存入"""
+        response = self._make_response(False)
+        response_data = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-3.5-turbo",
+            "choices": [{
+                "message": {"content": "Hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            "custom_field": {"x": 1}
+        }
+        self.format_strategy.parse_batch_response(response, response_data)
+        self.assertEqual(response.response_meta, {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-3.5-turbo",
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            "custom_field": {"x": 1}
+        })
+        self.assertNotIn("choices", response.response_meta)
+
+    def test_parse_stream_usage_to_tokens_and_meta(self):
+        """流式 usage 写入 token 统计并按 Struct 字段并入 response_meta"""
+        response = self._make_response(True)
+        chunk = {
+            "id": "c1",
+            "choices": [{"delta": {}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"[DONE]"))
+        self.assertEqual(response.prompt_tokens, 10)
+        self.assertEqual(response.completion_tokens, 5)
+        self.assertEqual(response.response_meta.get("usage"),
+                         {"prompt_tokens": 10, "completion_tokens": 5})
+
+    def test_parse_stream_missing_and_null_fields(self):
+        """字段缺失/null 的 chunk（含仅有 id 的 tool_calls）可正常解析"""
+        response = self._make_response(True)
+        chunk = {
+            "choices": [{
+                "delta": {"tool_calls": [{"id": "1"}]},
+                "finish_reason": None
+            }]
+        }
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+        self.assertFalse(event.is_end)
+        self.assertEqual(event.content, "")
+
+        end = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"[DONE]"))
+        self.assertTrue(end.is_end)
+        self.assertEqual(len(end.tool_calls), 1)
+        self.assertEqual(end.tool_calls[0].id, "1")
+
+    def test_parse_stream_unknown_fields_from_last_raw_event(self):
+        """仅 [DONE] 前最后一帧的未知字段并入 response_meta"""
+        response = self._make_response(True)
+        chunk1 = {
+            "id": "c1",
+            "choices": [{"delta": {"content": "hello"}}],
+            "custom_field": {"x": 1}
+        }
+        chunk2 = {"id": "c1", "choices": [{"delta": {"content": " world"}}]}
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk1)))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk2)))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"[DONE]"))
+        # 未知字段取自末帧 chunk2；chunk1 的 custom_field 不并入
+        self.assertNotIn("custom_field", response.response_meta)
+        self.assertEqual(response.response_meta.get("id"), "c1")
+
+    def test_parse_stream_unknown_fields_on_last_chunk(self):
+        """末帧自身携带未知字段时并入 response_meta"""
+        response = self._make_response(True)
+        chunk = {
+            "id": "c1",
+            "choices": [{"delta": {"content": "hi"}}],
+            "custom_field": {"x": 1}
+        }
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"[DONE]"))
+        self.assertEqual(response.response_meta.get("custom_field"), {"x": 1})
+
+    def test_parse_stream_invalid_chunk_returns_empty_event(self):
+        """非法 JSON chunk 记录告警并返回空事件，不中断流"""
+        response = self._make_response(True)
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"{invalid json"))
+        self.assertFalse(event.is_end)
+        self.assertEqual(event.content, "")
+        self.assertEqual(event.reasoning, "")
+        self.assertEqual(event.tool_calls, [])
+
+
+class TestAnthropicFormat(unittest.TestCase):
+    def setUp(self):
+        self.model_config = {
+            "model": "claude-3",
+            "url": "https://api.anthropic.com/v1/messages"
+        }
+        self.format_strategy = AnthropicFormat(self.model_config)
+
+    def _make_response(self, stream):
+        return LLMProviderResponse(
+            client_id="test_client",
+            context_id="test_context",
+            request_id="test_request",
+            model_name="claude-3",
+            stream=stream
+        )
+
+    def test_parse_batch_response_meta(self):
+        """批式 response_meta：除 content 外字段原样整体存入"""
+        response = self._make_response(False)
+        response_data = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "content": [{"type": "text", "text": "Hello"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 5, "output_tokens": 7}
+        }
+        self.format_strategy.parse_batch_response(response, response_data)
+        self.assertEqual(response.response_text, "Hello")
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.prompt_tokens, 5)
+        self.assertEqual(response.completion_tokens, 7)
+        self.assertEqual(response.response_meta, {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 5, "output_tokens": 7}
+        })
+        self.assertNotIn("content", response.response_meta)
+
+    def test_parse_batch_response_tool_use(self):
+        """批式 tool_use block 转换为 ToolCall，finish_reason=tool_calls"""
+        response = self._make_response(False)
+        response_data = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "content": [
+                {"type": "text", "text": "calling"},
+                {"type": "tool_use", "id": "toolu-1", "name": "add_task",
+                 "input": {"content": "todo"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 7}
+        }
+        self.format_strategy.parse_batch_response(response, response_data)
+        self.assertEqual(response.finish_reason, "tool_calls")
+        self.assertEqual(len(response.response_tool_calls), 1)
+        tool = response.response_tool_calls[0]
+        self.assertEqual(tool.id, "toolu-1")
+        self.assertEqual(tool.name, "add_task")
+        self.assertEqual(tool.arguments, {"content": "todo"})
+
+    def test_parse_stream_meta_from_message_events(self):
+        """流式从 message_start/message_delta 收集 meta，message_stop 触发写入"""
+        response = self._make_response(True)
+
+        message_start = {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1", "type": "message", "role": "assistant",
+                "model": "claude-3", "content": [],
+                "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 1}
+            }
+        }
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_start",
+                                      data=msgspec.json.encode(message_start)))
+        self.assertFalse(event.is_end)
+        self.assertEqual(response.prompt_tokens, 10)
+        self.assertEqual(response.completion_tokens, 1)
+
+        delta_event = {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "Hi"}
+        }
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode(delta_event)))
+        self.assertEqual(event.content, "Hi")
+
+        # message_delta 带未知字段 x_extra，验证末帧未知字段并入
+        message_delta = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"input_tokens": 10, "output_tokens": 7},
+            "x_extra": "v"
+        }
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_delta",
+                                      data=msgspec.json.encode(message_delta)))
+        self.assertEqual(response.prompt_tokens, 10)
+        self.assertEqual(response.completion_tokens, 7)
+
+        end = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_stop",
+                                      data=msgspec.json.encode({"type": "message_stop"})))
+        self.assertTrue(end.is_end)
+        self.assertEqual(response.response_meta, {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "usage": {"input_tokens": 10, "output_tokens": 7},
+            "stop_reason": "end_turn",
+            "x_extra": "v"
+        })
+
+    def test_parse_stream_invalid_chunk_returns_empty_event(self):
+        """非法 JSON chunk 记录告警并返回空事件"""
+        response = self._make_response(True)
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"{invalid json"))
+        self.assertFalse(event.is_end)
+        self.assertEqual(event.content, "")
 
 
 def make_test_config():

@@ -7,11 +7,7 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
-try:
-    import orjson
-    ORJSON_AVAILABLE = True
-except ImportError:
-    ORJSON_AVAILABLE = False
+import msgspec
 import ksuid
 from typing import List, Dict, Union, NamedTuple, TYPE_CHECKING
 
@@ -66,17 +62,11 @@ def get_mime_type(filename):
 
 
 def decode_json(s):
-    if ORJSON_AVAILABLE:
-        return orjson.loads(s)
-    if isinstance(s, bytes):
-        return json.loads(s.decode('utf-8'))
-    return json.loads(s)
+    return msgspec.json.decode(s)
 
 
 def encode_message(obj) -> bytes:
-    if ORJSON_AVAILABLE:
-        return orjson.dumps(obj)
-    return json.dumps(obj, ensure_ascii=False).encode('utf-8')
+    return msgspec.json.encode(obj)
 
 
 def calculate_rank_weights(items: List[Union[str, List[str]]], rank_adjust_ratio: float = 0.25) -> Dict[str, float]:

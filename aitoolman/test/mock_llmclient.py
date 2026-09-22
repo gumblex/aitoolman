@@ -228,10 +228,10 @@ class MockLLMClient(_client.LLMClient):
         self,
         model_name: str,
         messages: List[_model.Message],
-        tools: Dict[str, Dict[str, Any]] = None,
-        options: Dict[str, Any] = None,
+        tools: Optional[Dict[str, Dict[str, Any]]] = None,
+        options: Optional[Dict[str, Any]] = None,
         stream: bool = False,
-        context_id: str = None,
+        context_id: Optional[str] = None,
         output_channel: Any = None
     ) -> _model.LLMProviderRequest:
         request = self.make_request(

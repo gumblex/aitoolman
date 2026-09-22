@@ -224,6 +224,7 @@ class LLMProviderResponse:
     response_text: str = ""                 # 完整响应文本
     response_reasoning: str = ""            # 完整推理文本
     response_tool_calls: List[ToolCall] = field(default_factory=list)  # 工具调用
+    response_meta: Dict[str, Any] = field(default_factory=dict)  # 原始响应元数据
 
     # 完成信息
     finish_reason: Optional[str] = None     # 完成原因

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aitoolman"
-version = "0.7.0"
+version = "0.8.0"
 authors = [
   { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
 ]
@@ -31,7 +31,7 @@ dependencies = [
   "fix-llm-xml>=1.1",
   "tomli; python_version < '3.11'",
   "tornado; sys_platform == 'win32'",
-  "orjson",
+  "msgspec",
 ]
 
 [project.optional-dependencies]

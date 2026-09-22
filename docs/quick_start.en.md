@@ -224,6 +224,7 @@ class LLMProviderResponse:
     response_text: str = ""                 # Complete response text
     response_reasoning: str = ""            # Complete reasoning text
     response_tool_calls: List[ToolCall] = field(default_factory=list)  # Tool calls
+    response_meta: Dict[str, Any] = field(default_factory=dict)  # Response metadata
 
     # Completion information
     finish_reason: Optional[str] = None     # Completion reason

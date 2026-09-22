@@ -33,7 +33,7 @@ class LLMClient(abc.ABC):
             self,
             model_name: str,
             messages: List[Message],
-            tools: Dict[str, Dict[str, Any]] = None,
+            tools: Optional[Dict[str, Dict[str, Any]]] = None,
             options: Optional[Dict[str, Any]] = None,
             stream: bool = False,
             context_id: Optional[str] = None,
@@ -43,7 +43,7 @@ class LLMClient(abc.ABC):
         return LLMProviderRequest(
             self.client_id, context_id,
             util.get_id(),
-            model_name, messages, tools or [], options or {},
+            model_name, messages, tools or {}, options or {},
             stream, output_channel
         )
 

@@ -1,14 +1,15 @@
-import json
 import secrets
 import asyncio
 import logging
-import itertools
-from typing import Dict, Optional, List, Any, Tuple, NamedTuple
+from typing import Dict, Optional, List, Any
 
+import msgspec
 import zmq
 import zmq.asyncio
 
 from . import util
+from . import zmqprotocol
+from .zmqprotocol import ZmqChannelMessageBuffer
 from .model import LLMProviderRequest, LLMProviderResponse, LLMPermissionDeniedError, FinishReason, Message
 from .provider import LLMProviderManager
 from .channel import ChannelWriter, ChannelEvent
@@ -29,23 +30,6 @@ class ZmqServerChannel(ChannelWriter):
         pass
 
 
-class ZmqChannelMessageBuffer(NamedTuple):
-    """按 (client_id, request_id, topic) 聚合的 channel 消息缓冲"""
-    key: Tuple[str, str, str]
-    text: List[Optional[str]]
-
-    @classmethod
-    def new(cls, client_id: str, request_id: str, message: ChannelEvent) -> 'ZmqChannelMessageBuffer':
-        return cls((client_id, request_id, message.topic), [message.data])
-
-    def add(self, client_id: str, request_id: str, message: ChannelEvent) -> Optional['ZmqChannelMessageBuffer']:
-        """同 key 原地追加并返回 None；不同 key 返回新建 buffer"""
-        if self.key == (client_id, request_id, message.topic):
-            self.text.append(message.data)
-            return None
-        return ZmqChannelMessageBuffer.new(client_id, request_id, message)
-
-
 class LLMZmqServer:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -57,7 +41,7 @@ class LLMZmqServer:
         self.zmq_auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # ZeroMQ路由认证令牌
         self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
         self.router_lock = asyncio.Lock()
-        self.channel_msg_buffer: List[ZmqChannelMessageBuffer] = []
+        self.channel_msg_buffer: Dict[str, List[ZmqChannelMessageBuffer]] = {}
         self.running = False
 
     async def initialize(self):
@@ -97,20 +81,28 @@ class LLMZmqServer:
 
     async def process_message(self, message: List[bytes]):
         """解析并处理客户端消息"""
-        try:
-            if len(message) == 5:
+        if len(message) == 5:
+            try:
                 client_id = message[0].decode('utf-8')
                 auth_token = message[2].decode('utf-8')
                 msg_type = message[3].decode('utf-8')
-                json_data = util.decode_json(message[4])
-            else:
-                logger.error(f"Invalid message format, please upgrade.")
+            except UnicodeDecodeError as e:
+                logger.error(f"Failed to parse message header, please upgrade: {e}")
                 return
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to parse message, please upgrade: {e}")
+            try:
+                json_data = zmqprotocol.decode_client_payload(msg_type, message[4])
+            except (UnicodeDecodeError, ValueError, msgspec.DecodeError) as e:
+                logger.error(f"Failed to parse message, please upgrade. Message: %s, Error: %s", (message[4], e))
+                return
+        else:
+            logger.error(f"Invalid message format, please upgrade.")
             return
 
-        request_id = json_data.get('request_id')
+        if json_data is None:
+            logger.warning(f"Unknown message type: {msg_type}")
+            return
+
+        request_id = json_data.request_id
 
         logger.debug("[%s] Request: %s", client_id, json_data)
 
@@ -127,7 +119,7 @@ class LLMZmqServer:
                 logger.warning("[%s] Permission denied for cancel request.", client_id)
         elif msg_type == 'cancel_all':
             if self._check_permission(auth_token, manage=False):
-                await self.handle_cancel_all(client_id, json_data.get('context_id'))
+                await self.handle_cancel_all(client_id, json_data.context_id)
             else:
                 logger.warning("[%s] Permission denied for cancel_all request.", client_id)
             # 否则忽略
@@ -143,16 +135,16 @@ class LLMZmqServer:
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
-    async def handle_request(self, client_id: str, json_data: Dict[str, Any]):
+    async def handle_request(self, client_id: str, json_data: zmqprotocol.RequestPayload):
         """处理客户端请求"""
         # 构造LLMRequest
-        request_id = json_data.get('request_id') or util.get_id()
-        model_name = json_data['model_name']
-        messages = [Message.from_dict(m) for m in json_data['messages']]
-        tools = json_data.get('tools') or {}
-        options = json_data.get('options') or {}
-        stream = json_data.get('stream', False)
-        context_id = json_data.get('context_id')
+        request_id = json_data.request_id or util.get_id()
+        model_name = json_data.model_name
+        messages = [Message.from_dict(m) for m in json_data.messages]
+        tools = json_data.tools or {}
+        options = json_data.options or {}
+        stream = json_data.stream or False
+        context_id = json_data.context_id
 
         # 创建ZmqTextChannel（捕获channel写入并推送）
         output_channel = ZmqServerChannel(self, request_id)
@@ -173,11 +165,11 @@ class LLMZmqServer:
         logger.info("[%s] Start request. model: %s, stream: %s", request_id, model_name, stream)
         self.provider_manager.process_request(request, self.on_request_completed)
 
-    async def handle_request_auth_failed(self, client_id: str, json_data: Dict[str, Any]):
-        request_id = json_data.get('request_id') or util.get_id()
-        model_name = json_data['model_name']
-        stream = json_data.get('stream', False)
-        context_id = json_data.get('context_id')
+    async def handle_request_auth_failed(self, client_id: str, json_data: zmqprotocol.RequestPayload):
+        request_id = json_data.request_id or util.get_id()
+        model_name = json_data.model_name
+        stream = json_data.stream or False
+        context_id = json_data.context_id
 
         response = LLMProviderResponse(
             client_id=client_id,
@@ -219,10 +211,9 @@ class LLMZmqServer:
         while True:
             if not self.channel_msg_buffer:
                 break
-            buffers, self.channel_msg_buffer = self.channel_msg_buffer, []
-            for client_id, group in itertools.groupby(buffers, key=lambda b: b.key[0]):
-                body = [[b.key[1], b.key[2], b.text] for b in group]
-                await self._send_client_message(client_id, 'channel_write', body)
+            for client_id, buffers in list(self.channel_msg_buffer.items()):
+                del self.channel_msg_buffer[client_id]
+                await self._send_client_message(client_id, 'channel_write', buffers)
 
     async def send_channel_write(self, request_id: str, message: ChannelEvent):
         """发送channel写入消息给客户端（按流缓冲合并，乐观锁机制）
@@ -239,13 +230,14 @@ class LLMZmqServer:
             return
         client_id = request.client_id
 
-        if self.channel_msg_buffer:
-            new_buffer = self.channel_msg_buffer[-1].add(client_id, request_id, message)
+        buffers = self.channel_msg_buffer.setdefault(client_id, [])
+        if buffers:
+            new_buffer = buffers[-1].add(request_id, message.topic, message.data)
             if new_buffer is not None:
-                self.channel_msg_buffer.append(new_buffer)
+                buffers.append(new_buffer)
         else:
-            self.channel_msg_buffer.append(
-                ZmqChannelMessageBuffer.new(client_id, request_id, message))
+            buffers.append(
+                ZmqChannelMessageBuffer.new(request_id, message.topic, message.data))
 
         # 如果有正在发送的协程，当前消息会被它在 while 循环中取走
         if self.router_lock.locked():
@@ -255,9 +247,9 @@ class LLMZmqServer:
 
     async def send_response(self, client_id: str, request_id: str, response: LLMProviderResponse):
         """发送完整响应消息"""
-        message = {
-            'request_id': request_id,
-            'response': {
+        message = zmqprotocol.ResponsePayload(
+            request_id=request_id,
+            response={
                 'client_id': response.client_id,
                 'context_id': response.context_id,
                 'request_id': response.request_id,
@@ -271,13 +263,14 @@ class LLMZmqServer:
                 'response_text': response.response_text,
                 'response_reasoning': response.response_reasoning,
                 'response_tool_calls': [tc._asdict() for tc in response.response_tool_calls],
+                'response_meta': response.response_meta,
                 'finish_reason': response.finish_reason.value if isinstance(response.finish_reason, FinishReason) else response.finish_reason,
                 'error_text': response.error_text,
                 'prompt_tokens': response.prompt_tokens,
                 'completion_tokens': response.completion_tokens,
                 'response_message': response.response_message.to_dict() if response.response_message else None
             }
-        }
+        )
         # logger.debug("send_msg: %s", message)
         async with self.router_lock:
             await self._flush_channel_messages()
@@ -285,11 +278,11 @@ class LLMZmqServer:
 
     async def send_error(self, client_id: str, request_id: str, error: str):
         """发送错误消息"""
-        message = {
-            'type': 'error',
-            'request_id': request_id,
-            'error': error
-        }
+        message = zmqprotocol.ErrorResponsePayload(
+            type='error',
+            request_id=request_id,
+            error=error
+        )
         async with self.router_lock:
             await self._send_client_message(client_id, 'response', message)
 
@@ -312,6 +305,7 @@ class LLMZmqServer:
             'response_tool_calls': (
                 [tc._asdict() for tc in response.response_tool_calls]
                 if response.response_tool_calls else None),
+            'response_meta': response.response_meta,
             'finish_reason': response.finish_reason,
             'error_text': response.error_text,
             'prompt_tokens': response.prompt_tokens,
@@ -341,10 +335,10 @@ class LLMZmqServer:
                 return True
         return secrets.compare_digest(auth_token, self.zmq_auth_token)
 
-    async def handle_rpc(self, client_id: str, request_id: str, auth_token: str, json_data: Dict[str, Any]):
+    async def handle_rpc(self, client_id: str, request_id: str, auth_token: str, json_data: zmqprotocol.RpcPayload):
         """处理通用RPC请求"""
-        method = json_data.get('method', '')
-        kwargs = json_data.get('kwargs', {})
+        method = json_data.method or ''
+        kwargs = json_data.kwargs or {}
 
         # 管理类方法需要权限校验
         manage_methods = {'update_config', 'update_api_config', 'change_api_status', 'update_model_tag'}
@@ -399,14 +393,15 @@ class LLMZmqServer:
 
     async def send_rpc_response(self, client_id: str, request_id: str, result: Any = None, error: Optional[Exception] = None):
         """发送RPC响应"""
-        message = {
-            'request_id': request_id,
-        }
         if error is not None:
-            message['error_type'] = type(error).__name__
-            message['error_text'] = f"{type(error).__qualname__}: {str(error)}"
+            message = zmqprotocol.RpcResponsePayload(
+                request_id=request_id,
+                error_type=type(error).__name__,
+                error_text=f"{type(error).__qualname__}: {str(error)}")
         else:
-            message['result'] = result
+            message = zmqprotocol.RpcResponsePayload(
+                request_id=request_id,
+                result=result)
         async with self.router_lock:
             await self._send_client_message(client_id, 'rpc_response', message)
 
@@ -429,19 +424,19 @@ class LLMZmqServer:
 
     async def send_cancel_ack(self, client_id: str, request_id: str):
         """发送取消确认"""
-        message = {'request_id': request_id}
+        message = zmqprotocol.CancelAckPayload(request_id=request_id)
         async with self.router_lock:
             await self._flush_channel_messages()
             await self._send_client_message(client_id, 'cancel_ack', message)
 
-    async def handle_audit_event(self, client_id: str, json_data: Dict[str, Any]):
+    async def handle_audit_event(self, client_id: str, json_data: zmqprotocol.AuditEventPayload):
         """处理审计事件消息并发布到PUB接口"""
         event_data = {
             'client_id': client_id,
-            'context_id': json_data.get('context_id'),
-            'event_type': json_data.get('event_type'),
-            'data': json_data.get('data', {}),
-            'timestamp': json_data.get('timestamp')
+            'context_id': json_data.context_id,
+            'event_type': json_data.event_type,
+            'data': json_data.data or {},
+            'timestamp': json_data.timestamp
         }
         await self.pub_socket.send_multipart([
             b'audit_event',

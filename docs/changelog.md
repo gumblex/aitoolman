@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+### 修改
+- 增加 LLMProviderResponse.response_meta
+- orjson 改为 msgspec；提高解析性能
+
 ## 0.7.0
 ### 修改
 - 提高 ZeroMQ RPC 性能，修改 ZeroMQ 协议
