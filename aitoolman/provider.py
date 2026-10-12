@@ -825,6 +825,7 @@ class LLMProviderManager:
     default_rank_adjust_ratio: float = 0.25
 
     def __init__(self, config: Dict[str, Any]):
+        self._initialized: bool = False
         self._apply_config(config)
 
         self.http_client = httpx.AsyncClient(
@@ -1072,7 +1073,9 @@ class LLMProviderManager:
 
     async def initialize(self):
         """初始化ZeroMQ sockets和HTTP客户端"""
-        await self.http_client.__aenter__()
+        if not self._initialized:
+            await self.http_client.__aenter__()
+            self._initialized = True
 
     async def _end_request_with_error(
         self, request: LLMProviderRequest, response: LLMProviderResponse, error_text: str, finish_reason: FinishReason
@@ -1124,6 +1127,7 @@ class LLMProviderManager:
             format_strategy: LLMFormatStrategy
     ):
         """处理非流式请求（完整响应）"""
+        await self.initialize()
         start_time = time.monotonic()
         logger.debug("Batch POST: %s, %s", model_config['url'], request_body)
         try:
@@ -1176,6 +1180,7 @@ class LLMProviderManager:
             format_strategy: LLMFormatStrategy
     ):
         """处理流式请求（分块响应）"""
+        await self.initialize()
         start_time = time.monotonic()
         first_token_received = False
         thinking_end = False
@@ -1457,10 +1462,12 @@ class LLMProviderManager:
         self.model_tag[tag] = models
         self._calculate_all_tag_weights()
 
-    async def cleanup(self):
+    async def close(self):
         """清理资源"""
         for rt in self.active_requests.values():
             rt.request.is_cancelled = True
             rt.task.cancel()
         self.active_requests.clear()
-        await self.http_client.aclose()
+        if self._initialized:
+            await self.http_client.aclose()
+            self._initialized = False

@@ -158,7 +158,7 @@ class LLMLocalClient(LLMClient):
         await self.provider_manager.initialize()
 
     async def close(self):
-        await self.provider_manager.cleanup()
+        await self.provider_manager.close()
 
     async def audit_event(self, context_id: str, event_type: str, **kwargs):
         logger.info(

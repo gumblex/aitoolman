@@ -314,7 +314,8 @@ General request entry, supports passing module requests or direct requests, suit
 # One-click call (equivalent to send_request + wait_response + post_process)
 async def call(
     self,
-    request: Union[LLMModuleRequest, LLMDirectRequest]
+    request: Union[LLMModuleRequest, LLMDirectRequest],
+    context_id: Optional[str] = None
 ) -> LLMModuleResult: ...
 
 # Manually call step by step
@@ -339,7 +340,7 @@ def add_processor(self, name: str, processor: Callable): ...
 Send custom audit events for recording business-level operations, facilitating subsequent problem troubleshooting and business data statistics. Received and unified processed by LLMClient backend.
 ```python
 # Trigger audit event
-async def audit_event(self, event_type: str, **kwargs): ...
+async def audit_event(self, event_type: str, context_id: Optional[str] = None, **kwargs): ...
 ```
 
 Create an application factory for generating multiple independent application instances during batch task processing, avoiding context interference and supporting concurrent processing.
@@ -645,6 +646,8 @@ LLMClient is the abstract base class for LLM clients, unifying the calling inter
 ```python
 class LLMClient(abc.ABC):
     """LLM client abstract base class"""
+    async def initialize(self): ...
+    async def close(self): ...
     async def request(
         self,
         model_name: str,
@@ -654,7 +657,7 @@ class LLMClient(abc.ABC):
         stream: bool = False,
         context_id: Optional[str] = None,
         output_channel: Optional[ChannelWriter] = None
-    ) -> LLMProviderRequest
+    ) -> LLMProviderRequest: ...
 
     async def cancel(self, request_id: str): ...
     async def cancel_all(self, context_id: Optional[str] = None): ...
@@ -662,7 +665,7 @@ class LLMClient(abc.ABC):
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
     # Resolve actual candidate models
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]: ...
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: Optional[str] = None) -> List[str]: ...
 ```
 
 #### 4.2.2 Local Client
@@ -745,7 +748,7 @@ class LLMProviderManager:
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
 
     # Select candidate models
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
 ```
 

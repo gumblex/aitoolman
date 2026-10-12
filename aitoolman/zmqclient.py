@@ -166,7 +166,10 @@ class LLMZmqClient(LLMClient):
             completion_tokens=response_data['completion_tokens'],
             response_message=Message.from_dict(response_data['response_message']) if response_data['response_message'] else None
         )
-        request.response.set_result(response)
+        try:
+            request.response.set_result(response)
+        except asyncio.InvalidStateError:
+            logger.warning("[%s] request cancelled, drop response", request.request_id)
         del self.active_requests[request.request_id]
 
     async def handle_cancel_ack(self, request: LLMProviderRequest):
@@ -294,15 +297,18 @@ class LLMZmqClient(LLMClient):
         """处理RPC响应"""
         future = self._rpc_futures.pop(request_id, None)
         if future and not future.done():
-            if payload.error_type is not None:
-                error_type = payload.error_type
-                error_msg = payload.error_text
-                if hasattr(_model, error_type):
-                    future.set_exception(getattr(_model, error_type)(error_msg))
+            try:
+                if payload.error_type is not None:
+                    error_type = payload.error_type
+                    error_msg = payload.error_text
+                    if hasattr(_model, error_type):
+                        future.set_exception(getattr(_model, error_type)(error_msg))
+                    else:
+                        future.set_exception(RuntimeError(error_msg))
                 else:
-                    future.set_exception(RuntimeError(error_msg))
-            else:
-                future.set_result(payload.result)
+                    future.set_result(payload.result)
+            except asyncio.InvalidStateError:
+                logger.warning("[%s] request cancelled, drop response", request_id)
 
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
         """异步列出匹配的可用模型"""

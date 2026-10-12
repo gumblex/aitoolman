@@ -315,7 +315,8 @@ result: LLMModuleResult = await app['module_name'](
 # 一键调用（等同于 send_request + wait_response + post_process）
 async def call(
     self,
-    request: Union[LLMModuleRequest, LLMDirectRequest]
+    request: Union[LLMModuleRequest, LLMDirectRequest],
+    context_id: Optional[str] = None
 ) -> LLMModuleResult: ...
 
 # 手动分步调用
@@ -340,7 +341,7 @@ def add_processor(self, name: str, processor: Callable): ...
 发送自定义审计事件，用于记录业务层面的操作，便于后续排查问题和统计业务数据。LLMClient 后端接收，统一处理。
 ```python
 # 触发审计事件
-async def audit_event(self, event_type: str, **kwargs): ...
+async def audit_event(self, event_type: str, context_id: Optional[str] = None, **kwargs): ...
 ```
 
 创建应用工厂，用于批量处理任务时生成多个独立的应用实例，避免上下文互相干扰，支持并发处理。
@@ -649,6 +650,8 @@ LLMClient是LLM客户端的抽象基类，统一不同部署方式的调用接�
 ```python
 class LLMClient(abc.ABC):
     """LLM 客户端抽象基类"""
+    async def initialize(self): ...
+    async def close(self): ...
     async def request(
         self,
         model_name: str,
@@ -658,7 +661,7 @@ class LLMClient(abc.ABC):
         stream: bool = False,
         context_id: Optional[str] = None,
         output_channel: Optional[ChannelWriter] = None
-    ) -> LLMProviderRequest
+    ) -> LLMProviderRequest: ...
 
     async def cancel(self, request_id: str): ...
     async def cancel_all(self, context_id: Optional[str] = None): ...
@@ -666,7 +669,7 @@ class LLMClient(abc.ABC):
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
     # 解析实际候选模型
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None) -> List[str]: ...
+    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: Optional[str] = None) -> List[str]: ...
 ```
 
 #### 4.2.2 本地客户端
@@ -749,7 +752,7 @@ class LLMProviderManager:
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
 
     # 解析候选模型
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None) -> List[str]: ...
+    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
 ```
 

@@ -41,7 +41,7 @@ class TestLLMLocalClient(unittest.IsolatedAsyncioTestCase):
         mock_provider_manager_class.return_value = mock_provider_manager
         mock_provider_manager.cancel_request = AsyncMock()
         mock_provider_manager.initialize = AsyncMock()
-        mock_provider_manager.cleanup = AsyncMock()
+        mock_provider_manager.close = AsyncMock()
 
         async with LLMLocalClient(self.config) as client:
             client.provider_manager = mock_provider_manager

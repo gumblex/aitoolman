@@ -86,6 +86,7 @@ class _LLMModule(NamedTuple):
             _media_content: Optional[List[MediaContent]] = None,
             _output_channel: Optional[_channel.ChannelWriter] = None,
             _model_rank: int = 0,
+            _context_id: Optional[str] = None,
             **kwargs
     ) -> LLMModuleResult:
         return await self.app.call(LLMModuleRequest(
@@ -96,7 +97,7 @@ class _LLMModule(NamedTuple):
             context_messages=_context_messages,
             media_content=_media_content,
             output_channel=_output_channel
-        ))
+        ), context_id=_context_id)
 
 
 class LLMApplication:
@@ -206,12 +207,12 @@ class LLMApplication:
         """添加LLM模块"""
         self.module_configs[module_config.name] = module_config
 
-    async def audit_event(self, event_type: str, **kwargs):
+    async def audit_event(self, event_type: str, context_id: Optional[str] = None, **kwargs):
         """触发用户自定义审计事件"""
-        await self.client.audit_event(self.context_id, event_type, **kwargs)
+        await self.client.audit_event((context_id or self.context_id), event_type, **kwargs)
 
     async def render_direct_request(
-            self, module_request: Union[LLMModuleRequest, LLMDirectRequest]
+        self, module_request: Union[LLMModuleRequest, LLMDirectRequest], context_id: Optional[str] = None
     ) -> LLMDirectRequest:
         if isinstance(module_request, LLMDirectRequest):
             return module_request
@@ -235,7 +236,7 @@ class LLMApplication:
         model_tags = (module_request.model_name or config.model)
         if not model_tags:
             raise LLMNoAvailableModelError("No model name or tags provided.")
-        model_names = await self.client.resolve_model(model_tags, messages, context_id=self.context_id)
+        model_names = await self.client.resolve_model(model_tags, messages, context_id=(context_id or self.context_id))
         model_name = model_names[module_request.model_rank % len(model_names)]
         return LLMDirectRequest(
             model_name=model_name,
@@ -247,7 +248,9 @@ class LLMApplication:
             post_processor=(module_request.post_processor if module_request.post_processor is not None else config.post_processor),
         )
 
-    async def send_request(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleRequestState:
+    async def send_request(
+        self, request: Union[LLMModuleRequest, LLMDirectRequest], context_id: Optional[str] = None
+    ) -> LLMModuleRequestState:
         """发送LLM请求，返回请求状态（用于等待和取消）"""
         if isinstance(request, LLMModuleRequest):
             direct_req = await self.render_direct_request(request)
@@ -271,7 +274,7 @@ class LLMApplication:
             tools=direct_req.tools,
             options=direct_req.options,
             stream=direct_req.stream,
-            context_id=self.context_id,
+            context_id=context_id or self.context_id,
             output_channel=output_channel
         )
 
@@ -315,12 +318,15 @@ class LLMApplication:
     async def cancel(self, request_state: LLMModuleRequestState):
         """取消正在进行的LLM请求"""
         if not request_state.provider_request.is_cancelled:
-            await self.client.cancel(request_state.provider_request.request_id)
-            logger.debug("Cancelled request %s", request_state.provider_request.request_id)
+            try:
+                await self.client.cancel(request_state.provider_request.request_id)
+                logger.debug("[%s] Cancelled request.", request_state.provider_request.request_id)
+            except Exception as e:
+                logger.warning("[%s] Cancel request error: %s", request_state.provider_request.request_id, e)
 
-    async def call(self, request: Union[LLMModuleRequest, LLMDirectRequest]) -> LLMModuleResult:
+    async def call(self, request: Union[LLMModuleRequest, LLMDirectRequest], context_id: Optional[str] = None) -> LLMModuleResult:
         """发送请求并等待结果"""
-        request_state = await self.send_request(request)
+        request_state = await self.send_request(request, context_id)
         await request_state.wait_response()
         return await self.post_process(request_state)
 

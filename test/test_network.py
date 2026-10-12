@@ -141,7 +141,7 @@ class TestNetwork(unittest.IsolatedAsyncioTestCase):
         await self.manager.initialize()
 
     async def asyncTearDown(self):
-        await self.manager.cleanup()
+        await self.manager.close()
 
     async def _request(self, model_name: str, stream: bool = False):
         request = LLMProviderRequest(

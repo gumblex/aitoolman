@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.7.1
+## 0.8.1
+### 修改
+- LLMApplication 可指定请求的 context_id
+- LLMProviderManager/LLMZmqServer.cleanup 改为 close
+- LLMProviderManager 自动执行 initialize，且可重复执行
+- model_tag 重复时，只使用第一个权重
+
+## 0.8.0
 ### 修改
 - 增加 LLMProviderResponse.response_meta
 - orjson 改为 msgspec；提高解析性能

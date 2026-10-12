@@ -77,7 +77,7 @@ class LLMZmqServer:
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("Server shutting down...")
         finally:
-            await self.cleanup()
+            await self.close()
 
     async def process_message(self, message: List[bytes]):
         """解析并处理客户端消息"""
@@ -443,10 +443,10 @@ class LLMZmqServer:
             util.encode_message(event_data)
         ])
 
-    async def cleanup(self):
+    async def close(self):
         """清理资源"""
         await self._flush_channel_messages()
-        await self.provider_manager.cleanup()
+        await self.provider_manager.close()
         self.router_socket.close()
         self.pub_socket.close()
         self.ctx.term()

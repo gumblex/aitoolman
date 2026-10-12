@@ -93,8 +93,9 @@ def calculate_rank_weights(items: List[Union[str, List[str]]], rank_adjust_ratio
         )
         if isinstance(item, list):
             for sub_item in item:
-                result[sub_item] = weight
-        else:
+                if sub_item not in result:
+                    result[sub_item] = weight
+        elif item not in result:
             result[item] = weight
     return result
 
