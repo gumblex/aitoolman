@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aitoolman"
-version = "0.8.1"
+version = "0.8.2"
 authors = [
   { name="Dingyuan Wang", email="abcdoyle888@gmail.com" },
 ]
 description = "Controllable and Transparent LLM Application Framework"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -37,7 +37,6 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "aiohttp",
-  "aiohttp-sse",
 ]
 
 [project.urls]

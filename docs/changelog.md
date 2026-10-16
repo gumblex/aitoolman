@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2
+### 修改
+- 流式响应 timeout 按实际内容计时，避免部分API协议层保活
+
 ## 0.8.1
 ### 修改
 - LLMApplication 可指定请求的 context_id

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Network integration tests for LLMProviderManager against mock_openai_server.
 
-Covers G02 design scenarios:
+Covers the following scenarios:
 a. batch request normal response
 b. stream request normal response
 c. batch timeout triggers timeout_batch
 d. stream timeout triggers timeout
 e. model-level timeout_batch overrides [default]
+f. stream of pure heartbeats times out without valid content
+g. stream heartbeats interleaved with content complete normally
 plus authentication success/failure tests.
 """
 
@@ -127,6 +129,16 @@ class TestNetwork(unittest.IsolatedAsyncioTestCase):
                         "X-Mock-Response-Delay": MOCK_DELAY_SLOW_BATCH,
                     },
                 },
+                "mock-heartbeat": {
+                    "url": self.base_url + "/v1/chat/completions",
+                    "model": "mock-heartbeat",
+                    "headers": {"Authorization": f"Bearer {CLIENT_TOKEN}"},
+                },
+                "mock-heartbeat-content": {
+                    "url": self.base_url + "/v1/chat/completions",
+                    "model": "mock-heartbeat-content",
+                    "headers": {"Authorization": f"Bearer {CLIENT_TOKEN}"},
+                },
                 "mock-auth-fail": {
                     "url": self.base_url + "/v1/chat/completions",
                     "model": "mock-normal",
@@ -183,7 +195,10 @@ class TestNetwork(unittest.IsolatedAsyncioTestCase):
         resp = await self._request("mock-slow-stream", stream=True)
         self.assertEqual(resp.finish_reason, "error: request")
         self.assertIsNotNone(resp.error_text)
-        self.assertIn("ReadTimeout", resp.error_text or "")
+        # The failure may come from either the valid-content watchdog
+        # (TimeoutError) or the underlying httpx read timeout (ReadTimeout),
+        # depending on which fires first; both indicate a timeout.
+        self.assertIn("Timeout", resp.error_text or "")
 
     async def test_model_level_timeout_batch_overrides_default(self):
         """Scenario e: model-level timeout_batch overrides [default]."""
@@ -193,6 +208,20 @@ class TestNetwork(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.finish_reason, "stop")
         self.assertIsNone(resp.error_text)
         self.assertEqual(resp.response_text, "This is a slow batch response.")
+
+    async def test_stream_heartbeat_timeout(self):
+        """Scenario f: pure heartbeat stream never delivers valid content."""
+        resp = await self._request("mock-heartbeat", stream=True)
+        self.assertEqual(resp.finish_reason, "error: request")
+        self.assertIsNotNone(resp.error_text)
+        self.assertIn("TimeoutError", resp.error_text or "")
+
+    async def test_stream_heartbeat_with_content_completes(self):
+        """Scenario g: heartbeats between content chunks must not time out."""
+        resp = await self._request("mock-heartbeat-content", stream=True)
+        self.assertEqual(resp.finish_reason, "stop")
+        self.assertIsNone(resp.error_text)
+        self.assertEqual(resp.response_text, "Hello from mock server!")
 
     async def test_auth_success(self):
         """Auth: correct Authorization header is accepted."""

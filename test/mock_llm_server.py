@@ -8,6 +8,10 @@ responses. Scenarios are selected by the ``model`` field in the request body:
 - ``mock-stream``: normal SSE streaming response
 - ``mock-slow-batch``: delayed batch response (for timeout_batch tests)
 - ``mock-slow-stream``: SSE stream with a pause (for timeout tests)
+- ``mock-heartbeat``: SSE stream of empty-data keep-alive events only
+  (no valid content; for valid-content timeout tests)
+- ``mock-heartbeat-content``: normal SSE stream with empty-data heartbeats
+  interleaved between content chunks
 - ``mock-auth-error``: always returns 401
 
 Delay durations can be controlled via the ``X-Mock-Response-Delay`` request
@@ -25,7 +29,6 @@ import time
 from typing import Any, Dict, Optional
 
 from aiohttp import web
-from aiohttp_sse import sse_response
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -39,6 +42,8 @@ MODEL_NORMAL = "mock-normal"
 MODEL_STREAM = "mock-stream"
 MODEL_SLOW_BATCH = "mock-slow-batch"
 MODEL_SLOW_STREAM = "mock-slow-stream"
+MODEL_HEARTBEAT = "mock-heartbeat"
+MODEL_HEARTBEAT_CONTENT = "mock-heartbeat-content"
 MODEL_AUTH_ERROR = "mock-auth-error"
 
 # Default delays (seconds) for slow scenarios
@@ -47,6 +52,13 @@ DEFAULT_SLOW_STREAM_DELAY = 2.0
 
 # Interval between SSE chunks in normal streaming
 STREAM_CHUNK_INTERVAL = 0.1
+
+# Interval between empty-data heartbeat (keep-alive) events
+HEARTBEAT_INTERVAL = 0.1
+
+# Max duration of the pure heartbeat stream (far beyond the client-side
+# valid-content timeout, so the client always times out first)
+HEARTBEAT_MAX_DURATION = 5.0
 
 # Response content parts for streaming scenarios
 STREAM_CONTENT_PARTS = ["Hello", " from ", "mock", " server!"]
@@ -128,6 +140,35 @@ def _error_response(message: str, code: str, status: int = 400) -> web.Response:
     )
 
 
+def _sse_frame(payload: str = "", event: Optional[str] = None) -> bytes:
+    """Encode one SSE frame; an empty payload is a keep-alive heartbeat."""
+    lines = []
+    if event:
+        lines.append(f"event: {event}")
+    lines.append(f"data: {payload}")
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+async def _start_sse_response(request: web.Request) -> web.StreamResponse:
+    """Start a streaming SSE response that also works for POST requests.
+
+    aiohttp-sse 3.x only serves SSE over GET and rejects POST with 405,
+    while OpenAI-compatible APIs deliver event streams over POST, so the
+    event stream is built directly on aiohttp's StreamResponse.
+    """
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+        },
+    )
+    await resp.prepare(request)
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Request handlers
 # ---------------------------------------------------------------------------
@@ -189,7 +230,35 @@ async def _handle_chat_completions(request: web.Request) -> web.StreamResponse:
             _make_batch_response(model, "This is a mock response.")
         )
 
-    # 6. Streaming scenarios (model in MODEL_STREAM / MODEL_SLOW_STREAM)
+    # 6. Pure heartbeat scenario: endless empty-data keep-alive events with
+    #    no valid content; the client should hit its valid-content timeout
+    if model == MODEL_HEARTBEAT and stream:
+        resp = await _start_sse_response(request)
+        heartbeat_deadline = time.monotonic() + HEARTBEAT_MAX_DURATION
+        while time.monotonic() < heartbeat_deadline:
+            await resp.write(_sse_frame("", event="ping"))
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+        await resp.write_eof()
+        return resp
+
+    # 7. Heartbeat + content scenario: normal stream with empty-data
+    #    heartbeats interleaved between content chunks; gaps stay below the
+    #    client-side timeout, so the stream must complete normally
+    if model == MODEL_HEARTBEAT_CONTENT and stream:
+        resp = await _start_sse_response(request)
+        await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, role="assistant"))))
+        await asyncio.sleep(STREAM_CHUNK_INTERVAL)
+        for part in STREAM_CONTENT_PARTS:
+            await resp.write(_sse_frame("", event="ping"))
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, content=part))))
+            await asyncio.sleep(STREAM_CHUNK_INTERVAL)
+        await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, finish_reason="stop"))))
+        await resp.write(_sse_frame("[DONE]"))
+        await resp.write_eof()
+        return resp
+
+    # 8. Streaming scenarios (model in MODEL_STREAM / MODEL_SLOW_STREAM)
     if model == MODEL_SLOW_STREAM:
         content_parts = SLOW_STREAM_CONTENT_PARTS
         pause_delay = _get_delay(request, DEFAULT_SLOW_STREAM_DELAY)
@@ -197,24 +266,22 @@ async def _handle_chat_completions(request: web.Request) -> web.StreamResponse:
         content_parts = STREAM_CONTENT_PARTS
         pause_delay = 0.0
 
-    async with sse_response(request) as resp:
-        # First chunk: assistant role
-        await resp.send(json.dumps(_make_stream_chunk(model, role="assistant")))
+    resp = await _start_sse_response(request)
+    # First chunk: assistant role
+    await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, role="assistant"))))
+    await asyncio.sleep(STREAM_CHUNK_INTERVAL)
+
+    # Content chunks (with optional pause for slow-stream scenario)
+    for i, part in enumerate(content_parts):
+        if model == MODEL_SLOW_STREAM and i == 1:
+            await asyncio.sleep(pause_delay)
+        await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, content=part))))
         await asyncio.sleep(STREAM_CHUNK_INTERVAL)
 
-        # Content chunks (with optional pause for slow-stream scenario)
-        for i, part in enumerate(content_parts):
-            if model == MODEL_SLOW_STREAM and i == 1:
-                await asyncio.sleep(pause_delay)
-            await resp.send(json.dumps(_make_stream_chunk(model, content=part)))
-            await asyncio.sleep(STREAM_CHUNK_INTERVAL)
-
-        # Finish chunk
-        await resp.send(
-            json.dumps(_make_stream_chunk(model, finish_reason="stop"))
-        )
-        await resp.send("[DONE]")
-
+    # Finish chunk
+    await resp.write(_sse_frame(json.dumps(_make_stream_chunk(model, finish_reason="stop"))))
+    await resp.write(_sse_frame("[DONE]"))
+    await resp.write_eof()
     return resp
 
 

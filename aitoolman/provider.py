@@ -1199,7 +1199,24 @@ class LLMProviderManager:
                 http_response.raise_for_status()
 
                 # 逐行解析流式响应（SSE格式：data: ...）
-                async for sse_event in sse.aiter_sse(http_response):
+                timeout = model_config.get("timeout", self.timeout)
+
+                # 保存异步迭代器，逐事件等待，记录最近一次收到有效内容（data 非空）的时间
+                ait = sse.aiter_sse(http_response)
+                last_content_time = time.monotonic()
+                while True:
+                    remaining = timeout - (time.monotonic() - last_content_time)
+                    try:
+                        sse_event = await asyncio.wait_for(anext(ait), timeout=max(remaining, 0))
+                    except StopAsyncIteration:
+                        break  # 流正常结束
+
+                    if sse_event.data:
+                        # 有效内容：刷新最近有效内容时间
+                        last_content_time = time.monotonic()
+                    elif time.monotonic() - last_content_time >= timeout:
+                        # 收到事件但距上次有效内容累计已达阈值（心跳保活无法阻止超时）
+                        raise TimeoutError(f"No valid content received within {timeout}s")
                     if request.is_cancelled:
                         response.finish_reason = FinishReason.cancelled.value
                         response.error_text = 'cancelled'
