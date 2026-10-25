@@ -39,11 +39,15 @@ def extract_code_blocks(text: str) -> List[Dict]:
         logger.warning("<output> tag not found, treat all content as a single file")
         return [{'filename': None, 'content': text.strip()}]
 
-    xml_dict = fix_llm_xml.parse_xml(
-        output_content, 'output',
-        text_tags=['file'],
-        strip_whitespace=False
-    )
+    try:
+        xml_dict = fix_llm_xml.parse_xml(
+            output_content, 'output',
+            text_tags=['file'],
+            strip_whitespace=False
+        )
+    except Exception:
+        logger.warning("XML parse error.", exc_info=True)
+        xml_dict = None
     if not xml_dict or 'file' not in xml_dict.get('output', {}):
         logger.warning("<file> tag not found, treat all content as a single file")
         return [{'filename': None, 'content': output_content.strip()}]

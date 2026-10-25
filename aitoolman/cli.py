@@ -168,7 +168,7 @@ python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://loc
     )
     subp.add_argument(
         "--no-system", action="store_true",
-        help="Do not add built-in system prompt"
+        help="Do not use built-in output format. Directly use LLM output"
     )
     subp.add_argument(
         "--overwrite", action="store_true",

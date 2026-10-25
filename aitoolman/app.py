@@ -302,14 +302,19 @@ class LLMApplication:
                     post_processor_fn = self.processors[post_processor]
                 else:
                     post_processor_fn = post_processor
+                post_input = result.response_text
+                if not post_input.strip():
+                    post_input = result.response_reasoning
+                    logger.warning("[%s] Post-process: response text is empty, using reasoning text", request_state.provider_request.request_id,)
                 try:
-                    data = post_processor_fn(result.response_text)
+                    data = post_processor_fn(post_input)
                     if inspect.isawaitable(data):
                         result.data = await data
                     else:
                         result.data = data
                 except Exception:
-                    logger.exception("Post-process failed: %s", request_state.direct_request)
+                    logger.exception("[%s] Post-process failed: %s",
+                                     request_state.provider_request.request_id, request_state.direct_request)
                     result.status = FinishReason.error_format
             else:
                 result.data = result.response_text
