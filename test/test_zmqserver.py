@@ -46,18 +46,6 @@ class TestCheckPermission(unittest.TestCase):
         self.assertTrue(server._check_permission('', manage=True))
         self.assertFalse(server._check_permission('some_token', manage=True))
 
-    def test_normal_permission_no_auth_token(self):
-        """普通token为None时，任何token都有普通权限"""
-        server = _make_server(auth_token=None)
-        # 即使管理token为None，只要auth_token为None就有普通权限
-        self.assertTrue(server._check_permission('any_token', manage=False))
-        self.assertTrue(server._check_permission('', manage=False))
-
-        # 设置管理token后，普通权限仍然可用
-        server_with_manage = _make_server(auth_token=None, manage_token='manage_secret')
-        self.assertTrue(server_with_manage._check_permission('any_token', manage=False))
-        self.assertTrue(server_with_manage._check_permission('', manage=False))
-
     def test_normal_permission_with_auth_token(self):
         """普通token不为None时，只有匹配的token有普通权限"""
         server = _make_server(auth_token='auth_secret')
@@ -75,17 +63,24 @@ class TestCheckPermission(unittest.TestCase):
         # 其他token没有普通权限
         self.assertFalse(server._check_permission('other_token', manage=False))
 
-    def test_normal_permission_empty_auth_token(self):
-        """普通token为空字符串时，只有空token有普通权限"""
-        server = _make_server(auth_token='')
-        self.assertTrue(server._check_permission('', manage=False))
-        self.assertFalse(server._check_permission('any_token', manage=False))
 
-        # 同时设置manage_token
-        server_with_manage = _make_server(auth_token='', manage_token='manage_secret')
-        self.assertTrue(server_with_manage._check_permission('', manage=False))
-        self.assertTrue(server_with_manage._check_permission('manage_secret', manage=False))
-        self.assertFalse(server_with_manage._check_permission('other_token', manage=False))
+class TestServerInitTokenValidation(unittest.TestCase):
+    """测试服务端构造时 zmq_auth_token 必填校验（fail-fast）"""
+
+    def test_missing_auth_token_raises(self):
+        """config 缺失 zmq_auth_token 时构造抛 ValueError"""
+        with self.assertRaises(ValueError):
+            LLMZmqServer({'server': {}})
+
+    def test_none_auth_token_raises(self):
+        """zmq_auth_token 为 None 时构造抛 ValueError"""
+        with self.assertRaises(ValueError):
+            LLMZmqServer({'server': {'zmq_auth_token': None}})
+
+    def test_empty_auth_token_raises(self):
+        """zmq_auth_token 为空字符串时构造抛 ValueError"""
+        with self.assertRaises(ValueError):
+            LLMZmqServer({'server': {'zmq_auth_token': ''}})
 
 
 def _make_channel_server():

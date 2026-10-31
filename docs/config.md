@@ -10,7 +10,7 @@
 | `zmq_router_rpc`     | 字符串                | 无（必须配置）    | ZeroMQ ROUTER socket 的绑定地址，用于处理客户端请求。格式：`tcp://*:端口号` 或 `tcp://IP地址:端口号` |
 | `zmq_pub_event`      | 字符串                | 无（可选）      | ZeroMQ PUB socket 地址，用于发布审计日志。格式同上                                       |
 | `zmq_pub_event_type` | 无/"bind"/"connect" | "bind"（可选） | ZeroMQ PUB socket 的绑定方式，监听新端口或连接已有端口                                     |
-| `zmq_auth_token`     | 字符串                | 无（可选）      | 任意字符串，用于认证                                                               |
+| `zmq_auth_token`     | 字符串                | 无（必须配置）    | 任意字符串，用于认证                                                               |
 | `zmq_manage_token`   | 字符串                | 无（可选）      | 管理权限认证令牌，用于客户端管理操作的权限验证                                                   |
 
 
@@ -103,12 +103,14 @@ low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deeps
 
 不使用 `:rank` 后缀的标签行为完全不变。`tag:rank` 语法仅适用于标签名，不适用于直接模型名。
 
+调用 `resolve_model` 或模块 `model_name` 时也支持传入单个字符串，多个标签以英文逗号分隔（如 `"fast:2,code:2/3"`），末尾可用 `/N` 后缀（从 1 计数）对最终候选模型列表循环旋转；列表输入时 `/` 无特殊含义。
+
 ### 1.5 配置示例
 ```toml
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
-zmq_auth_token = "YOUR_SECRET_TOKEN"  # 接口认证令牌（可选）
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # 接口认证令牌
 zmq_manage_token = "YOUR_MANAGE_TOKEN"  # 管理权限认证令牌（可选）
 
 [default]

@@ -177,8 +177,6 @@ class LLMLocalClient(LLMClient):
     ) -> List[str]:
         if not tags:
             raise LLMNoAvailableModelError("No tags provided.")
-        if isinstance(tags, str):
-            tags = [tags]
         return self.provider_manager.resolve_model(tags, messages, context_id=context_id or self.client_id)
 
     async def update_config(self, new_config: Dict[str, Any]):

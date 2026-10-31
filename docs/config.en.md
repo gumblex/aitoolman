@@ -11,7 +11,7 @@ Configure network ports for the ZeroMQ server.
 | `zmq_router_rpc`     | String                | None (Required)   | Bind address for the ZeroMQ ROUTER socket, used to handle client requests. Format: `tcp://*:port` or `tcp://IP:port` |
 | `zmq_pub_event`      | String                | None (Optional)   | Bind address for the ZeroMQ PUB socket, used to publish audit logs. Format same as above                             |
 | `zmq_pub_event_type` | None/"bind"/"connect" | "bind" (Optional) | Bind method for the ZeroMQ PUB socket. Bind to a new port, or connect to an existing port                            |
-| `zmq_auth_token`     | String                | None (Optional)   | Any string for authentication                                                                                        |
+| `zmq_auth_token`     | String                | None (Required)   | Any string for authentication                                                                                        |
 | `zmq_manage_token`   | String                | None (Optional)   | Management authentication token for client management operations                                                     |
 
 
@@ -104,13 +104,15 @@ Shifting operates at the outer element level of the list, with nested lists trea
 
 Tags without the `:rank` suffix behave exactly as before. The `tag:rank` syntax applies only to tag names, not to direct model names.
 
+When calling `resolve_model` or passing the module `model_name`, a single string is also accepted, with multiple tags separated by commas (e.g., `"fast:2,code:2/3"`), optionally followed by a `/N` suffix (counting from 1) to cyclically rotate the final candidate model list; `/` has no special meaning for list input.
+
 ### 1.5 Configuration Example
 
 ```toml
 [server]
 zmq_router_rpc = "tcp://*:5555"
 zmq_pub_event = "tcp://*:5556"
-zmq_auth_token = "YOUR_SECRET_TOKEN"  # Optional auth token
+zmq_auth_token = "YOUR_SECRET_TOKEN"  # Interface authentication token
 zmq_manage_token = "YOUR_MANAGE_TOKEN"  # Management auth token (optional)
 
 [default]

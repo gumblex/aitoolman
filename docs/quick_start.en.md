@@ -683,7 +683,7 @@ LLMZmqClient is a ZeroMQ remote client that connects to remote LLM microservices
 ```python
 class LLMZmqClient(LLMClient):
     """ZeroMQ client (connects to remote service)"""
-    def __init__(self, router_endpoint: str, auth_token: Optional[str] = None): ...
+    def __init__(self, router_endpoint: str, auth_token: str): ...
 
     # Cancel all requests for the specified context, suitable for terminating all incomplete requests when user exits session
     async def cancel_all(self, context_id: Optional[str] = None): ...
@@ -773,6 +773,7 @@ The sorted candidate model list will be returned after the above processing.
 #### 5.3.3 Usage
 - **resolve_model Interface**: Directly call `client.resolve_model(tags, messages, context_id=context_id)`, pass in the tag list, optional message list and optional context ID, to get the sorted candidate model list
 - **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, you can pass in a single tag string or a list of multiple tags, and the system will automatically route to the optimal model.
+- **Single string input**: The `resolve_model` interface and the module `model_name` parameter also accept a single string, with multiple tags separated by commas (e.g., `"fast:2,code:2/3"`), optionally followed by a `/N` suffix (counting from 1, consistent with the tag:rank rule) to cyclically rotate the final candidate model list; `/` has no special meaning for list input.
 - **model_rank parameter**: Used to select the Nth model in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied. When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing.
 - **context_id Parameter**: The `context_id` parameter of the `resolve_model` interface acts as the random seed for stable random sorting, ensuring that multiple calls with the same `context_id` return consistent results. If it is not explicitly passed, `client_id` will be used as the seed by default
 - **tag:rank Syntax**: Add a `:rank` suffix to a tag name to adjust the model ordering priority for that tag, where rank is an integer. rank=1 makes no adjustment, rank=N moves the first N-1 items to the end, values exceeding the range automatically apply modulo cycling. For example, `code:2` moves the first item of the code tag to the end; multiple tags can specify ranks independently, e.g., `_model_name=["code:2", "fast:3"]`. tag:rank only applies to tag names, not direct model names; behavior remains unchanged when the `:rank` suffix is not used. For detailed rules, refer to the model_tag section in the [Configuration File Documentation](./config.md)
@@ -1374,7 +1375,7 @@ After starting the server, two ZeroMQ endpoints will be bound:
 from aitoolman.zmqclient import LLMZmqClient
 client = LLMZmqClient(
     router_endpoint="tcp://localhost:5555",
-    auth_token="your-secret-token"  # Optional, must match server configuration
+    auth_token="your-secret-token"  # Must match server configuration
 )
 ```
 

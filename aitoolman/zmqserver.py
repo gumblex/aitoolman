@@ -33,13 +33,16 @@ class ZmqServerChannel(ChannelWriter):
 class LLMZmqServer:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self.zmq_auth_token: str = config['server'].get('zmq_auth_token', '')  # ZeroMQ路由认证令牌
+        if not self.zmq_auth_token:
+            raise ValueError(
+                "server.zmq_auth_token is required: please specify a non-empty ZeroMQ auth token in config")
+        self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
         self.ctx = zmq.asyncio.Context()
         self.router_socket = self.ctx.socket(zmq.ROUTER)  # 处理客户端请求
         self.pub_socket = self.ctx.socket(zmq.PUB)        # 发布审计日志
         self.provider_manager = LLMProviderManager(config)
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
-        self.zmq_auth_token: Optional[str] = config['server'].get('zmq_auth_token')  # ZeroMQ路由认证令牌
-        self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
         self.router_lock = asyncio.Lock()
         self.channel_msg_buffer: Dict[str, List[ZmqChannelMessageBuffer]] = {}
         self.running = False
@@ -62,7 +65,7 @@ class LLMZmqServer:
                 raise ValueError("Invalid zmq_pub_event_type: %s" %  socket_type)
             logger.info(f"Audit socket (PUB) bound to {server_config['zmq_pub_event']}")
         else:
-            logger.info(f"Audit socket (PUB) disabled")
+            logger.info("Audit socket (PUB) disabled")
         # 初始化ProviderManager
         await self.provider_manager.initialize()
 
@@ -92,10 +95,10 @@ class LLMZmqServer:
             try:
                 json_data = zmqprotocol.decode_client_payload(msg_type, message[4])
             except (UnicodeDecodeError, ValueError, msgspec.DecodeError) as e:
-                logger.error(f"Failed to parse message, please upgrade. Message: %s, Error: %s", (message[4], e))
+                logger.error("Failed to parse message, please upgrade. Message: %s, Error: %s", (message[4], e))
                 return
         else:
-            logger.error(f"Invalid message format, please upgrade.")
+            logger.error("Invalid message format, please upgrade.")
             return
 
         if json_data is None:
@@ -328,8 +331,6 @@ class LLMZmqServer:
             if self.zmq_manage_token is None:
                 return False
             return secrets.compare_digest(auth_token, self.zmq_manage_token)
-        if self.zmq_auth_token is None:
-            return True
         if self.zmq_manage_token is not None:
             if secrets.compare_digest(auth_token, self.zmq_manage_token):
                 return True

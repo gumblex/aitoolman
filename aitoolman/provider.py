@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 import typing
-from typing import Optional, Dict, Any, List, Callable, Set, Union
+from typing import Optional, Dict, List, Tuple, Any, Callable, Set, Union
 
 from . import sse
 from . import util
@@ -815,6 +815,27 @@ class AnthropicFormat(LLMFormatStrategy):
         )
 
 
+def _parse_rank_suffix(text: str, sep: str) -> Tuple[str, Optional[int]]:
+    """解析“名称<sep>N”后缀，返回（名称、rank 或 None）；N 非整数时原样返回（原文、None）"""
+    if sep in text:
+        name, _, suffix = text.rpartition(sep)
+        try:
+            return name, int(suffix)
+        except ValueError:
+            pass
+    return text, None
+
+
+def _rotate_by_rank(models: List[str], rank: int) -> List[str]:
+    """按 1 计数循环旋转列表，shift=(rank-1)%len；长度不大于 1 或 shift 为 0 时原样返回"""
+    if len(models) <= 1:
+        return models
+    shift = (rank - 1) % len(models)
+    if shift == 0:
+        return models
+    return models[shift:] + models[:shift]
+
+
 class LLMProviderManager:
     """LLM提供商管理器，负责API调用、资源管理与请求重试"""
     format_strategies = {
@@ -911,40 +932,25 @@ class LLMProviderManager:
         tag_matched: Dict[str, Dict[str, float]] = {}
         for tag_input in input_tags:
             # 解析 tag:rank 语法
-            tag_name = tag_input
-            rank = None
-            if ':' in tag_input:
-                parts = tag_input.rsplit(':', 1)
-                try:
-                    rank = int(parts[1])
-                    tag_name = parts[0]
-                except ValueError:
-                    tag_name = tag_input
+            tag_name, rank = _parse_rank_suffix(tag_input, ':')
 
             if tag_name in self.model_tag_weights:
                 if rank is not None:
                     # 有 rank 调整：动态重算权重
-                    models = self.model_tag[tag_name]
-                    num_items = len(models)
-                    if num_items > 1:
-                        shift = (rank - 1) % num_items
-                        if shift > 0:
-                            models = models[shift:] + models[:shift]
-                        tag_matched[tag_name] = calculate_rank_weights(
-                            models, self.rank_adjust_ratio)
-                    else:
-                        tag_matched[tag_name] = self.model_tag_weights[tag_name]
+                    models = _rotate_by_rank(self.model_tag[tag_name], rank)
+                    tag_matched[tag_name] = calculate_rank_weights(
+                        models, self.rank_adjust_ratio)
                 else:
                     tag_matched[tag_name] = self.model_tag_weights[tag_name]
             elif tag_name in self.api_config:
                 tag_matched[tag_name] = {tag_name: 1.0}
         return tag_matched
 
-    def resolve_model(self, input_tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]:
+    def resolve_model(self, input_tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]:
         """解析出最终使用的真实模型名
 
         Args:
-            input_tags: 标签/模型名/别名列表，支持 tag:rank 语法动态调整排序
+            input_tags: 标签/模型名/别名，支持传入单个字符串（, 分隔多个标签，末尾 /N 后缀按 1 计数对最终候选列表循环旋转）或列表（支持 tag:rank 语法动态调整排序）
             messages: 可选消息列表，用于Token数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
 
@@ -954,6 +960,11 @@ class LLMProviderManager:
         Raises:
             LLMNoAvailableModelError: 无可用模型
         """
+        # 字符串输入：提取末尾 /N 旋转后缀，再按英文逗号分隔为标签列表
+        rotate_rank = None
+        if isinstance(input_tags, str):
+            input_tags, rotate_rank = _parse_rank_suffix(input_tags, '/')
+            input_tags = input_tags.split(',')
         if not input_tags:
             raise LLMNoAvailableModelError("No tags provided.")
         # 1. 精确匹配优先
@@ -1016,6 +1027,9 @@ class LLMProviderManager:
             -self.get_queue_length(m),
             rng.random()
         ), reverse=True)
+        # 有 /N 旋转后缀时旋转最终候选列表（单元素列表为无操作）
+        if rotate_rank is not None:
+            best_models = _rotate_by_rank(best_models, rotate_rank)
         return best_models
 
     def list_models(self, tags: Union[str, List[str], None] = None) -> List[ModelInfo]:
@@ -1035,11 +1049,7 @@ class LLMProviderManager:
                 models.append(self._make_model_info(name))
             return models
 
-        if isinstance(tags, str):
-            input_tags = [tags]
-        else:
-            input_tags = tags
-        model_names = self.resolve_model(input_tags)
+        model_names = self.resolve_model(tags)
         return list(map(self._make_model_info, model_names))
 
     def _make_model_info(self, model_name: str) -> ModelInfo:

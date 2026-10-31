@@ -21,7 +21,7 @@ options:
   -c, --config CONFIG   Path to the TOML config file (for Local Client)
   -z, --zmq-endpoint ZMQ_ENDPOINT
                         ZeroMQ ROUTER endpoint (e.g., tcp://localhost:5555) (for ZMQ Client)
-  -a, --auth AUTH       ZeroMQ ROUTER auth token
+  -a, --auth AUTH       ZeroMQ auth token
   -m, --model MODEL     Model name to use
   -p, --prompt PROMPT   Path to prompt text file
   -M, --media [MEDIA ...]
@@ -51,7 +51,7 @@ options:
   -c, --config CONFIG   LLM客户端配置文件路径（TOML格式）
   -z, --zmq-endpoint ZMQ_ENDPOINT
                         ZeroMQ服务端点（如: tcp://localhost:5555）
-  -a, --auth AUTH       ZeroMQ认证令牌
+  -a, --auth AUTH       ZeroMQ auth token
   -m, --model MODEL     指定模型名称（如: Kimi-K2, DeepSeek-v3）
   -r, --reference REFERENCE [REFERENCE ...]
                         参考文件路径（提供上下文，可多个）
@@ -106,7 +106,7 @@ options:
 
 ## LLM 服务管理
 ```
-usage: python3 -m aitoolman manage [-h] [-v] -z ZMQ_ENDPOINT [-a AUTH]
+usage: python3 -m aitoolman manage [-h] [-v] -z ZMQ_ENDPOINT -a AUTH
                                    {list_models,update_config,change_api_status} ...
 
 Manage LLM ZMQ Server
@@ -123,5 +123,5 @@ options:
   -v, --verbose         Print debug log
   -z, --zmq-endpoint ZMQ_ENDPOINT
                         ZeroMQ ROUTER endpoint
-  -a, --auth AUTH       Management auth token
+  -a, --auth AUTH       ZeroMQ management auth token
 ```

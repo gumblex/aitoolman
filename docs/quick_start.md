@@ -687,7 +687,7 @@ LLMZmqClient是ZeroMQ远程客户端，连接远程的LLM微服务。
 ```python
 class LLMZmqClient(LLMClient):
     """ZeroMQ 客户端（连接远程服务）"""
-    def __init__(self, router_endpoint: str, auth_token: Optional[str] = None): ...
+    def __init__(self, router_endpoint: str, auth_token: str): ...
 
     # 取消指定上下文的所有请求，适合用户退出会话时终止所有未完成的请求
     async def cancel_all(self, context_id: Optional[str] = None): ...
@@ -777,6 +777,7 @@ class LLMProviderManager:
 #### 5.3.3 使用方式
 - **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages, context_id=context_id)`，传入标签列表、可选的消息列表和上下文 ID（可选），得到排序后的候选模型列表
 - **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，可传入单个标签字符串或多个标签的列表，系统自动路由到最优模型
+- **单字符串输入**：`resolve_model` 接口与模块 `model_name` 参数也支持传入单个字符串，多个标签以英文逗号分隔（如 `"fast:2,code:2/3"`），末尾可用 `/N` 后缀（从 1 计数，与 tag:rank 规则一致）对最终候选模型列表循环旋转；列表输入时 `/` 无特殊含义
 - **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
 - **context_id 参数**：`resolve_model` 的 `context_id` 参数用于作为稳定随机排序的随机种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id` 作为种子
 - **tag:rank 语法**：在标签名后添加 `:rank` 后缀可调整该标签的模型排序优先级，rank 为整数。rank=1 不调整，rank=N 将前 N-1 项移到末尾，超出范围自动取模循环。例如 `code:2` 表示将 code 标签的第1项移到末尾；多个标签可分别指定 rank，如 `_model_name=["code:2", "fast:3"]`。tag:rank 仅适用于标签名，不适用于直接模型名；不使用 `:rank` 后缀时行为不变。详细规则参考《[配置文件文档](./config.md)》的 model_tag 部分
@@ -1378,7 +1379,7 @@ python3 -m aitoolman server -c llm_provider.toml -v
 from aitoolman.zmqclient import LLMZmqClient
 client = LLMZmqClient(
     router_endpoint="tcp://localhost:5555",
-    auth_token="your-secret-token"  # 可选，与服务器配置一致
+    auth_token="your-secret-token"  # 与服务器配置一致
 )
 ```
 

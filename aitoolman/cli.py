@@ -47,7 +47,7 @@ def subparser_client(subparsers):
     )
 
     subp.add_argument(
-        '-a', '--auth', help='ZeroMQ ROUTER auth token')
+        '-a', '--auth', help='ZeroMQ auth token')
     subp.add_argument(
         '-m', '--model', required=True, action='append',
         help='Model name/tag to use, can specify multiple for model routing')
@@ -127,7 +127,7 @@ python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://loc
     )
     subp.add_argument(
         "-a", "--auth", type=str,
-        help="ZeroMQ authentication token"
+        help="ZeroMQ auth token"
     )
     subp.add_argument(
         "-m", "--model", type=str, required=True, action='append',
@@ -203,7 +203,7 @@ def subparser_manage(subparsers):
         help="Print debug log"
     )
     subp.add_argument('-z', '--zmq-endpoint', type=str, required=True, help='ZeroMQ ROUTER endpoint')
-    subp.add_argument('-a', '--auth', type=str, help='Management auth token')
+    subp.add_argument('-a', '--auth', type=str, required=True, help='ZeroMQ management auth token')
 
     manage_subparsers = subp.add_subparsers(dest='manage_action', required=True, help='Management action')
 
@@ -238,6 +238,8 @@ async def _run_client_session(args):
         config = util.load_config(args.config)
         client = _client.LLMLocalClient(config)
     elif args.zmq_endpoint:
+        if not args.auth:
+            raise ValueError("ZeroMQ remote mode requires --auth (non-empty token)")
         from .zmqclient import LLMZmqClient
         client = LLMZmqClient(args.zmq_endpoint, args.auth)
     else:
@@ -276,8 +278,8 @@ async def _run_client_session(args):
         if args.body:
             try:
                 options = util.decode_json(args.body)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON for --body: " + args.body)
+            except json.JSONDecodeError:
+                raise ValueError("Invalid JSON for --body: " + args.body)
 
         # 5. Construct messages
         messages = [Message(
@@ -341,6 +343,8 @@ async def _run_code_edit_session(args):
         api_config = util.load_config(args.config)
         client = _client.LLMLocalClient(api_config)
     elif args.zmq_endpoint:
+        if not args.auth:
+            raise ValueError("ZeroMQ remote mode requires --auth (non-empty token)")
         from .zmqclient import LLMZmqClient
         client = LLMZmqClient(args.zmq_endpoint, args.auth)
     else:

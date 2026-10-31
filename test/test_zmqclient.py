@@ -157,6 +157,20 @@ class TestZmqClientChannelWriteDecode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req1.output_channel.events, [])
 
 
+class TestZmqClientInitTokenValidation(unittest.TestCase):
+    """测试客户端构造时 auth_token 必填校验"""
+
+    def test_none_auth_token_raises(self):
+        """auth_token 为 None 时构造立即抛 ValueError"""
+        with self.assertRaises(ValueError):
+            LLMZmqClient('tcp://localhost:5555', None)
+
+    def test_empty_auth_token_raises(self):
+        """auth_token 为空字符串时构造立即抛 ValueError"""
+        with self.assertRaises(ValueError):
+            LLMZmqClient('tcp://localhost:5555', '')
+
+
 class TestZmqClientSendMessage(unittest.IsolatedAsyncioTestCase):
     """测试发送侧消息：四帧结构与 zmqprotocol Struct 载荷字段正确"""
 

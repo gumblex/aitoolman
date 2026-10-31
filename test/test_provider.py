@@ -470,6 +470,79 @@ class TestResolveModel(unittest.TestCase):
         result = manager.resolve_model(['alias_a'])
         self.assertEqual(result[0], 'model-a')
 
+    def test_resolve_model_string_input_equivalence(self):
+        """字符串输入与对应列表输入结果一致"""
+        manager = LLMProviderManager(make_test_config())
+        # 单标签字符串与单元素列表等价
+        self.assertEqual(
+            manager.resolve_model('fast', context_id='test-ctx'),
+            manager.resolve_model(['fast'], context_id='test-ctx'))
+        # 逗号分隔多标签字符串与列表等价
+        self.assertEqual(
+            manager.resolve_model('fast,cheap', context_id='test-ctx'),
+            manager.resolve_model(['fast', 'cheap'], context_id='test-ctx'))
+        # 字符串中的真实模型名与别名同样与列表等价
+        self.assertEqual(
+            manager.resolve_model('model-a', context_id='test-ctx'),
+            manager.resolve_model(['model-a'], context_id='test-ctx'))
+        self.assertEqual(
+            manager.resolve_model('alias_a', context_id='test-ctx'),
+            manager.resolve_model(['alias_a'], context_id='test-ctx'))
+
+    def test_resolve_model_slash_rank_rotation(self):
+        """字符串末尾 /N 后缀对最终候选列表循环旋转"""
+        manager = LLMProviderManager(make_test_config())
+        # fast 标签权重可区分，无后缀结果为 [model-a, model-b]
+        base = manager.resolve_model(['fast'], context_id='test-ctx')
+        self.assertEqual(base, ['model-a', 'model-b'])
+        # /2 循环左移一位
+        result = manager.resolve_model('fast/2', context_id='test-ctx')
+        self.assertEqual(result, ['model-b', 'model-a'])
+        # 旋转后列表长度不变
+        self.assertEqual(len(result), len(base))
+        # /1 与不加后缀完全一致
+        self.assertEqual(
+            manager.resolve_model('fast/1', context_id='test-ctx'),
+            base)
+
+    def test_resolve_model_slash_rank_with_tag_rank_combined(self):
+        """组合语法：标签内 :rank 与末尾 /N 组合，等价于列表输入加旋转"""
+        config = make_nested_test_config()
+        config['model_tag']['code'] = ['model-a', 'model-b', 'model-d']
+        config['model_tag']['image'] = ['model-a', 'model-b', 'model-d']
+        manager = LLMProviderManager(config)
+        # 'code:2,image:3/3' 解析为 ['code:2', 'image:3'] 加旋转值 3
+        base = manager.resolve_model(['code:2', 'image:3'], context_id='test-ctx')
+        expected = base[2:] + base[:2]  # 旋转值 3：循环左移 2 位
+        result = manager.resolve_model('code:2,image:3/3', context_id='test-ctx')
+        self.assertEqual(result, expected)
+        self.assertEqual(len(result), 3)
+
+    def test_resolve_model_slash_invalid_suffix_fallback(self):
+        """非法后缀整段回退为字面标签名处理"""
+        manager = LLMProviderManager(make_test_config())
+        # 'code/abc'、'code/' 不在配置中，按字面查找抛出无可用模型错误
+        with self.assertRaises(LLMNoAvailableModelError):
+            manager.resolve_model('code/abc')
+        with self.assertRaises(LLMNoAvailableModelError):
+            manager.resolve_model('code/')
+        # 配置中存在名字含斜杠的标签时，按字面命中正常返回
+        config = make_test_config()
+        config['model_tag']['tag/abc'] = ['model-a']
+        manager = LLMProviderManager(config)
+        self.assertEqual(manager.resolve_model('tag/abc'), ['model-a'])
+
+    def test_resolve_model_comma_no_strip_spaces(self):
+        """逗号分隔的项不自动去空格，带空格的项按原文匹配"""
+        manager = LLMProviderManager(make_test_config())
+        # ' cheap' 带前导空格不参与匹配，仅 'fast' 生效
+        result = manager.resolve_model('fast, cheap', context_id='test-ctx')
+        self.assertEqual(
+            result, manager.resolve_model(['fast'], context_id='test-ctx'))
+        # ' model-a' 带前导空格不参与精确匹配
+        with self.assertRaises(LLMNoAvailableModelError):
+            manager.resolve_model(' model-a')
+
 
 class TestListModels(unittest.TestCase):
     def test_list_models_all(self):

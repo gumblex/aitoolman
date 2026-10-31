@@ -23,10 +23,12 @@ logger = logging.getLogger(__name__)
 class LLMZmqClient(LLMClient):
     zmq_timeout = 10.0
 
-    def __init__(self, router_endpoint: str, auth_token: Optional[str] = None):
+    def __init__(self, router_endpoint: str, auth_token: str):
         super().__init__()
         self.router_endpoint = router_endpoint
-        self.auth_token: bytes = auth_token.encode('utf-8') if auth_token else b''
+        if not auth_token:
+            raise ValueError("auth_token is required: please specify a non-empty ZeroMQ auth token")
+        self.auth_token: bytes = auth_token.encode('utf-8')
         self.ctx = zmq.asyncio.Context()
         self.socket = self.ctx.socket(zmq.DEALER)
         self.socket.setsockopt_string(zmq.IDENTITY, self.client_id)
@@ -110,7 +112,7 @@ class LLMZmqClient(LLMClient):
 
                 try:
                     json_data = zmqprotocol.decode_server_payload(msg_type, message[2])
-                except (ValueError, msgspec.DecodeError) as e:
+                except (ValueError, msgspec.DecodeError):
                     logger.warning(f"Invalid response, please upgrade. Type: {msg_type}", exc_info=True)
                     continue
 
@@ -135,7 +137,7 @@ class LLMZmqClient(LLMClient):
                     logger.warning(f"Unknown response type: {msg_type}")
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception:
                 logger.exception("Error in listener task")
 
     async def handle_response(self, request: LLMProviderRequest, payload: zmqprotocol.ResponsePayload):
