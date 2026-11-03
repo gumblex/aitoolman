@@ -1,7 +1,7 @@
 import secrets
 import asyncio
 import logging
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Set
 
 import msgspec
 import zmq
@@ -15,6 +15,8 @@ from .provider import LLMProviderManager
 from .channel import ChannelWriter, ChannelEvent
 
 logger = logging.getLogger(__name__)
+
+MAX_CONCURRENT_REQUESTS = 10
 
 
 class ZmqServerChannel(ChannelWriter):
@@ -31,24 +33,35 @@ class ZmqServerChannel(ChannelWriter):
 
 
 class LLMZmqServer:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], ctx: Optional[zmq.asyncio.Context] = None):
         self.config = config
         self.zmq_auth_token: str = config['server'].get('zmq_auth_token', '')  # ZeroMQ路由认证令牌
         if not self.zmq_auth_token:
             raise ValueError(
                 "server.zmq_auth_token is required: please specify a non-empty ZeroMQ auth token in config")
         self.zmq_manage_token: Optional[str] = config['server'].get('zmq_manage_token')  # 管理权限认证令牌
-        self.ctx = zmq.asyncio.Context()
+        if ctx is not None:
+            self.ctx = ctx
+            self._owns_ctx = False
+        else:
+            self.ctx = zmq.asyncio.Context()
+            self._owns_ctx = True
         self.router_socket = self.ctx.socket(zmq.ROUTER)  # 处理客户端请求
         self.pub_socket = self.ctx.socket(zmq.PUB)        # 发布审计日志
         self.provider_manager = LLMProviderManager(config)
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
         self.router_lock = asyncio.Lock()
         self.channel_msg_buffer: Dict[str, List[ZmqChannelMessageBuffer]] = {}
+        self.start_error: Optional[Exception] = None
+        self._initialized = False
         self.running = False
+        self._run_pending_tasks: Set[asyncio.Task] = set()
 
     async def initialize(self):
         """初始化ZeroMQ和ProviderManager"""
+        if self._initialized:
+            return
+        self._initialized = True
         server_config = self.config['server']
         # 绑定ROUTER（处理请求）和PUB（审计日志）
         self.router_socket.bind(server_config['zmq_router_rpc'])
@@ -69,17 +82,67 @@ class LLMZmqServer:
         # 初始化ProviderManager
         await self.provider_manager.initialize()
 
-    async def run(self):
-        """启动服务主循环"""
+    def _on_request_task_done(self, task: asyncio.Task) -> None:
+        self._run_pending_tasks.discard(task)
+        if task.cancelled():
+            return
+        # 取回异常，避免 "Task exception was never retrieved" 警告
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Request processing task failed: %s", exc, exc_info=exc)
+
+    async def run(self, on_ready=None, stop_event=None):
+        """启动服务主循环
+
+        Args:
+            on_ready: 初始化成功后调用 set() 的 threading.Event，供外部同步就绪
+            stop_event: 置位后主循环尽快退出的 threading.Event
+        """
         self.running = True
-        await self.initialize()
+        try:
+            await self.initialize()
+        except Exception as e:
+            self.start_error = e
+            logger.exception("Server initialization failed")
+            await self.close()
+            return
+        # RCVTIMEO 轮询接收，循环中检查 stop_event，实现毫秒级优雅停止
+        self.router_socket.setsockopt(zmq.RCVTIMEO, 100)
+        if on_ready is not None:
+            on_ready.set()
+
         try:
             while self.running:
-                message = await self.router_socket.recv_multipart()
-                asyncio.create_task(self.process_message(message))
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("Stop event received, shutting down...")
+                    break
+
+                # 并发已达上限：暂停接收新消息，等待任意任务完成
+                # timeout=0.1 用于周期性检查 stop_event
+                while len(self._run_pending_tasks) >= MAX_CONCURRENT_REQUESTS:
+                    if stop_event is not None and stop_event.is_set():
+                        self.running = False
+                        break
+                    await asyncio.wait(
+                        self._run_pending_tasks, timeout=0.1,
+                        return_when=asyncio.FIRST_COMPLETED)
+                if not self.running:
+                    logger.info("Stop event received, shutting down...")
+                    break
+
+                try:
+                    message = await self.router_socket.recv_multipart()
+                except zmq.Again:
+                    continue
+
+                task = asyncio.create_task(self.process_message(message))
+                self._run_pending_tasks.add(task)
+                task.add_done_callback(self._on_request_task_done)
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("Server shutting down...")
         finally:
+            if self._run_pending_tasks:
+                await asyncio.gather(*self._run_pending_tasks, return_exceptions=True)
             await self.close()
 
     async def process_message(self, message: List[bytes]):
@@ -350,7 +413,7 @@ class LLMZmqServer:
             return
 
         # 查询类方法无需管理权限
-        query_methods = {'list_models', 'resolve_model'}
+        query_methods = {'list_models', 'resolve_model', 'list_tags'}
         if method not in query_methods and method not in manage_methods:
             await self.send_rpc_response(client_id, request_id,
                 error=RuntimeError("Unknown RPC method: %s" % method))
@@ -361,6 +424,10 @@ class LLMZmqServer:
                 result = self.provider_manager.list_models(kwargs.get('tag'))
                 # ModelInfo 转为 dict
                 result = [info._asdict() for info in result]
+            elif method == 'list_tags':
+                tag_models = self.provider_manager.list_tags()
+                result = {tag: [info._asdict() for info in models]
+                          for tag, models in tag_models.items()}
             elif method == 'resolve_model':
                 result = self.provider_manager.resolve_model(
                     kwargs.get('tags', []),
@@ -450,6 +517,7 @@ class LLMZmqServer:
         await self.provider_manager.close()
         self.router_socket.close()
         self.pub_socket.close()
-        self.ctx.term()
+        if self._owns_ctx:
+            self.ctx.term()
         logger.info("Server cleaned up")
 

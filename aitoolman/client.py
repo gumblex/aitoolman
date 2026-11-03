@@ -87,6 +87,15 @@ class LLMClient(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def list_tags(self) -> Dict[str, List[ModelInfo]]:
+        """列出 [model_tag] 配置的所有标签及其模型信息
+
+        Returns:
+            标签名 -> 模型信息列表
+        """
+        pass
+
+    @abc.abstractmethod
     async def resolve_model(
             self,
             tags: Union[str, List[str]],
@@ -168,6 +177,9 @@ class LLMLocalClient(LLMClient):
 
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]:
         return self.provider_manager.list_models(tag)
+
+    async def list_tags(self) -> Dict[str, List[ModelInfo]]:
+        return self.provider_manager.list_tags()
 
     async def resolve_model(
             self,

@@ -23,13 +23,18 @@ logger = logging.getLogger(__name__)
 class LLMZmqClient(LLMClient):
     zmq_timeout = 10.0
 
-    def __init__(self, router_endpoint: str, auth_token: str):
+    def __init__(self, router_endpoint: str, auth_token: str, ctx: Optional[zmq.asyncio.Context] = None):
         super().__init__()
         self.router_endpoint = router_endpoint
         if not auth_token:
             raise ValueError("auth_token is required: please specify a non-empty ZeroMQ auth token")
         self.auth_token: bytes = auth_token.encode('utf-8')
-        self.ctx = zmq.asyncio.Context()
+        if ctx is not None:
+            self.ctx = ctx
+            self._owns_ctx = False
+        else:
+            self.ctx = zmq.asyncio.Context()
+            self._owns_ctx = True
         self.socket = self.ctx.socket(zmq.DEALER)
         self.socket.setsockopt_string(zmq.IDENTITY, self.client_id)
         self.active_requests: Dict[str, LLMProviderRequest] = {}  # request_id -> LLMProviderRequest
@@ -70,7 +75,8 @@ class LLMZmqClient(LLMClient):
                 pass
         # 清理资源
         self.socket.close()
-        self.ctx.term()
+        if self._owns_ctx:
+            self.ctx.term()
         self.connected = False
         logger.debug("Client closed")
 
@@ -105,6 +111,9 @@ class LLMZmqClient(LLMClient):
                         request = self.active_requests.get(buffer.request_id)
                         if not request:
                             logger.warning(f"channel_write for unknown request {buffer.request_id}")
+                            continue
+                        if request.output_channel is None:
+                            # 阻塞调用可不提供输出通道：跳过通道事件转发
                             continue
                         for text in buffer.text:
                             await request.output_channel.write(ChannelEvent(topic=buffer.topic, data=text))
@@ -144,7 +153,9 @@ class LLMZmqClient(LLMClient):
         """处理完整响应"""
         response_data = payload.response
         # 构造LLMResponse
-        if not response_data['response_text'] and not response_data['response_reasoning']:
+        if (request.output_channel is not None
+                and not response_data['response_text']
+                and not response_data['response_reasoning']):
             await request.output_channel.write(ChannelEvent('reasoning', None))
             await request.output_channel.write(ChannelEvent('response', None))
         response = LLMProviderResponse(
@@ -316,6 +327,12 @@ class LLMZmqClient(LLMClient):
         """异步列出匹配的可用模型"""
         result = await self._send_rpc('list_models', {'tag': tag})
         return [ModelInfo(**info) for info in result]
+
+    async def list_tags(self) -> Dict[str, List[ModelInfo]]:
+        """异步列出 [model_tag] 配置的所有标签及其模型信息"""
+        result = await self._send_rpc('list_tags', {})
+        return {tag: [ModelInfo(**info) for info in models]
+                for tag, models in result.items()}
 
     async def resolve_model(
             self,

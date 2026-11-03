@@ -9,6 +9,43 @@ options:
   -c, --config CONFIG  Path to the TOML config file
 ```
 
+## HTTP 服务
+OpenAI 兼容的 HTTP 服务（chat/completions、models），支持阻塞与 SSE 流式响应，详见 docs/http_server.md。
+
+```
+usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPOINT]
+                                 [--auth AUTH] [--host HOST] [--port PORT]
+                                 [--client-token TOKEN] [--mock]
+
+options:
+  -h, --help            show this help message and exit
+  -v, --verbose         Print debug log
+  -c, --config CONFIG   Path to the TOML config file
+  --zmq-endpoint ZMQ_ENDPOINT
+                        ZeroMQ ROUTER endpoint of an existing server (remote mode);
+                        omit for direct mode
+  --auth AUTH           ZeroMQ auth token (remote mode)
+  --host HOST           HTTP bind host (default: 127.0.0.1)
+  --port PORT           HTTP bind port (default: 8000)
+  --client-token TOKEN  Client Bearer token for authentication, can be specified
+                        multiple times
+  --mock                Enable built-in mock scenarios
+```
+
+其中，未指定 --zmq-endpoint 时为直连模式（同一份配置文件同时提供 HTTP 服务与提供商访问）；指定后为远程模式，连接已有 ZMQ 服务。--client-token 可多次指定，与配置文件 [http].client_tokens 合并。
+
+示例：
+```
+# 直连模式
+python3 -m aitoolman http --client-token sk-xxx
+
+# 远程模式
+python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --client-token sk-xxx
+
+# 启用内置 mock 场景
+python3 -m aitoolman http --client-token sk-xxx --mock
+```
+
 ## LLM 客户端
 ```
 usage: python3 -m aitoolman client [-h] [-v] (-c CONFIG | -z ZMQ_ENDPOINT) [-a AUTH] -m MODEL

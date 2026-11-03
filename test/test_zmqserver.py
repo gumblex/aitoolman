@@ -8,7 +8,7 @@ from aitoolman import util, zmqprotocol
 from aitoolman.zmqserver import LLMZmqServer, ZmqServerChannel
 from aitoolman.zmqprotocol import ZmqChannelMessageBuffer, ResponsePayload, CancelAckPayload
 from aitoolman.channel import ChannelEvent
-from aitoolman.model import LLMProviderRequest, LLMProviderResponse
+from aitoolman.model import LLMProviderRequest, LLMProviderResponse, ModelInfo
 
 
 def _make_server(auth_token=None, manage_token=None):
@@ -455,6 +455,62 @@ class TestZmqProtocolEncodeDecode(unittest.TestCase):
             zmqprotocol.decode_client_payload('no_such_type', b'{}')
         with self.assertRaises(ValueError):
             zmqprotocol.decode_server_payload('no_such_type', b'{}')
+
+
+def _make_model_info(name, tags):
+    """构造测试用 ModelInfo 实例"""
+    return ModelInfo(
+        name=name, url='http://127.0.0.1:1', model=name,
+        parallel=1, timeout=30.0, timeout_batch=60.0, api_type='openai',
+        body_options={}, max_input_tokens=0, bytes_per_token=0.0,
+        tags=tags)
+
+
+class _StubProviderManager:
+    """替身 provider_manager，仅提供 list_tags 查询"""
+
+    def list_tags(self):
+        return {
+            'fast': [_make_model_info('model-a', {'fast': 1.0}),
+                     _make_model_info('model-b', {'fast': 1.0})],
+            'cheap': [_make_model_info('model-b', {'cheap': 1.0})],
+        }
+
+
+class TestHandleRpcListTags(unittest.IsolatedAsyncioTestCase):
+    """测试 handle_rpc 对 list_tags 查询白名单分发分支"""
+
+    async def test_list_tags_dispatch_without_manage_permission(self):
+        """list_tags 属于查询方法，无需管理权限即可分发并返回 _asdict 结果"""
+        server = object.__new__(LLMZmqServer)
+        server.zmq_auth_token = 'auth_secret'
+        server.zmq_manage_token = 'manage_secret'
+        server.provider_manager = _StubProviderManager()
+
+        responses = []
+
+        async def _capture_send_rpc_response(client_id, request_id,
+                                             result=None, error=None):
+            responses.append((client_id, request_id, result, error))
+
+        server.send_rpc_response = _capture_send_rpc_response
+
+        payload = zmqprotocol.RpcPayload(
+            request_id='req-1', method='list_tags', kwargs={})
+        await server.handle_rpc('client-1', 'req-1', 'auth_secret', payload)
+
+        self.assertEqual(len(responses), 1)
+        client_id, request_id, result, error = responses[0]
+        self.assertEqual(client_id, 'client-1')
+        self.assertEqual(request_id, 'req-1')
+        self.assertIsNone(error)
+        self.assertEqual(set(result.keys()), {'fast', 'cheap'})
+        self.assertEqual([m['name'] for m in result['fast']],
+                         ['model-a', 'model-b'])
+        self.assertEqual([m['name'] for m in result['cheap']], ['model-b'])
+        for models in result.values():
+            for info in models:
+                self.assertIsInstance(info, dict)
 
 
 if __name__ == '__main__':

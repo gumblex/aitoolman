@@ -106,7 +106,21 @@ Tags without the `:rank` suffix behave exactly as before. The `tag:rank` syntax 
 
 When calling `resolve_model` or passing the module `model_name`, a single string is also accepted, with multiple tags separated by commas (e.g., `"fast:2,code:2/3"`), optionally followed by a `/N` suffix (counting from 1) to cyclically rotate the final candidate model list; `/` has no special meaning for list input.
 
-### 1.5 Configuration Example
+### 1.5 [http] Section
+Configuration for the HTTP server (`python3 -m aitoolman http`), see docs/http_server.en.md for details.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `host` | String | `"127.0.0.1"` | HTTP bind address |
+| `port` | Integer | `8000` | HTTP bind port |
+| `zmq_endpoint` | String | None (Optional) | Endpoint of an existing ZMQ server; when configured, remote mode is used; defaults to direct mode (the HTTP server serves directly via the configured provider details) |
+| `zmq_auth_token` | String | None (Optional) | ZMQ authentication token for remote mode, required in remote mode |
+| `client_tokens` | String list | None (must be non-empty) | Client Bearer token list; startup is rejected when empty |
+| `mock` | Boolean | false | Enable built-in mock scenarios |
+
+CLI parameters `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` can override this section item by item (CLI > [http] section > built-in defaults); `--client-token` is append-only.
+
+### 1.6 Configuration Example
 
 ```toml
 [server]
@@ -153,6 +167,14 @@ type = "openai"
 model = "ep-bbb"
 parallel = 100000
 headers = {Authorization = "Bearer xxx"}
+
+[http]
+host = "127.0.0.1"
+port = 8000
+client_tokens = ["sk-xxx"]
+# zmq_endpoint = "tcp://127.0.0.1:5555"  # remote mode: connect to an existing ZMQ server
+# zmq_auth_token = "YOUR_SECRET_TOKEN"   # remote mode auth token
+# mock = false
 ```
 
 ## 2. Application Module Configuration (app_prompt.toml)

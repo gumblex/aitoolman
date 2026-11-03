@@ -105,7 +105,21 @@ low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deeps
 
 调用 `resolve_model` 或模块 `model_name` 时也支持传入单个字符串，多个标签以英文逗号分隔（如 `"fast:2,code:2/3"`），末尾可用 `/N` 后缀（从 1 计数）对最终候选模型列表循环旋转；列表输入时 `/` 无特殊含义。
 
-### 1.5 配置示例
+### 1.5 [http] 部分
+HTTP 服务（`python3 -m aitoolman http`）的配置，详见 docs/http_server.md。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `host` | 字符串 | "127.0.0.1" | HTTP 监听地址 |
+| `port` | 整数 | 8000 | HTTP 监听端口 |
+| `zmq_endpoint` | 字符串 | 无（可选） | 已有 ZMQ 服务端点，配置后为远程模式；缺省为直连模式（HTTP 服务通过配置的提供商详情直接提供服务） |
+| `zmq_auth_token` | 字符串 | 无（可选） | 远程模式的 ZMQ 认证令牌，远程模式必须配置 |
+| `client_tokens` | 字符串列表 | 无（必须非空） | 客户端 Bearer 认证令牌列表，为空则拒绝启动 |
+| `mock` | 布尔值 | false | 启用内置 mock 场景 |
+
+CLI 参数 `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` 可逐项覆盖此节配置（CLI > [http] 节 > 内置默认），`--client-token` 为追加语义。
+
+### 1.6 配置示例
 ```toml
 [server]
 zmq_router_rpc = "tcp://*:5555"
@@ -151,6 +165,14 @@ type = "openai"
 model = "ep-bbb"
 parallel = 100000
 headers = {Authorization = "Bearer xxx"}
+
+[http]
+host = "127.0.0.1"
+port = 8000
+client_tokens = ["sk-xxx"]
+# zmq_endpoint = "tcp://127.0.0.1:5555"  # 配置后为远程模式，连接已有 ZMQ 服务
+# zmq_auth_token = "YOUR_SECRET_TOKEN"   # 远程模式认证令牌
+# mock = false
 ```
 
 ## 2. 应用模块配置 (app_prompt.toml)

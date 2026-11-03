@@ -572,6 +572,55 @@ class TestListModels(unittest.TestCase):
         self.assertNotIn('model-c', names)
 
 
+class TestListTags(unittest.TestCase):
+    def test_list_tags_basic(self):
+        """返回所有配置标签及各标签下的模型信息列表"""
+        manager = LLMProviderManager(make_test_config())
+        tags = manager.list_tags()
+        self.assertEqual(set(tags.keys()), {'fast', 'cheap', 'alias_a'})
+        self.assertEqual([m.name for m in tags['fast']], ['model-a', 'model-b'])
+        self.assertEqual([m.name for m in tags['cheap']], ['model-b'])
+        self.assertEqual([m.name for m in tags['alias_a']], ['model-a'])
+
+    def test_list_tags_flattens_nested(self):
+        """嵌套模型列表被展平"""
+        manager = LLMProviderManager(make_nested_test_config())
+        tags = manager.list_tags()
+        self.assertEqual([m.name for m in tags['low_cost']],
+                         ['model-a', 'model-b', 'model-d', 'model-e'])
+        self.assertEqual([m.name for m in tags['cheap']],
+                         ['model-b', 'model-d', 'model-e'])
+        self.assertEqual([m.name for m in tags['same']],
+                         ['model-f1', 'model-f2', 'model-f3'])
+
+    def test_list_tags_exclude_disabled(self):
+        """排除禁用模型"""
+        config = make_test_config()
+        # model-c 已禁用（enable=False），将其加入标签以覆盖过滤路径
+        config['model_tag']['fast'].append('model-c')
+        manager = LLMProviderManager(config)
+        tags = manager.list_tags()
+        self.assertEqual([m.name for m in tags['fast']], ['model-a', 'model-b'])
+
+    def test_list_tags_filters_unconfigured(self):
+        """标签中未在 api 配置的模型名被过滤"""
+        manager = LLMProviderManager(make_test_config())
+        # 构造期校验会拒绝未配置的模型名，直接注入以覆盖过滤路径
+        manager.model_tag['fast'] = ['model-a', 'model-x']
+        tags = manager.list_tags()
+        self.assertEqual([m.name for m in tags['fast']], ['model-a'])
+
+    def test_list_tags_keeps_empty_tag(self):
+        """标签下模型全部禁用时，标签保留且值为空列表"""
+        config = make_test_config()
+        config['api']['model-b']['enable'] = False
+        manager = LLMProviderManager(config)
+        tags = manager.list_tags()
+        self.assertIn('cheap', tags)
+        self.assertEqual(tags['cheap'], [])
+        self.assertEqual([m.name for m in tags['fast']], ['model-a'])
+
+
 class TestConfigUpdate(unittest.TestCase):
     def test_update_config(self):
         """全量配置更新"""

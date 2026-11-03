@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Network integration tests for LLMProviderManager against mock_openai_server.
+"""Network integration tests for LLMProviderManager against the HTTP
+server's built-in mock scenarios.
 
 Covers the following scenarios:
 a. batch request normal response
@@ -12,77 +13,29 @@ g. stream heartbeats interleaved with content complete normally
 plus authentication success/failure tests.
 """
 
-import socket
-import subprocess
-import sys
-import time
 import unittest
-import urllib.request
 import uuid
-from pathlib import Path
+
+from test.mock_http_server import start_mock_http_server
 
 from aitoolman.model import LLMProviderRequest, Message
 from aitoolman.provider import LLMProviderManager
 
-MOCK_SERVER_PATH = Path(__file__).parent / "mock_llm_server.py"
 CLIENT_TOKEN = "test-secret-token"
 MOCK_DELAY_SLOW_BATCH = "2"
 MOCK_DELAY_SLOW_STREAM = "2"
 
 
-def _get_free_port() -> int:
-    """Return a free TCP port on 127.0.0.1."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _wait_for_server(url: str, process: subprocess.Popen, timeout: float = 10.0) -> None:
-    """Wait until the mock server health endpoint is reachable."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(
-                f"mock server exited early with code {process.returncode}"
-            )
-        try:
-            with urllib.request.urlopen(url + "/", timeout=0.5) as resp:
-                if resp.status == 200:
-                    return
-        except Exception:
-            time.sleep(0.1)
-    raise RuntimeError("mock server did not become ready in time")
-
-
 class TestNetwork(unittest.IsolatedAsyncioTestCase):
-    """Integration tests for LLMProviderManager with the mock OpenAI server."""
+    """Integration tests for LLMProviderManager against the mock HTTP upstream."""
 
     @classmethod
     def setUpClass(cls):
-        port = _get_free_port()
-        cls.base_url = f"http://127.0.0.1:{port}"
-        cls.server = subprocess.Popen(
-            [
-                sys.executable,
-                str(MOCK_SERVER_PATH),
-                "--host", "127.0.0.1",
-                "--port", str(port),
-                "--client-token", CLIENT_TOKEN,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _wait_for_server(cls.base_url, cls.server)
+        cls.base_url, cls._stop_server = start_mock_http_server(CLIENT_TOKEN)
 
     @classmethod
     def tearDownClass(cls):
-        if cls.server.poll() is None:
-            cls.server.terminate()
-            try:
-                cls.server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                cls.server.kill()
-                cls.server.wait(timeout=5)
+        cls._stop_server()
 
     def _make_config(self):
         """Build a temporary provider config for the mock server."""

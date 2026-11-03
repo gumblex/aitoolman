@@ -228,6 +228,60 @@ def subparser_manage(subparsers):
     return subp
 
 
+def subparser_http(subparsers):
+    subp = subparsers.add_parser(
+        'http',
+        description="OpenAI-compatible HTTP server (chat/completions, models)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Usage Examples:
+# Direct mode: HTTP server from one config file
+python3 -m aitoolman http --config llm_provider.toml --client-token sk-xxx
+
+# Remote mode: connect to an existing ZMQ server
+python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --client-token sk-xxx
+
+# Enable built-in mock scenarios
+python3 -m aitoolman http --client-token sk-xxx --mock
+        """.strip()
+    )
+    subp.add_argument(
+        "-v", "--verbose", action='count', default=0,
+        help="Print debug log"
+    )
+    subp.add_argument(
+        "-c", "--config", type=str, default='llm_provider.toml',
+        help="Path to the TOML config file"
+    )
+    subp.add_argument(
+        "--zmq-endpoint", type=str,
+        help="ZeroMQ ROUTER endpoint of an existing server (remote mode); "
+             "omit to use LLM providers in config file (direct mode)"
+    )
+    subp.add_argument(
+        "--auth", type=str,
+        help="ZeroMQ auth token (remote mode)"
+    )
+    subp.add_argument(
+        "--host", type=str,
+        help="HTTP bind host (default: 127.0.0.1)"
+    )
+    subp.add_argument(
+        "--port", type=int,
+        help="HTTP bind port (default: 8000)"
+    )
+    subp.add_argument(
+        "--client-token", type=str, action='append',
+        help="Client Bearer token for authentication, "
+             "can be specified multiple times"
+    )
+    subp.add_argument(
+        "--mock", action='store_true',
+        help="Enable built-in mock scenarios (mock-normal, mock-stream, ...)"
+    )
+    return subp
+
+
 # --- Run functions ---
 
 async def _run_client_session(args):
@@ -435,6 +489,11 @@ def run_manage(args):
     asyncio.run(_run_manage_session(args))
 
 
+def run_http(args):
+    from . import http_server
+    http_server.run_http(args)
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -448,6 +507,7 @@ def main():
     subparser_code_edit(subparsers)
     subparser_monitor(subparsers)
     subparser_manage(subparsers)
+    subparser_http(subparsers)
 
     args = parser.parse_args()
     if args.verbose:

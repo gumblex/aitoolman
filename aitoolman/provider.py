@@ -1052,6 +1052,20 @@ class LLMProviderManager:
         model_names = self.resolve_model(tags)
         return list(map(self._make_model_info, model_names))
 
+    def list_tags(self) -> Dict[str, List[ModelInfo]]:
+        """列出 [model_tag] 配置的所有标签及其模型信息
+
+        Returns:
+            标签名 -> 模型信息列表。按配置顺序遍历；展平嵌套列表；
+            排除禁用模型；标签本身保留（模型全部禁用时值为空列表）。
+        """
+        result: Dict[str, List[ModelInfo]] = {}
+        for tag, models in self.model_tag.items():
+            names = [m for m in self._flatten_model_list(models)
+                     if m in self.api_config and m not in self.disabled_models]
+            result[tag] = list(map(self._make_model_info, names))
+        return result
+
     def _make_model_info(self, model_name: str) -> ModelInfo:
         """构造ModelInfo对象"""
         config = self.api_config[model_name]
