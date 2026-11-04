@@ -31,6 +31,7 @@
 | `max_input_tokens` | 整数  | 无（不限）    | 模型支持的最大输入Token数                    |
 | `bytes_per_token`  | 浮点数 | 4.0      | 单Token对应的UTF-8字节数估算值，用于Token数估算     |
 | `rank_adjust_ratio`| 浮点数 | 0.25     | 权重调整参数，用于模型路由算法中的排名权重计算          |
+| `loop_detect_length` | 整数 | 0 | 流式死循环检测的循环窗口长度，<=0 关闭，推荐 400 |
 
 
 ### 1.3 [api."模型名称"] 部分
@@ -48,6 +49,7 @@
 | `body_options` | 字典  | 继承自 `[default].body_options`     | 该模型默认的请求选项，覆盖 default 中的所有选项    |
 | `max_input_tokens` | 整数  | 继承自 `[default].max_input_tokens` | 该模型支持的最大输入Token数 |
 | `bytes_per_token`  | 浮点数 | 继承自 `[default].bytes_per_token`  | 该模型单Token对应的UTF-8字节数估算值 |
+| `loop_detect_length` | 整数 | 继承自 `[default].loop_detect_length` | 该模型流式死循环检测的循环窗口长度 |
 | `enable`           | 布尔值 | true                            | 设为false则暂停该模型的调度使用   |
 
 
@@ -115,9 +117,8 @@ HTTP 服务（`python3 -m aitoolman http`）的配置，详见 docs/http_server.
 | `zmq_endpoint` | 字符串 | 无（可选） | 已有 ZMQ 服务端点，配置后为远程模式；缺省为直连模式（HTTP 服务通过配置的提供商详情直接提供服务） |
 | `zmq_auth_token` | 字符串 | 无（可选） | 远程模式的 ZMQ 认证令牌，远程模式必须配置 |
 | `client_tokens` | 字符串列表 | 无（必须非空） | 客户端 Bearer 认证令牌列表，为空则拒绝启动 |
-| `mock` | 布尔值 | false | 启用内置 mock 场景 |
 
-CLI 参数 `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` 可逐项覆盖此节配置（CLI > [http] 节 > 内置默认），`--client-token` 为追加语义。
+CLI 参数 `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token` 可逐项覆盖此节配置（CLI > [http] 节 > 内置默认），`--client-token` 为追加语义。
 
 ### 1.6 配置示例
 ```toml
@@ -135,6 +136,7 @@ parallel = 1
 retry_duration = 0.5
 retry_factor = 1.5
 api_type = "openai"
+loop_detect_length = 400
 
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
@@ -172,7 +174,6 @@ port = 8000
 client_tokens = ["sk-xxx"]
 # zmq_endpoint = "tcp://127.0.0.1:5555"  # 配置后为远程模式，连接已有 ZMQ 服务
 # zmq_auth_token = "YOUR_SECRET_TOKEN"   # 远程模式认证令牌
-# mock = false
 ```
 
 ## 2. 应用模块配置 (app_prompt.toml)

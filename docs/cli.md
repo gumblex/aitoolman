@@ -15,7 +15,7 @@ OpenAI 兼容的 HTTP 服务（chat/completions、models），支持阻塞与 SS
 ```
 usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPOINT]
                                  [--auth AUTH] [--host HOST] [--port PORT]
-                                 [--client-token TOKEN] [--mock]
+                                 [--client-token TOKEN]
 
 options:
   -h, --help            show this help message and exit
@@ -29,7 +29,6 @@ options:
   --port PORT           HTTP bind port (default: 8000)
   --client-token TOKEN  Client Bearer token for authentication, can be specified
                         multiple times
-  --mock                Enable built-in mock scenarios
 ```
 
 其中，未指定 --zmq-endpoint 时为直连模式（同一份配置文件同时提供 HTTP 服务与提供商访问）；指定后为远程模式，连接已有 ZMQ 服务。--client-token 可多次指定，与配置文件 [http].client_tokens 合并。
@@ -41,9 +40,6 @@ python3 -m aitoolman http --client-token sk-xxx
 
 # 远程模式
 python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --client-token sk-xxx
-
-# 启用内置 mock 场景
-python3 -m aitoolman http --client-token sk-xxx --mock
 ```
 
 ## LLM 客户端

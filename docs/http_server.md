@@ -17,7 +17,6 @@ pip install 'aitoolman[http]'
 - `GET /health`：健康检查（无需认证）
 - Bearer Token 认证
 - 直连/远程双后端模式
-- 内置 mock 场景，便于测试
 - 请求 body 中未识别的键全量透传给模型请求 options（优先级高于配置的 body_options）
 
 ## 快速开始
@@ -103,9 +102,8 @@ Authorization: Bearer <client_tokens 之一>
 | `zmq_endpoint` | 字符串 | 无 | 已有 ZMQ 服务端点（远程模式）；缺省为直连模式 |
 | `zmq_auth_token` | 字符串 | 无 | 远程模式 ZMQ 认证令牌（远程模式必填） |
 | `client_tokens` | 字符串列表 | 无 | 客户端 Bearer 令牌列表，为空时拒绝启动 |
-| `mock` | 布尔值 | `false` | 启用内置 mock 场景 |
 
-CLI 参数优先级高于配置：`--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` 可逐项覆盖（`--client-token` 为追加语义，与配置列表合并）。
+CLI 参数优先级高于配置：`--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token` 可逐项覆盖（`--client-token` 为追加语义，与配置列表合并）。
 
 启动校验（fail-fast）：
 
@@ -118,7 +116,7 @@ CLI 参数优先级高于配置：`--host`/`--port`/`--zmq-endpoint`/`--auth`/`-
 ```
 usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPOINT]
                                  [--auth AUTH] [--host HOST] [--port PORT]
-                                 [--client-token TOKEN] [--mock]
+                                 [--client-token TOKEN]
 ```
 
 | 参数 | 说明 |
@@ -128,7 +126,6 @@ usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPO
 | `--auth` | 远程模式 ZMQ 认证令牌 |
 | `--host` / `--port` | HTTP 监听地址/端口 |
 | `--client-token` | 客户端 Bearer 令牌，可多次指定 |
-| `--mock` | 启用内置 mock 场景 |
 
 ## 双后端模式
 
@@ -156,23 +153,6 @@ data: [DONE]
 - usage chunk 仅在 `stream_options.include_usage=true` 时发送（choices 为空数组）
 - 流中发生错误时发送一帧错误信封，随后仍以 `data: [DONE]` 结束
 - 客户端断连时自动取消上游请求
-
-## mock 模式
-
-`--mock` 或 `[http].mock=true` 启用后，请求 `model` 命中以下场景名时直接返回固定响应（认证之后、模型解析之前拦截），无需真实上游：
-
-| model 名 | 行为 |
-|---|---|
-| `mock-normal` | 固定批量回复 |
-| `mock-stream` | SSE 分片回复（`stream=false` 时按批量回复） |
-| `mock-slow-batch` | 延迟后批量回复（默认 5 秒） |
-| `mock-slow-stream` | 第二个内容块前暂停（默认 2 秒） |
-| `mock-heartbeat` | 仅心跳事件，持续 5 秒后结束 |
-| `mock-heartbeat-content` | 心跳与内容块交织 |
-| `mock-auth-error` | 返回 401，模拟上游认证失败 |
-
-- 请求头 `X-Mock-Response-Delay: <秒>` 覆盖慢场景延迟
-- 响应 `model` 字段回显请求中的 model 名，便于断言
 
 ## 错误格式
 

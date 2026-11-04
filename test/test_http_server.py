@@ -23,7 +23,7 @@ try:
 except ImportError:
     AIOHTTP_AVAILABLE = False
 
-from test.mock_http_server import start_mock_http_server
+from test.mock_http_server import mock_handler, start_mock_http_server
 
 from aitoolman.channel import ChannelEvent
 from aitoolman.http_server import (
@@ -63,7 +63,6 @@ def _make_http_config(**overrides) -> HttpServerConfig:
         zmq_endpoint=None,
         zmq_auth_token=None,
         client_tokens=[CLIENT_TOKEN],
-        mock=False,
     )
     params.update(overrides)
     return HttpServerConfig(**params)
@@ -82,7 +81,6 @@ class TestBuildHttpConfig(unittest.TestCase):
         self.assertIsNone(config.zmq_endpoint)
         self.assertIsNone(config.zmq_auth_token)
         self.assertEqual(config.client_tokens, [CLIENT_TOKEN])
-        self.assertFalse(config.mock)
         self.assertEqual(config.mode, "direct")
 
     def test_http_section(self):
@@ -90,12 +88,10 @@ class TestBuildHttpConfig(unittest.TestCase):
             "host": "0.0.0.0",
             "port": 9000,
             "client_tokens": ["tok-a"],
-            "mock": True,
         })
         self.assertEqual(config.host, "0.0.0.0")
         self.assertEqual(config.port, 9000)
         self.assertEqual(config.client_tokens, ["tok-a"])
-        self.assertTrue(config.mock)
         self.assertEqual(config.mode, "direct")
 
     def test_remote_mode(self):
@@ -895,7 +891,7 @@ class TestChatCompletionsStreaming(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# --mock / [http].mock=true：七种场景按 model 名拦截
+# mock 场景：经 mock_handler 钩子按 model 名拦截
 # ---------------------------------------------------------------------------
 
 @unittest.skipUnless(AIOHTTP_AVAILABLE, "aiohttp not installed")
@@ -904,7 +900,8 @@ class TestMockScenarios(unittest.IsolatedAsyncioTestCase):
 
     async def _post(self, body, config=None, headers=None):
         """进程内发起 chat/completions 请求，返回 (status, headers, 原始字节)"""
-        app = create_app(config or _make_http_config(mock=True), client=None)
+        app = create_app(config or _make_http_config(), client=None,
+                         mock_handler=mock_handler)
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
                 "/v1/chat/completions",
@@ -931,10 +928,10 @@ class TestMockScenarios(unittest.IsolatedAsyncioTestCase):
                                          "total_tokens": 30})
 
     async def test_mock_disabled_treats_as_normal_model(self):
-        # 未启用 mock 时，mock-* 按普通模型名走 resolve_model
+        # 未注册 mock 钩子时，mock-* 按普通模型名走 resolve_model
         fake = _FakeZmqClient(
             resolve_error=LLMNoAvailableModelError("no model"))
-        app = create_app(_make_http_config(mock=False), client=fake)
+        app = create_app(_make_http_config(), client=fake)
         async with TestClient(TestServer(app)) as client:
             resp = await client.post(
                 "/v1/chat/completions",
@@ -1040,7 +1037,7 @@ class TestMockScenarios(unittest.IsolatedAsyncioTestCase):
 
     async def test_mock_heartbeat_only(self):
         started = time.monotonic()
-        with patch("aitoolman.http_server.MOCK_HEARTBEAT_DURATION", 0.5):
+        with patch("test.mock_http_server.MOCK_HEARTBEAT_DURATION", 0.5):
             status, _, raw = await self._post({
                 "model": "mock-heartbeat",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -1083,7 +1080,7 @@ class TestMockScenarios(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestHttpCliSubparser(unittest.TestCase):
-    """subparser_http 参数解析：默认值、--client-token append、--mock、--help"""
+    """subparser_http 参数解析：默认值、--client-token append、--help"""
 
     def _make_parser(self):
         import argparse
@@ -1103,7 +1100,6 @@ class TestHttpCliSubparser(unittest.TestCase):
         self.assertIsNone(args.host)
         self.assertIsNone(args.port)
         self.assertIsNone(args.client_token)
-        self.assertFalse(args.mock)
 
     def test_all_options_parsed(self):
         args = self._make_parser().parse_args([
@@ -1115,7 +1111,6 @@ class TestHttpCliSubparser(unittest.TestCase):
             "--port", "9000",
             "--client-token", "tok-a",
             "--client-token", "tok-b",
-            "--mock",
         ])
         self.assertEqual(args.config, "my.toml")
         self.assertEqual(args.zmq_endpoint, "tcp://127.0.0.1:5555")
@@ -1123,7 +1118,6 @@ class TestHttpCliSubparser(unittest.TestCase):
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9000)
         self.assertEqual(args.client_token, ["tok-a", "tok-b"])
-        self.assertTrue(args.mock)
 
     def test_help_smoke(self):
         import contextlib
@@ -1136,7 +1130,6 @@ class TestHttpCliSubparser(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         help_text = buf.getvalue()
         self.assertIn("--client-token", help_text)
-        self.assertIn("--mock", help_text)
         self.assertIn("--zmq-endpoint", help_text)
 
 
@@ -1154,13 +1147,12 @@ class TestRunHttpDispatch(unittest.TestCase):
 
     def test_main_dispatches_http_subcommand(self):
         from aitoolman import cli
-        argv = ["aitoolman", "http", "-c", "x.toml", "--mock"]
+        argv = ["aitoolman", "http", "-c", "x.toml"]
         with patch("sys.argv", argv), \
                 patch("aitoolman.cli.run_http") as mock_run:
             cli.main()
         args = mock_run.call_args[0][0]
         self.assertEqual(args.config, "x.toml")
-        self.assertTrue(args.mock)
 
 
 # ---------------------------------------------------------------------------

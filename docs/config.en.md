@@ -32,6 +32,7 @@ Default configuration inherited by all model configurations.
 | `max_input_tokens` | Integer | None (No limit) | Maximum input token count supported by the model                            |
 | `bytes_per_token`  | Float   | 4.0             | Estimated UTF-8 bytes per token, used for token count estimation            |
 | `rank_adjust_ratio`| Float   | 0.25            | Weight adjustment parameter for rank weight calculation in model routing    |
+| `loop_detect_length` | Integer | 0 | Loop window length for streaming loop detection; <=0 disables it; recommended 400 |
 
 
 ### 1.3 [api."Model Name"] Section
@@ -49,6 +50,7 @@ Specific configuration for each model, model names can be customized.
 | `body_options`    | Dict    | Inherited from `[default].body_options`     | Default request options for this model, overrides all options in `[default]`. |
 | `max_input_tokens` | Integer | Inherited from `[default].max_input_tokens` | Maximum input token count for this model            |
 | `bytes_per_token`  | Float   | Inherited from `[default].bytes_per_token`  | Estimated UTF-8 bytes per token for this model      |
+| `loop_detect_length` | Integer | Inherited from `[default].loop_detect_length` | Loop window length for streaming loop detection |
 | `enable`           | Boolean | true                                        | Set to false to suspend scheduling of this model    |
 
 
@@ -116,9 +118,8 @@ Configuration for the HTTP server (`python3 -m aitoolman http`), see docs/http_s
 | `zmq_endpoint` | String | None (Optional) | Endpoint of an existing ZMQ server; when configured, remote mode is used; defaults to direct mode (the HTTP server serves directly via the configured provider details) |
 | `zmq_auth_token` | String | None (Optional) | ZMQ authentication token for remote mode, required in remote mode |
 | `client_tokens` | String list | None (must be non-empty) | Client Bearer token list; startup is rejected when empty |
-| `mock` | Boolean | false | Enable built-in mock scenarios |
 
-CLI parameters `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` can override this section item by item (CLI > [http] section > built-in defaults); `--client-token` is append-only.
+CLI parameters `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token` can override this section item by item (CLI > [http] section > built-in defaults); `--client-token` is append-only.
 
 ### 1.6 Configuration Example
 
@@ -137,6 +138,7 @@ parallel = 1
 retry_duration = 0.5
 retry_factor = 1.5
 api_type = "openai"
+loop_detect_length = 400
 
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
@@ -174,7 +176,6 @@ port = 8000
 client_tokens = ["sk-xxx"]
 # zmq_endpoint = "tcp://127.0.0.1:5555"  # remote mode: connect to an existing ZMQ server
 # zmq_auth_token = "YOUR_SECRET_TOKEN"   # remote mode auth token
-# mock = false
 ```
 
 ## 2. Application Module Configuration (app_prompt.toml)

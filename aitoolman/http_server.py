@@ -16,7 +16,7 @@ import secrets
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import msgspec
 import zmq
@@ -132,7 +132,6 @@ class HttpServerConfig(msgspec.Struct):
     zmq_endpoint: Optional[str]      # None=直连模式；否则为远程 ZMQ 服务端点
     zmq_auth_token: Optional[str]    # 远程模式认证 token
     client_tokens: List[str]         # 客户端 Bearer 令牌列表
-    mock: bool                       # 启用内置 mock 处理
 
     @property
     def mode(self) -> str:
@@ -144,9 +143,11 @@ class HttpServerConfig(msgspec.Struct):
 if web is not None:
     APP_CONFIG_KEY = web.AppKey("config", HttpServerConfig)
     APP_CLIENT_KEY = web.AppKey("client", LLMZmqClient)
+    APP_MOCK_HANDLER_KEY = web.AppKey("mock_handler", object)
 else:
     APP_CONFIG_KEY = "config"
     APP_CLIENT_KEY = "client"
+    APP_MOCK_HANDLER_KEY = "mock_handler"
 
 
 def build_http_config(
@@ -156,7 +157,7 @@ def build_http_config(
 
     覆盖规则：CLI 参数（overrides）> [http] 节 > 内置默认。
     overrides 支持键：host / port / zmq_endpoint / zmq_auth_token /
-    client_tokens（追加语义，与配置列表合并）/ mock；值为 None 视为未提供。
+    client_tokens（追加语义，与配置列表合并）；值为 None 视为未提供。
 
     Raises:
         RuntimeError: aiohttp 未安装
@@ -183,8 +184,6 @@ def build_http_config(
         if token and token not in client_tokens:
             client_tokens.append(token)
 
-    mock = bool(overrides.get('mock')) or bool(http_config.get('mock', False))
-
     if not client_tokens:
         raise ValueError(
             "HTTP server requires client_tokens: set [http].client_tokens in "
@@ -201,7 +200,6 @@ def build_http_config(
         zmq_endpoint=zmq_endpoint,
         zmq_auth_token=zmq_auth_token,
         client_tokens=client_tokens,
-        mock=mock,
     )
 
 
@@ -437,10 +435,10 @@ def error_response_for_finish_reason(
 # ---------------------------------------------------------------------------
 
 # 流式响应终止帧
-_SSE_DONE = b"data: [DONE]\n\n"
+SSE_DONE = b"data: [DONE]\n\n"
 
 
-def _sse_frame(payload: Any) -> bytes:
+def sse_frame(payload: Any) -> bytes:
     """将 payload 编码为一帧 SSE 数据：data: {json}\\n\\n"""
     return b"data: " + msgspec.json.encode(payload) + b"\n\n"
 
@@ -480,139 +478,7 @@ def build_usage_chunk(chunk_id: str, created: int, model: str,
     )
 
 
-# ---------------------------------------------------------------------------
-# mock 场景（--mock / [http].mock=true 启用）
-# ---------------------------------------------------------------------------
 
-# 场景模型名，按请求的 model 字段匹配（详见 _handle_mock_request）
-MOCK_SCENARIOS = frozenset({
-    "mock-normal", "mock-stream", "mock-slow-batch", "mock-slow-stream",
-    "mock-heartbeat", "mock-heartbeat-content", "mock-auth-error",
-})
-MOCK_SLOW_BATCH_DELAY = 5.0       # mock-slow-batch 默认延迟（秒）
-MOCK_SLOW_STREAM_DELAY = 2.0      # mock-slow-stream 默认暂停（秒）
-MOCK_HEARTBEAT_DURATION = 5.0     # mock-heartbeat 纯心跳持续时长（秒）
-MOCK_STREAM_CHUNK_INTERVAL = 0.1  # 流式内容块间隔（秒）
-MOCK_HEARTBEAT_INTERVAL = 0.1     # 心跳事件间隔（秒）
-MOCK_STREAM_CONTENT = ["Hello", " from ", "mock", " server!"]
-MOCK_SLOW_STREAM_CONTENT = ["Hello", " from ", "slow", " stream!"]
-# SSE 心跳帧（注释行，标准 SSE 解析器与客户端会自动忽略）
-_SSE_HEARTBEAT = b": keep-alive\n\n"
-
-
-def _get_mock_delay(request: "web.Request", default: float) -> float:
-    """读取 X-Mock-Response-Delay 请求头覆盖慢场景延迟（秒），非法值回退默认"""
-    header = request.headers.get("X-Mock-Response-Delay")
-    if header is None:
-        return default
-    try:
-        return max(0.0, float(header))
-    except ValueError:
-        return default
-
-
-def _mock_batch_response(selector: str, content: str) -> ChatCompletion:
-    """构造 mock 批量响应，model 字段回显请求中的 selector"""
-    return ChatCompletion(
-        id="chatcmpl-mock-" + util.get_id(),
-        object="chat.completion",
-        created=int(time.time()),
-        model=selector,
-        choices=[Choice(
-            index=0,
-            message=ResponseMessage(role="assistant", content=content),
-            finish_reason="stop",
-        )],
-        usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
-    )
-
-
-async def _stream_mock_response(
-        request: "web.Request", selector: str,
-        stream_options: Optional[Dict[str, Any]]) -> "web.StreamResponse":
-    """mock 流式场景：按 selector 输出 SSE 帧，model 字段回显 selector。
-
-    - mock-stream：正常分片流
-    - mock-slow-stream：第二个内容块前暂停（X-Mock-Response-Delay 覆盖，默认 2s）
-    - mock-heartbeat：仅心跳事件，持续 MOCK_HEARTBEAT_DURATION 秒后结束
-    - mock-heartbeat-content：心跳与内容块交织的正常流
-    收尾与真实流式路径一致：finish chunk →（include_usage 时）usage chunk
-    → [DONE]；mock-heartbeat 除外（无内容，直接结束）。
-    """
-    chunk_id = "chatcmpl-mock-" + util.get_id()
-    created = int(time.time())
-    resp = web.StreamResponse(headers={
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-    })
-    await resp.prepare(request)
-
-    def frame(delta: Optional[Delta] = None,
-              finish_reason: Optional[str] = None) -> bytes:
-        return _sse_frame(build_chat_completion_chunk(
-            chunk_id, created, selector, delta=delta,
-            finish_reason=finish_reason))
-
-    if selector == "mock-heartbeat":
-        deadline = time.monotonic() + MOCK_HEARTBEAT_DURATION
-        while time.monotonic() < deadline:
-            await resp.write(_SSE_HEARTBEAT)
-            await asyncio.sleep(MOCK_HEARTBEAT_INTERVAL)
-        await resp.write_eof()
-        return resp
-
-    await resp.write(frame(Delta(role="assistant")))
-    if selector == "mock-heartbeat-content":
-        for part in MOCK_STREAM_CONTENT:
-            await resp.write(_SSE_HEARTBEAT)
-            await asyncio.sleep(MOCK_HEARTBEAT_INTERVAL)
-            await resp.write(frame(Delta(content=part)))
-            await asyncio.sleep(MOCK_STREAM_CHUNK_INTERVAL)
-    else:
-        parts = (MOCK_SLOW_STREAM_CONTENT
-                 if selector == "mock-slow-stream" else MOCK_STREAM_CONTENT)
-        pause = (_get_mock_delay(request, MOCK_SLOW_STREAM_DELAY)
-                 if selector == "mock-slow-stream" else 0.0)
-        for i, part in enumerate(parts):
-            if i == 1 and pause:
-                await asyncio.sleep(pause)
-            await resp.write(frame(Delta(content=part)))
-            await asyncio.sleep(MOCK_STREAM_CHUNK_INTERVAL)
-    await resp.write(frame(finish_reason="stop"))
-    if (stream_options or {}).get("include_usage"):
-        await resp.write(_sse_frame(build_usage_chunk(
-            chunk_id, created, selector, 10, 20)))
-    await resp.write(_SSE_DONE)
-    await resp.write_eof()
-    return resp
-
-
-async def _handle_mock_request(
-        request: "web.Request", body: Dict[str, Any],
-        selector: str) -> "web.StreamResponse":
-    """按请求 model 名分派 mock 场景（认证之后、resolve_model 之前拦截）。
-
-    - mock-auth-error：返回 401，模拟上游认证失败
-    - mock-slow-batch：延迟后返回批量响应（X-Mock-Response-Delay 覆盖，默认 5s）
-    - mock-normal 与 stream=false 的 mock-stream：批量响应
-    - 其余 stream=true 请求：见 _stream_mock_response
-    """
-    if selector == "mock-auth-error":
-        return make_error_response(
-            "Invalid authentication credentials",
-            "authentication_error", code="invalid_api_key", status=401)
-    if selector == "mock-slow-batch":
-        await asyncio.sleep(_get_mock_delay(request, MOCK_SLOW_BATCH_DELAY))
-        return make_json_response(
-            _mock_batch_response(selector, "This is a slow batch response."))
-    if not body.get("stream") or selector == "mock-normal":
-        return make_json_response(
-            _mock_batch_response(selector, "This is a mock response."))
-    stream_options = body.get("stream_options")
-    return await _stream_mock_response(
-        request, selector,
-        stream_options if isinstance(stream_options, dict) else None)
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +492,7 @@ async def handle_chat_completions(
     协议保留键 model/messages/stream/tools 先提取，其余 body 键全量透传进
     options（provider 层按 {**body_options, **options} 合并，保证请求 body
     优先于配置 body_options）。stream=true 时委托 _stream_chat_completions。
+    已注册 mock_handler 钩子时在 resolve_model 之前拦截请求。
     """
     client = request.app[APP_CLIENT_KEY]
     try:
@@ -645,10 +512,13 @@ async def handle_chat_completions(
             "'model' is a required property", "invalid_request_error",
             status=400)
 
-    config = request.app[APP_CONFIG_KEY]
-    if config.mock and model in MOCK_SCENARIOS:
-        # mock 拦截：认证之后、resolve_model 之前，按 model 名匹配场景
-        return await _handle_mock_request(request, body, model)
+    mock_handler = request.app[APP_MOCK_HANDLER_KEY]
+    if mock_handler is not None:
+        # 可选请求拦截钩子：认证之后、resolve_model 之前调用；
+        # 返回响应对象则直接返回，None 放行进入正常业务路径
+        intercepted = await mock_handler(request, body)
+        if intercepted is not None:
+            return intercepted
 
     raw_messages = body.get("messages")
     if not isinstance(raw_messages, list) or not raw_messages:
@@ -792,7 +662,7 @@ async def _stream_chat_completions(
                 delta = Delta(reasoning_content=event.data)
             else:
                 continue
-            await resp.write(_sse_frame(
+            await resp.write(sse_frame(
                 build_chat_completion_chunk(chunk_id, created, actual_model,
                                             delta=delta)))
 
@@ -800,17 +670,17 @@ async def _stream_chat_completions(
         error_envelope = error_envelope_for_finish_reason(
             response.finish_reason, response.error_text)
         if error_envelope is not None:
-            await resp.write(_sse_frame(error_envelope))
+            await resp.write(sse_frame(error_envelope))
         else:
-            await resp.write(_sse_frame(build_chat_completion_chunk(
+            await resp.write(sse_frame(build_chat_completion_chunk(
                 chunk_id, created, response.model_name,
                 finish_reason=response.finish_reason)))
             if include_usage:
-                await resp.write(_sse_frame(build_usage_chunk(
+                await resp.write(sse_frame(build_usage_chunk(
                     chunk_id, created, response.model_name,
                     response.prompt_tokens or 0,
                     response.completion_tokens or 0)))
-        await resp.write(_SSE_DONE)
+        await resp.write(SSE_DONE)
         await resp.write_eof()
     except asyncio.CancelledError:
         # 客户端断连（handler 被取消）：取消上游请求后向上传播
@@ -859,11 +729,13 @@ async def handle_list_models(request: "web.Request") -> "web.Response":
 # ---------------------------------------------------------------------------
 
 def create_app(config: HttpServerConfig,
-               client: Optional[LLMZmqClient]) -> "web.Application":
+               client: Optional[LLMZmqClient],
+               mock_handler: Optional[Callable] = None) -> "web.Application":
     """创建 aiohttp 应用：Bearer 认证中间件 + 已注册端点。
 
     业务端点（chat/completions 等）后续注册；配置与 ZMQ 客户端经
-    app['config'] / app['client'] 暴露给 handler。
+    app['config'] / app['client'] 暴露给 handler。mock_handler 为可选的
+    chat/completions 请求拦截钩子，经 APP_MOCK_HANDLER_KEY 存入 app。
     """
 
     @web.middleware
@@ -891,6 +763,7 @@ def create_app(config: HttpServerConfig,
     app = web.Application(middlewares=[auth_middleware])
     app[APP_CONFIG_KEY] = config
     app[APP_CLIENT_KEY] = client
+    app[APP_MOCK_HANDLER_KEY] = mock_handler
     app.router.add_get("/", handle_status)
     app.router.add_get("/health", handle_status)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
@@ -958,7 +831,8 @@ async def _start_direct_backend(provider_config: Dict[str, Any], ctx,
 
 
 async def serve(config: HttpServerConfig, provider_config: Dict[str, Any],
-                stop_event: Optional[threading.Event] = None) -> None:
+                stop_event: Optional[threading.Event] = None,
+                mock_handler: Optional[Callable] = None) -> None:
     """启动 HTTP 服务并阻塞直到 stop_event 置位。
 
     直连模式：后台线程运行 LLMZmqServer（与主线程共享 zmq.asyncio.Context，
@@ -970,6 +844,7 @@ async def serve(config: HttpServerConfig, provider_config: Dict[str, Any],
         config: HTTP 服务配置（build_http_config 装配结果）
         provider_config: llm_provider.toml 完整配置（直连模式构造服务端用）
         stop_event: 可选停止信号；不传时由 KeyboardInterrupt 触发清理
+        mock_handler: 可选的 chat/completions 请求拦截钩子，透传给 create_app
     """
     if web is None:
         raise RuntimeError(
@@ -989,7 +864,7 @@ async def serve(config: HttpServerConfig, provider_config: Dict[str, Any],
                 provider_config, ctx, stop)
         await client.initialize()
 
-        app = create_app(config, client)
+        app = create_app(config, client, mock_handler=mock_handler)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, config.host, config.port)
@@ -1023,7 +898,7 @@ def run_http(args) -> None:
 
     Args:
         args: argparse Namespace，读取属性 config / host / port /
-              zmq_endpoint / auth / client_token / mock
+              zmq_endpoint / auth / client_token
               （缺失属性按未提供处理）
     """
     if args.zmq_endpoint:
@@ -1045,7 +920,6 @@ def run_http(args) -> None:
         'zmq_endpoint': getattr(args, 'zmq_endpoint', None),
         'zmq_auth_token': getattr(args, 'auth', None),
         'client_tokens': getattr(args, 'client_token', None),
-        'mock': getattr(args, 'mock', False),
     }
     try:
         config = build_http_config(http_config, overrides)
@@ -1065,6 +939,6 @@ __all__ = [
     "parse_openai_messages", "parse_openai_tools",
     "build_chat_completion_response", "build_chat_completion_chunk",
     "build_usage_chunk", "error_response_for_finish_reason",
-    "error_envelope_for_finish_reason",
-    "handle_chat_completions", "handle_list_models", "MOCK_SCENARIOS",
+    "error_envelope_for_finish_reason", "sse_frame", "SSE_DONE",
+    "handle_chat_completions", "handle_list_models",
 ]

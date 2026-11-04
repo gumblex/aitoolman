@@ -241,8 +241,6 @@ python3 -m aitoolman http --config llm_provider.toml --client-token sk-xxx
 # Remote mode: connect to an existing ZMQ server
 python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --client-token sk-xxx
 
-# Enable built-in mock scenarios
-python3 -m aitoolman http --client-token sk-xxx --mock
         """.strip()
     )
     subp.add_argument(
@@ -274,10 +272,6 @@ python3 -m aitoolman http --client-token sk-xxx --mock
         "--client-token", type=str, action='append',
         help="Client Bearer token for authentication, "
              "can be specified multiple times"
-    )
-    subp.add_argument(
-        "--mock", action='store_true',
-        help="Enable built-in mock scenarios (mock-normal, mock-stream, ...)"
     )
     return subp
 

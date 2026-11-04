@@ -17,7 +17,6 @@ pip install 'aitoolman[http]'
 - `GET /health`: health check (no authentication required)
 - Bearer Token authentication
 - Direct/remote dual backend modes
-- Built-in mock scenarios for testing
 - Unrecognized keys in the request body are passed through to the model request options (taking priority over the configured body_options)
 
 ## Quick Start
@@ -103,9 +102,8 @@ The `[http]` section of `llm_provider.toml`:
 | `zmq_endpoint` | String | None | Endpoint of an existing ZMQ server (remote mode); omit for direct mode |
 | `zmq_auth_token` | String | None | ZMQ authentication token for remote mode (required in remote mode) |
 | `client_tokens` | String list | None | Client Bearer token list; startup is rejected when empty |
-| `mock` | Boolean | `false` | Enable built-in mock scenarios |
 
-CLI parameters take priority over configuration: `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token`/`--mock` can override each item (`--client-token` is append-only, merged with the configuration list).
+CLI parameters take priority over configuration: `--host`/`--port`/`--zmq-endpoint`/`--auth`/`--client-token` can override each item (`--client-token` is append-only, merged with the configuration list).
 
 Startup validation (fail-fast):
 
@@ -118,7 +116,7 @@ Startup validation (fail-fast):
 ```
 usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPOINT]
                                  [--auth AUTH] [--host HOST] [--port PORT]
-                                 [--client-token TOKEN] [--mock]
+                                 [--client-token TOKEN]
 ```
 
 | Parameter | Description |
@@ -128,7 +126,6 @@ usage: python3 -m aitoolman http [-h] [-v] [-c CONFIG] [--zmq-endpoint ZMQ_ENDPO
 | `--auth` | ZMQ authentication token for remote mode |
 | `--host` / `--port` | HTTP bind address/port |
 | `--client-token` | Client Bearer token, can be specified multiple times |
-| `--mock` | Enable built-in mock scenarios |
 
 ## Dual Backend Modes
 
@@ -156,23 +153,6 @@ data: [DONE]
 - The usage chunk is sent only when `stream_options.include_usage=true` (with an empty choices array)
 - When an error occurs mid-stream, an error envelope frame is sent, followed by `data: [DONE]`
 - Upstream requests are cancelled automatically when the client disconnects
-
-## Mock Mode
-
-When `--mock` or `[http].mock=true` is enabled, requests whose `model` matches one of the following scenario names return a fixed response directly (intercepted after authentication and before model resolution), without a real upstream:
-
-| model name | Behavior |
-|---|---|
-| `mock-normal` | Fixed blocking reply |
-| `mock-stream` | SSE chunked reply (blocking reply when `stream=false`) |
-| `mock-slow-batch` | Blocking reply after a delay (default 5 seconds) |
-| `mock-slow-stream` | Pauses before the second content chunk (default 2 seconds) |
-| `mock-heartbeat` | Only heartbeat events, ending after 5 seconds |
-| `mock-heartbeat-content` | Heartbeats interleaved with content chunks |
-| `mock-auth-error` | Returns 401, simulating upstream authentication failure |
-
-- The request header `X-Mock-Response-Delay: <seconds>` overrides the slow-scenario delay
-- The response `model` field echoes the requested model name for easy assertions
 
 ## Error Format
 

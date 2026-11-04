@@ -13,6 +13,7 @@ from . import util
 from . import postprocess
 from .util import calculate_rank_weights, calc_message_length, estimate_text_token
 from .channel import ChannelEvent
+from .loop_detect import LoopDetector
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall, ModelInfo, LLMNoAvailableModelError
 from .resmanager import ResourceManager
 
@@ -1209,10 +1210,21 @@ class LLMProviderManager:
         first_token_received = False
         thinking_end = False
 
+        # 流式输出死循环检测：loop_detect_length 两级继承（模型配置优先），<=0 关闭
+        loop_detect_length = model_config.get(
+            'loop_detect_length', self.default_config.get('loop_detect_length', 0))
+        if loop_detect_length <= 0:
+            loop_detector = None
+        elif loop_detect_length <= 10:
+            logger.warning("[%s] loop_detect_length <= 10, disabled loop detector", response.model_name)
+            loop_detector = None
+        else:
+            loop_detector = LoopDetector(loop_length=loop_detect_length)
+
         try:
             # 发送流式HTTP请求
-            logger.debug("Stream POST: %s, %s", model_config['url'],
-                              request_body)
+            logger.debug("[%s] Stream POST: %s, %s",
+                         response.model_name, model_config['url'], request_body)
             async with self.http_client.stream(
                 method="POST",
                 url=model_config["url"],
@@ -1278,6 +1290,21 @@ class LLMProviderManager:
                     if request.output_channel and event.content:
                         await request.output_channel.write(
                             ChannelEvent('response', event.content))
+
+                    # 流式输出死循环检测：增量内容喂入检测器，连续热窗口报警则中断
+                    if loop_detector is not None and (event.content or event.reasoning):
+                        if event.content:
+                            loop_detector.update(event.content)
+                        if event.reasoning:
+                            loop_detector.update(event.reasoning)
+                        if loop_detector.check():
+                            score = loop_detector.score()
+                            response.finish_reason = FinishReason.error_format.value
+                            response.error_text = 'Loop detected in stream output, score: %.3f' % score
+                            logger.warning(
+                                "[%s] Loop detected in stream output (model: %s, score: %.3f)",
+                                request.request_id, request.model_name, score)
+                            break
                     if event.is_end:
                         break
 
