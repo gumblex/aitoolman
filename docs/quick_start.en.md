@@ -1,50 +1,47 @@
-# aitoolman Framework Developer Documentation
+# aitoolman Developer Documentation
 
 ## 1. Framework Overview
 
 ### 1.1 Design Philosophy
-aitoolman is a developer-oriented LLM application framework with the core idea of **AI as a Normal Worker** — treating LLM like a junior employee in an enterprise, only executing clear instructions within the rules and processes preset by developers, without autonomous decision-making power. The framework has clear role divisions:
+aitoolman is a developer-focused LLM (Large Language Model) middleware designed to address pain points such as **vendor lock-in of native SDKs** and **unclear workflows and debugging difficulties of application frameworks**. The library unifies streaming and batch inference interfaces, centrally manages multiple models and providers, and provides simple prompt templates and post-processing pipelines, helping developers quickly build stable, debuggable LLM applications. The framework's core idea is **AI as a Normal Worker** — treating LLM like a junior employee in an enterprise, only executing clear instructions within the rules and processes preset by developers, without autonomous decision-making power. The role division is clear:
 - End User = Client: Proposes vague requirements
 - Application Developer = Business Owner: Defines all rules, processes, prompt templates, and holds 100% decision-making power
-- LLMWorkflow = Middle Manager: Schedules tasks according to preset workflows, switches process branches based on presets or LLM return results
-- LLM Module = Junior Employee: Only completes assigned single, clear tasks, with output strictly adhering to preset format requirements
+- LLMWorkflow = Middle Manager: Schedules task chains according to preset workflows
+- LLM Module = Junior Employee: Completes assigned single, clear tasks, with output strictly adhering to preset format requirements
 
-The framework emphasizes:
-- **Full User Control**: All prompts, data flows, and control flows are dominated by user code; LLM only serves as an execution tool with no hidden business logic or unexpected behavior
+The project emphasizes:
+- **Full User Control**: All prompts, data flows, and control flows are dominated by user code; the LLM serves as an execution tool that follows predefined instructions, with no hidden business logic or unexpected behavior
 - **Transparent and Debuggable Workflow**: All data sent to and received from LLM can be customized and audited, facilitating problem troubleshooting and prompt optimization
 - **Vendor Agnostic**: Unified adaptation of multiple LLM providers through abstraction layer, easy model switching while fully utilizing each provider's unique features
 - **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse
-- **Production-Grade Features**: Built-in resource management, error handling, microservice deployment, monitoring, auditing, and hot reload capabilities, ready for direct production use
+- **Deployment-friendly Features**: Built-in resource management, error handling, microservice/HTTP integration, monitoring, auditing and hot reload capabilities, ready for production use
 
 Whether it's simple one-time queries or complex multi-step business processes, aitoolman provides a stable, reliable, and maintainable solution. The framework encourages developers to deeply understand business logic, carefully design prompts, and seamlessly integrate AI capabilities into existing systems.
 
-### 1.2 Differences from Traditional Agent Frameworks
-| Dimension              | aitoolman                                                        | Traditional Agent Frameworks                                              |
-|------------------------|------------------------------------------------------------------|---------------------------------------------------------------------------|
-| LLM's Role             | **LLM is a "worker", only executes predefined instructions**     | LLM is an autonomous "agent" with decision-making capabilities            |
-| Control                | User has full control over workflows                             | Framework implies hidden control flows                                    |
-| Prompts                | Developers write all prompts with full customization             | Includes many default prompts, high adaptation cost for custom scenarios  |
-| Multi-model Adaptation | Natively supports multi-vendor with low switching cost           | Optimized for single platforms, high adaptation cost                      |
-| Feature Boundaries     | Focuses on LLM function orchestration, no redundant dependencies | Bulky dependencies with built-in vector indexing, RAG, and other features |
-| Use Cases              | Controllable workflow orchestration, batch task processing       | Autonomous agents, exploratory applications                               |
+### 1.2 Differences from Native LLM SDKs and Full Agent Frameworks
+| Dimension      | Native LLM SDK              | aitoolman                                                                    | Full Agent Framework                                         |
+|----------------|-----------------------------|------------------------------------------------------------------------------|--------------------------------------------------------------|
+| LLM's Role     | Called directly by app code | LLM is a worker executing predefined instructions                            | LLM is an autonomous agent with decision-making capabilities |
+| Control        | Managed by app code         | User has full control over workflows                                         | Framework implies hidden control flows                       |
+| Prompts        | Assembled in app code       | Developers write templates with full customization                           | Includes many default prompts                                |
+| Multi-provider | Per-SDK adaptation          | Native multi-provider abstraction and model routing                          | Usually single platform or plugin-based                      |
+| Boundaries     | Low-level API only          | Provider abstraction, application layer, lightweight orchestration           | Built-in vector index, RAG, planning, memory                 |
+| Use Cases      | Simple API calls            | Unified access, template-based calls, model routing, on-demand orchestration | Autonomous agents, exploratory applications                  |
 
 ### 1.3 Use Cases
-1. Professional Applications: Clear input and output scope
-   - **Text Processing**: Summarization, translation, data annotation, structured information extraction
-   - **Report Generation**: Generate standardized text reports based on existing structured data
-2. Assistant Applications: Uncertain user input requirements
-   - **Multi-Round Dialogue**: Handle complex user requests through workflow orchestration
-   - **Intelligent Planning**: Decompose complex tasks into executable steps
-   - **Dynamic Decision Making**: Adjust workflows based on context and tool call results
+1. **Text Processing Pipelines**: Build stable pipelines for classification, summarization, translation and structured extraction with prompt templates and post-processing.
+2. **Unified Configuration Management**: Centrally manage API keys, model parameters and provider settings across multiple models and providers.
+3. **Model Routing and Fallback**: Select models by tags and priority, with automatic fallback to balance cost, speed and quality.
+4. **Task Orchestration**: Support serial and parallel LLM tasks with concurrency limits and stop control.
 
-In this framework, prompt templates are core, and dialogue context is supplementary. It encourages optimizing prompt quality through careful template parameter orchestration instead of stacking dialogue context, thereby avoiding information forgetting and misguidance.
+In this framework, prompt templates are core, and dialogue context is supplementary. Careful template parameter orchestration is encouraged instead of stacking dialogue context, thereby avoiding information forgetting and misguidance.
 
 ### 1.4 Architecture Overview
 The framework adopts a layered architecture:
 1. User Application Layer: Business logic implementation
-2. Application Layer (LLMApplication / LLMWorkflow): Template management, workflow orchestration, result processing
+2. Application Layer (LLMApplication / LLMWorkflow): Module configuration, template rendering, result processing and lightweight orchestration
 3. Transport Layer (LLMClient / Channel): Request sending, streaming response transmission, microservice communication
-4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting, retries, and model routing
+4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting, retries and model routing
 5. LLM Provider API (OpenAI / Anthropic, etc.): Underlying LLM services
 
 ## 2. Data Model Classes
@@ -373,7 +370,7 @@ result = await app.call(direct_request)
 ### 3.2 LLMWorkflow Class
 
 #### 3.2.1 Core Concepts
-LLMWorkflow extends LLMApplication, supporting dynamic task chains and parallel subtask execution. Workflow paths can be predefined or dynamically adjusted during execution based on LLM outputs or task results.
+LLMWorkflow extends LLMApplication and provides lightweight task chains and parallel subtask execution: task submission, waiting, stop, concurrency limits and task transitions. The workflow path can be predefined, or dynamically adjusted at runtime based on LLM output or task results.
 
 Core concepts:
 - Submit tasks for execution via `submit(task)`, with built-in concurrency control to automatically limit the number of parallel tasks and avoid resource exhaustion.
@@ -707,7 +704,7 @@ def make_simple_response(
 
 ## 5. Data Interface Layer
 
-LLM Provider Management
+This is one of the framework's primary capabilities: unifying request/response formats across providers, model routing and request execution.
 
 ### 5.1 LLMFormatStrategy Format Strategy
 Unified handling of request/response formats for different LLM providers, achieving vendor agnosticism.
@@ -1334,7 +1331,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 9. Microservices
+## 9. Deployment and Integration
 
 ### 9.1 Application Scenarios
 The aitoolman microservice architecture is suitable for the following scenarios:

@@ -1,49 +1,48 @@
-# aitoolman - A Controllable, Transparent LLM Application Framework
+# aitoolman - A Controllable, Transparent LLM Middleware
 
 * [中文简介](./docs/README.zh.md) | [完整介绍（可用于AI理解）](docs/quick_start.md) （所有文档以中文为准）
 * [One-page Quick Start (for human and AI)](./docs/quick_start.en.md)
 
 ## Project Introduction
-aitoolman is a developer-focused LLM (Large Language Model) application framework designed to address pain points of existing frameworks such as **vendor lock-in, unclear workflows, and debugging difficulties**. The framework positions AI as a normal worker, emphasizing **direct user control over all prompts, data flows, and control flows** to help developers quickly build stable, debuggable LLM applications.
+aitoolman is a developer-focused LLM (Large Language Model) middleware designed to address pain points such as **vendor lock-in of native SDKs** and **unclear workflows and debugging difficulties of application frameworks**. The library unifies streaming and batch inference interfaces, centrally manages multiple models and providers, and provides simple prompt templates and post-processing pipelines, helping developers quickly build stable, debuggable LLM applications.
 
 ## Design Principles
-1. **Full User Control**: All prompts, data flows, and control flows are dominated by user code. The LLM only acts as an execution tool, with **no unexpected operations, hidden prompts and business logic**.
+1. **Full User Control**: All prompts, data flows, and control flows are dominated by user code; the LLM serves as an execution tool that follows predefined instructions, with **no unexpected operations, hidden prompts and business logic**.
 2. **Transparent & Debuggable Workflows**: All data sent to and received from LLMs is customizable and auditable, making it easy to troubleshoot issues and optimize prompts.
-3. **Vendor-agnostic Architecture**: Unified abstraction layer natively supports multiple LLM providers, enabling seamless model switching while leveraging each provider's unique features.
+3. **Vendor-agnostic Architecture**: A unified abstraction layer natively supports multiple LLM providers, enabling seamless model switching while leveraging each provider's unique features.
 4. **Modular Design**: Components have single responsibilities, making them easy to test, replace, and reuse.
-5. **Production-grade Features**: Built-in resource management, error handling, microservice deployment, and monitoring capabilities, ready for direct production use.
+5. **Deployment-friendly Features**: Built-in resource management, error handling, microservice/HTTP integration, monitoring and auditing, ready for production use.
 
-| Dimension              | aitoolman                                                        | Traditional Agent Frameworks                                              |
-|------------------------|------------------------------------------------------------------|---------------------------------------------------------------------------|
-| LLM's Role             | **LLM is a "worker", only executes predefined instructions**     | LLM is an autonomous "agent" with decision-making capabilities            |
-| Control                | User has full control over workflows                             | Framework implies hidden control flows                                    |
-| Prompts                | Developers write all prompts with full customization             | Includes many default prompts, high adaptation cost for custom scenarios  |
-| Multi-model Adaptation | Natively supports multi-vendor with low switching cost           | Optimized for single platforms, high adaptation cost                      |
-| Feature Boundaries     | Focuses on LLM function orchestration, no redundant dependencies | Bulky dependencies with built-in vector indexing, RAG, and other features |
-| Use Cases              | Controllable workflow orchestration, batch task processing       | Autonomous agents, exploratory applications                               |
+| Dimension      | Native LLM SDK              | aitoolman                                                                    | Full Agent Framework                                         |
+|----------------|-----------------------------|------------------------------------------------------------------------------|--------------------------------------------------------------|
+| LLM's Role     | Called directly by app code | LLM is a worker executing predefined instructions                            | LLM is an autonomous agent with decision-making capabilities |
+| Control        | Managed by app code         | User has full control over workflows                                         | Framework implies hidden control flows                       |
+| Prompts        | Assembled in app code       | Developers write templates with full customization                           | Includes many default prompts                                |
+| Multi-provider | Per-SDK adaptation          | Native multi-provider abstraction and model routing                          | Usually single platform or plugin-based                      |
+| Boundaries     | Low-level API only          | Provider abstraction, application layer, lightweight orchestration           | Built-in vector index, RAG, planning, memory                 |
+| Use Cases      | Simple API calls            | Unified access, template-based calls, model routing, on-demand orchestration | Autonomous agents, exploratory applications                  |
 
 ## Core Features
-- **Unified Call Interface**: Consistent interfaces for streaming output or batch calls; construct templated requests or raw requests with context as needed to simplify development experience.
-- **Prompt Templating**: Encapsulate prompts as reusable Jinja2 templates for centralized management, avoiding scattered prompt definitions.
-- **Flexible Workflow Orchestration**: Supports serial, parallel, and dynamic workflows, where execution paths are determined dynamically to easily handle complex multi-step tasks.
-- **Native Tool Call Support**: Supports classic function call patterns, or leverages tool calls to implement intent recognition.
-- **Microservice Architecture**: Deploy LLM schedulers as independent services for unified resource management, key isolation, and global auditing.
-- **Model Routing**: Group models by tags, support multi-tag matching and automatic weight calculation, and simplify unified adjustment of model resources to balance cost and performance.
+- **Multi-provider Unified Abstraction**: Unified data models and per-provider format strategies with a unified streaming/batch inference interface, plus retries and cancellation across LLM vendors.
+- **Application Layer Abstraction**: Module configuration, Jinja2 prompt templates, unified module results, post-processing and audit events.
+- **Model Routing**: Group models by tags, support multi-tag matching and weight calculation, filter by input token limits, and enable fallback across candidates.
+- **Streaming Processing**: Streaming output, reasoning content, XML tag distribution and channel demultiplexing.
+- **Lightweight Orchestration**: Task chains, concurrency limits, stop control and tool-call transitions.
+- **Deployment & Integration**: CLI, OpenAI-compatible HTTP service, ZeroMQ microservice and monitoring for deployment and integration.
 
 ## Use Cases
-aitoolman is suitable for various scenarios requiring controllable, reliable LLM integration:
+aitoolman is suitable for the following scenarios:
 
-- **Professional Text Processing**: Summarization, translation, data annotation, structured information extraction.
-- **Report Generation**: Generate standardized text reports based on structured data.
-- **Controllable Multi-turn Dialogues**: Handle complex user requests through predefined workflows to ensure compliance with business rules.
-- **Intelligent Task Orchestration**: Decompose complex business tasks into executable steps, dynamically adjusting workflow branches based on results.
-- **Batch Task Processing**: Efficiently process large volumes of standardized tasks in parallel, such as ticket classification, content moderation, and data cleansing.
+- **Text Processing Pipelines**: Build stable pipelines for classification, summarization, translation and structured extraction with prompt templates and post-processing.
+- **Unified Configuration Management**: Centrally manage API keys, model parameters and provider settings across multiple models and providers.
+- **Model Routing & Fallback**: Select models by tags and priority, automatically falling back to maintain a balance of cost, speed and quality.
+- **Task Orchestration**: Support serial and parallel LLM tasks with concurrency limits and stop control.
 
 ## Architecture Overview
 1. User Application Layer: Business logic implementation
-2. Application Layer (LLMApplication / LLMWorkflow): Template management, workflow orchestration, result processing
+2. Application Layer (LLMApplication / LLMWorkflow): Module configuration, template rendering, result processing and lightweight orchestration
 3. Transport Layer (LLMClient / Channel): Request sending, streaming response transmission, microservice communication
-4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, rate limiting & retries
+4. Data Interface Layer (ProviderManager): Multi-vendor adaptation, request scheduling, retry, rate limiting and model routing
 5. LLM Provider APIs (OpenAI / Anthropic, etc.): Underlying LLM services
 
 ## Quick Start
@@ -51,7 +50,7 @@ aitoolman is suitable for various scenarios requiring controllable, reliable LLM
 2. Refer to the [Developer Documentation](docs/quick_start.en.md) for detailed framework docs, API references, and sample code
 3. [Configure](docs/config.en.md) LLM provider API keys and model parameters (llm_provider.toml)
 4. Write prompt template configurations (app_prompt.toml)
-5. Build application logic using LLMApplication or LLMWorkflow
+5. Build application logic with LLMApplication; use LLMWorkflow for serial or parallel task chains
 
 ## Best Practices
 
