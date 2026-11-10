@@ -31,7 +31,8 @@
 | `max_input_tokens` | 整数  | 无（不限）    | 模型支持的最大输入Token数                    |
 | `bytes_per_token`  | 浮点数 | 4.0      | 单Token对应的UTF-8字节数估算值，用于Token数估算     |
 | `rank_adjust_ratio`| 浮点数 | 0.25     | 权重调整参数，用于模型路由算法中的排名权重计算          |
-| `loop_detect_length` | 整数 | 0 | 流式死循环检测的循环窗口长度，<=0 关闭，推荐 400 |
+| `loop_detect_length` | 整数 | 0 | 流式死循环检测的预期能检测到的循环长度（字符），<=0 关闭，推荐 400 |
+
 
 
 ### 1.3 [api."模型名称"] 部分
@@ -49,7 +50,7 @@
 | `body_options` | 字典  | 继承自 `[default].body_options`     | 该模型默认的请求选项，覆盖 default 中的所有选项    |
 | `max_input_tokens` | 整数  | 继承自 `[default].max_input_tokens` | 该模型支持的最大输入Token数 |
 | `bytes_per_token`  | 浮点数 | 继承自 `[default].bytes_per_token`  | 该模型单Token对应的UTF-8字节数估算值 |
-| `loop_detect_length` | 整数 | 继承自 `[default].loop_detect_length` | 该模型流式死循环检测的循环窗口长度 |
+| `loop_detect_length` | 整数 | 继承自 `[default].loop_detect_length` | 该模型流式死循环检测的预期能检测到的循环长度（字符） |
 | `enable`           | 布尔值 | true                            | 设为false则暂停该模型的调度使用   |
 
 

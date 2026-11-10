@@ -1,4 +1,3 @@
-
 # Configuration File Documentation
 
 ## 1. Server Configuration (llm_provider.toml)
@@ -32,7 +31,8 @@ Default configuration inherited by all model configurations.
 | `max_input_tokens` | Integer | None (No limit) | Maximum input token count supported by the model                            |
 | `bytes_per_token`  | Float   | 4.0             | Estimated UTF-8 bytes per token, used for token count estimation            |
 | `rank_adjust_ratio`| Float   | 0.25            | Weight adjustment parameter for rank weight calculation in model routing    |
-| `loop_detect_length` | Integer | 0 | Loop window length for streaming loop detection; <=0 disables it; recommended 400 |
+| `loop_detect_length` | Integer | 0 | Expected loop length (in characters) that can be detected by streaming loop detection; <=0 disables it; recommended 400 |
+
 
 
 ### 1.3 [api."Model Name"] Section
@@ -50,7 +50,7 @@ Specific configuration for each model, model names can be customized.
 | `body_options`    | Dict    | Inherited from `[default].body_options`     | Default request options for this model, overrides all options in `[default]`. |
 | `max_input_tokens` | Integer | Inherited from `[default].max_input_tokens` | Maximum input token count for this model            |
 | `bytes_per_token`  | Float   | Inherited from `[default].bytes_per_token`  | Estimated UTF-8 bytes per token for this model      |
-| `loop_detect_length` | Integer | Inherited from `[default].loop_detect_length` | Loop window length for streaming loop detection |
+| `loop_detect_length` | Integer | Inherited from `[default].loop_detect_length` | Expected loop length (in characters) that can be detected by streaming loop detection on this model |
 | `enable`           | Boolean | true                                        | Set to false to suspend scheduling of this model    |
 
 
