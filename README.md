@@ -25,7 +25,7 @@ aitoolman is a developer-focused LLM (Large Language Model) middleware designed 
 ## Core Features
 - **Multi-provider Unified Abstraction**: Unified data models and per-provider format strategies with a unified streaming/batch inference interface, plus retries and cancellation across LLM vendors.
 - **Application Layer Abstraction**: Module configuration, Jinja2 prompt templates, unified module results, post-processing and audit events.
-- **Model Routing**: Group models by tags, support multi-tag matching and weight calculation, filter by input token limits, and enable fallback across candidates.
+- **Model Routing**: Group models by tags, support multiple providers per model, multi-tag matching and weight calculation, filter by input token limits, and enable fallback across candidates.
 - **Streaming Processing**: Streaming output, reasoning content, XML tag distribution and channel demultiplexing.
 - **Lightweight Orchestration**: Task chains, concurrency limits, stop control and tool-call transitions.
 - **Deployment & Integration**: CLI, OpenAI-compatible HTTP service, ZeroMQ microservice and monitoring for deployment and integration.

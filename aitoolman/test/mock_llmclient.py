@@ -1,7 +1,7 @@
 import re
 import json
 import inspect
-from typing import Dict, List, Any, Callable, Optional, Union, NamedTuple
+from typing import Dict, List, Any, Callable, Optional, Tuple, Union, NamedTuple
 
 from .. import model as _model
 from .. import client as _client
@@ -260,8 +260,15 @@ class MockLLMClient(_client.LLMClient):
     async def list_tags(self) -> Dict[str, List[_model.ModelInfo]]:
         return {}
 
-    async def resolve_model(self, tags: Union[str, List[str]], messages = None, context_id: str = None) -> str:
-        return 'test_model'
+    async def resolve_model(
+            self,
+            tags: str,
+            messages=None,
+            context_id: Optional[str] = None,
+            model_rank: int = 0,
+            rank_by_model: bool = False
+    ) -> List[Tuple[str, float]]:
+        return [('test_model', 1.0)]
 
     async def update_config(self, new_config: Dict[str, Any]):
         pass
@@ -273,4 +280,7 @@ class MockLLMClient(_client.LLMClient):
         pass
 
     async def update_model_tag(self, tag: str, models: List[str]):
+        pass
+
+    async def update_model_provider(self, provider_name: str, providers: List[str]):
         pass

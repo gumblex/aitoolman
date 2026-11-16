@@ -378,6 +378,10 @@ class TestAnthropicFormat(unittest.TestCase):
         self.assertEqual(event.content, "")
 
 
+def _names(result):
+    return [name for name, _ in result]
+
+
 def make_test_config():
     return {
         'default': {
@@ -385,6 +389,7 @@ def make_test_config():
             'max_retries': 2,
             'parallel': 1,
             'api_type': 'openai',
+            'headers': {'X-Default': 'default'},
         },
         'api': {
             'model-a': {
@@ -407,180 +412,214 @@ def make_test_config():
                 'url': 'http://localhost:8002/v1/chat/completions',
                 'enable': False,
             },
+            'provider-1': {
+                'type': 'openai',
+                'model': 'provider-1',
+                'url': 'http://localhost:8010/v1/chat/completions',
+                'parallel': 2,
+            },
+            'provider-2': {
+                'type': 'openai',
+                'model': 'provider-2',
+                'url': 'http://localhost:8011/v1/chat/completions',
+                'parallel': 2,
+                'max_input_tokens': 1000,
+                'bytes_per_token': 4.0,
+            },
         },
         'model_tag': {
             'fast': ['model-a', 'model-b'],
             'cheap': ['model-b'],
+            'deep': ['deepseek'],
         },
-        'model_alias': {
-            'alias_a': 'model-a',
+        'model_provider': {
+            'deepseek': ['provider-2', 'provider-1'],
         },
     }
 
 
 class TestResolveModel(unittest.TestCase):
-    def test_resolve_model_exact_match(self):
-        """精确匹配优先，传入真实模型名直接返回"""
-        manager = LLMProviderManager(make_test_config())
-        result = manager.resolve_model(['model-a'])
-        self.assertEqual(result, ['model-a'])
+    def setUp(self):
+        self.manager = LLMProviderManager(make_test_config())
 
-    def test_resolve_model_tag_match(self):
-        """标签匹配，返回权重最高的模型"""
-        manager = LLMProviderManager(make_test_config())
-        result = manager.resolve_model(['fast'])
-        # model-a is first in 'fast' tag, so it has highest weight
-        self.assertEqual(result[0], 'model-a')
+    def test_exact_api_model(self):
+        """精确匹配真实模型名直接返回单元素评分列表"""
+        self.assertEqual(self.manager.resolve_model('model-a'),
+                         [('model-a', 1.0)])
 
-    def test_resolve_model_multiple_tags(self):
-        """多标签交集匹配"""
-        manager = LLMProviderManager(make_test_config())
-        # 'fast' has model-a, model-b; 'cheap' has model-b
-        # intersection is model-b
-        result = manager.resolve_model(['fast', 'cheap'])
-        self.assertEqual(result[0], 'model-b')
+    def test_tag_returns_scored_tuples(self):
+        """标签匹配返回 (提供商, 模型层评分) 元组列表"""
+        result = self.manager.resolve_model('fast', context_id='test-ctx')
+        self.assertEqual(_names(result)[0], 'model-a')
+        for item in result:
+            self.assertIsInstance(item, tuple)
+            self.assertEqual(len(item), 2)
+            self.assertIsInstance(item[1], float)
 
-    def test_resolve_model_disabled(self):
+    def test_multiple_tags_intersection(self):
+        """多标签按交集匹配，模型层评分写入元组"""
+        result = self.manager.resolve_model('fast,cheap', context_id='test-ctx')
+        self.assertEqual(_names(result), ['model-b'])
+
+    def test_disabled_model_raises(self):
         """禁用模型不参与路由"""
-        manager = LLMProviderManager(make_test_config())
         with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model(['model-c'])
+            self.manager.resolve_model('model-c')
 
-    def test_resolve_model_token_filter(self):
-        """Token限制过滤"""
-        manager = LLMProviderManager(make_test_config())
-        # model-b has max_input_tokens=1000, bytes_per_token=4.0
-        # Create messages that exceed 1000 tokens
-        long_text = "a" * 5000  # 5000 bytes / 4.0 = 1250 tokens > 1000
+    def test_unknown_tag_raises(self):
+        """未配置的标签直接报错，不做回退"""
+        with self.assertRaises(LLMNoAvailableModelError):
+            self.manager.resolve_model('nonexistent_tag')
+
+    def test_token_filter(self):
+        """Token 限制过滤 api 模型"""
+        long_text = "a" * 5000
         messages = [Message.from_content(long_text, role="user")]
-        # 'fast' tag has model-a (no limit) and model-b (1000 token limit)
-        # model-b should be filtered out, leaving model-a
-        result = manager.resolve_model(['fast'], messages)
-        self.assertEqual(result[0], 'model-a')
+        result = self.manager.resolve_model('fast', messages, context_id='test-ctx')
+        self.assertEqual(_names(result), ['model-a'])
 
-    def test_resolve_model_no_available(self):
-        """无可用模型抛出 LLMNoAvailableModelError"""
-        manager = LLMProviderManager(make_test_config())
+    def test_comma_unknown_item_raises(self):
+        """逗号分隔的项不自动去空格，未知项直接报错"""
         with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model(['nonexistent_tag'])
+            self.manager.resolve_model('fast, cheap')
+        with self.assertRaises(LLMNoAvailableModelError):
+            self.manager.resolve_model(' model-a')
 
-    def test_resolve_model_alias_compat(self):
-        """原 model_alias 自动转为标签"""
-        manager = LLMProviderManager(make_test_config())
-        result = manager.resolve_model(['alias_a'])
-        self.assertEqual(result[0], 'model-a')
-
-    def test_resolve_model_string_input_equivalence(self):
-        """字符串输入与对应列表输入结果一致"""
-        manager = LLMProviderManager(make_test_config())
-        # 单标签字符串与单元素列表等价
-        self.assertEqual(
-            manager.resolve_model('fast', context_id='test-ctx'),
-            manager.resolve_model(['fast'], context_id='test-ctx'))
-        # 逗号分隔多标签字符串与列表等价
-        self.assertEqual(
-            manager.resolve_model('fast,cheap', context_id='test-ctx'),
-            manager.resolve_model(['fast', 'cheap'], context_id='test-ctx'))
-        # 字符串中的真实模型名与别名同样与列表等价
-        self.assertEqual(
-            manager.resolve_model('model-a', context_id='test-ctx'),
-            manager.resolve_model(['model-a'], context_id='test-ctx'))
-        self.assertEqual(
-            manager.resolve_model('alias_a', context_id='test-ctx'),
-            manager.resolve_model(['alias_a'], context_id='test-ctx'))
-
-    def test_resolve_model_slash_rank_rotation(self):
-        """字符串末尾 /N 后缀对最终候选列表循环旋转"""
-        manager = LLMProviderManager(make_test_config())
-        # fast 标签权重可区分，无后缀结果为 [model-a, model-b]
-        base = manager.resolve_model(['fast'], context_id='test-ctx')
+    def test_global_rank_rotation(self):
+        """全局 :N 后缀对最终提供商列表循环旋转"""
+        base = _names(self.manager.resolve_model('fast', context_id='test-ctx'))
         self.assertEqual(base, ['model-a', 'model-b'])
-        # /2 循环左移一位
-        result = manager.resolve_model('fast/2', context_id='test-ctx')
-        self.assertEqual(result, ['model-b', 'model-a'])
-        # 旋转后列表长度不变
-        self.assertEqual(len(result), len(base))
-        # /1 与不加后缀完全一致
+        rotated = _names(self.manager.resolve_model('fast:2', context_id='test-ctx'))
+        self.assertEqual(rotated, ['model-b', 'model-a'])
+
+    def test_model_rank_accumulates(self):
+        """model_rank 与 :N 的旋转值相加"""
+        base = _names(self.manager.resolve_model('fast', context_id='test-ctx'))
         self.assertEqual(
-            manager.resolve_model('fast/1', context_id='test-ctx'),
+            _names(self.manager.resolve_model(
+                'fast', context_id='test-ctx', model_rank=1)),
+            _names(self.manager.resolve_model('fast:2', context_id='test-ctx')))
+        self.assertEqual(
+            _names(self.manager.resolve_model(
+                'fast', context_id='test-ctx', model_rank=2)),
             base)
 
-    def test_resolve_model_slash_rank_with_tag_rank_combined(self):
-        """组合语法：标签内 :rank 与末尾 /N 组合，等价于列表输入加旋转"""
-        config = make_nested_test_config()
-        config['model_tag']['code'] = ['model-a', 'model-b', 'model-d']
-        config['model_tag']['image'] = ['model-a', 'model-b', 'model-d']
-        manager = LLMProviderManager(config)
-        # 'code:2,image:3/3' 解析为 ['code:2', 'image:3'] 加旋转值 3
-        base = manager.resolve_model(['code:2', 'image:3'], context_id='test-ctx')
-        expected = base[2:] + base[:2]  # 旋转值 3：循环左移 2 位
-        result = manager.resolve_model('code:2,image:3/3', context_id='test-ctx')
-        self.assertEqual(result, expected)
-        self.assertEqual(len(result), 3)
+    def test_invalid_global_rank_raises(self):
+        """非法 :N 后缀直接报语法错误"""
+        with self.assertRaises(LLMNoAvailableModelError):
+            self.manager.resolve_model('fast:abc')
+        with self.assertRaises(LLMNoAvailableModelError):
+            self.manager.resolve_model('fast:')
 
-    def test_resolve_model_slash_invalid_suffix_fallback(self):
-        """非法后缀整段回退为字面标签名处理"""
-        manager = LLMProviderManager(make_test_config())
-        # 'code/abc'、'code/' 不在配置中，按字面查找抛出无可用模型错误
+    def test_slash_is_not_special(self):
+        """废除 /N 语法，含斜杠的整串按普通标签名处理"""
         with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model('code/abc')
-        with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model('code/')
-        # 配置中存在名字含斜杠的标签时，按字面命中正常返回
+            self.manager.resolve_model('fast/2')
+
+    def test_literal_tag_with_slash(self):
+        """配置中存在含斜杠的标签名时按字面匹配"""
         config = make_test_config()
         config['model_tag']['tag/abc'] = ['model-a']
         manager = LLMProviderManager(config)
-        self.assertEqual(manager.resolve_model('tag/abc'), ['model-a'])
+        self.assertEqual(manager.resolve_model('tag/abc'), [('model-a', 0.0)])
 
-    def test_resolve_model_comma_no_strip_spaces(self):
-        """逗号分隔的项不自动去空格，带空格的项按原文匹配"""
-        manager = LLMProviderManager(make_test_config())
-        # ' cheap' 带前导空格不参与匹配，仅 'fast' 生效
-        result = manager.resolve_model('fast, cheap', context_id='test-ctx')
-        self.assertEqual(
-            result, manager.resolve_model(['fast'], context_id='test-ctx'))
-        # ' model-a' 带前导空格不参与精确匹配
+    def test_logical_model_providers(self):
+        """逻辑模型名展开为排序后的提供商列表"""
+        queue_map = {'provider-1': 1, 'provider-2': 2}
+        with mock.patch.object(self.manager, 'get_queue_length',
+                               side_effect=lambda n: queue_map.get(n, 0)):
+            result = self.manager.resolve_model('deepseek', context_id='test-ctx')
+        self.assertEqual(_names(result), ['provider-1', 'provider-2'])
+        self.assertTrue(all(score == 1.0 for _, score in result))
+
+    def test_logical_model_in_tag(self):
+        """标签可引用逻辑模型名并展开提供商"""
+        queue_map = {'provider-1': 1, 'provider-2': 2}
+        with mock.patch.object(self.manager, 'get_queue_length',
+                               side_effect=lambda n: queue_map.get(n, 0)):
+            result = self.manager.resolve_model('deep', context_id='test-ctx')
+        self.assertEqual(_names(result), ['provider-1', 'provider-2'])
+
+    def test_logical_model_token_filter(self):
+        """逻辑模型按各提供商 Token 限制过滤"""
+        long_text = "a" * 5000
+        messages = [Message.from_content(long_text, role="user")]
+        with mock.patch.object(self.manager, 'get_queue_length', return_value=0):
+            result = self.manager.resolve_model('deepseek', messages)
+        self.assertEqual(_names(result), ['provider-1'])
+
+    def test_logical_model_all_providers_disabled(self):
+        """逻辑模型的提供商全部禁用时不可用"""
+        config = make_test_config()
+        config['api']['provider-1']['enable'] = False
+        config['api']['provider-2']['enable'] = False
+        manager = LLMProviderManager(config)
         with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model(' model-a')
+            manager.resolve_model('deepseek')
+
+    def test_rank_by_model_rotates_models(self):
+        """rank_by_model 决定先旋转模型层还是先展开提供商"""
+        config = make_test_config()
+        config['model_tag']['combo'] = ['deepseek', 'model-a']
+        manager = LLMProviderManager(config)
+        queue_map = {'provider-1': 1, 'provider-2': 2, 'model-a': 0}
+        with mock.patch.object(manager, 'get_queue_length',
+                               side_effect=lambda n: queue_map.get(n, 0)):
+            by_provider = manager.resolve_model('combo:2', context_id='test-ctx')
+            by_model = manager.resolve_model(
+                'combo:2', context_id='test-ctx', rank_by_model=True)
+        self.assertEqual(_names(by_provider),
+                         ['provider-2', 'model-a', 'provider-1'])
+        self.assertEqual(_names(by_model),
+                         ['model-a', 'provider-1', 'provider-2'])
 
 
 class TestListModels(unittest.TestCase):
     def test_list_models_all(self):
-        """无tag返回所有可用模型"""
+        """无 tag 返回所有未禁用 api 模型"""
         manager = LLMProviderManager(make_test_config())
-        models = manager.list_models()
-        names = [m.name for m in models]
+        names = [m.name for m in manager.list_models()]
         self.assertIn('model-a', names)
-        self.assertIn('model-b', names)
-        self.assertNotIn('model-c', names)  # disabled
+        self.assertIn('provider-1', names)
+        self.assertIn('provider-2', names)
+        self.assertNotIn('model-c', names)
 
     def test_list_models_by_tag(self):
-        """按tag过滤"""
+        """按标签返回提供商信息，按权重降序"""
         manager = LLMProviderManager(make_test_config())
-        models = manager.list_models('fast')
-        names = [m.name for m in models]
-        self.assertIn('model-a', names)
-        self.assertIn('model-b', names)
-        # Should be sorted by weight descending, model-a first
+        names = [m.name for m in manager.list_models('fast')]
         self.assertEqual(names[0], 'model-a')
 
-    def test_list_models_exclude_disabled(self):
-        """排除禁用模型"""
+    def test_list_models_by_logical_model(self):
+        """逻辑模型返回其全部提供商"""
         manager = LLMProviderManager(make_test_config())
-        models = manager.list_models()
-        names = [m.name for m in models]
-        self.assertNotIn('model-c', names)
+        queue_map = {'provider-1': 1, 'provider-2': 2}
+        with mock.patch.object(manager, 'get_queue_length',
+                               side_effect=lambda n: queue_map.get(n, 0)):
+            models = manager.list_models('deepseek')
+        self.assertEqual([m.name for m in models],
+                         ['provider-1', 'provider-2'])
+
+    def test_provider_model_info_shares_tag_weight(self):
+        """提供商的 ModelInfo.tags 通过逻辑模型反查标签权重"""
+        manager = LLMProviderManager(make_test_config())
+        by_name = {m.name: m for m in manager.list_models('deep')}
+        self.assertIn('provider-1', by_name)
+        self.assertIn('deep', by_name['provider-1'].tags)
 
 
 class TestListTags(unittest.TestCase):
     def test_list_tags_basic(self):
-        """返回所有配置标签及各标签下的模型信息列表"""
+        """返回标签及逻辑模型名条目"""
         manager = LLMProviderManager(make_test_config())
         tags = manager.list_tags()
-        self.assertEqual(set(tags.keys()), {'fast', 'cheap', 'alias_a'})
+        self.assertEqual(set(tags.keys()), {'fast', 'cheap', 'deep', 'deepseek'})
         self.assertEqual([m.name for m in tags['fast']], ['model-a', 'model-b'])
         self.assertEqual([m.name for m in tags['cheap']], ['model-b'])
-        self.assertEqual([m.name for m in tags['alias_a']], ['model-a'])
+        self.assertEqual([m.name for m in tags['deep']],
+                         ['provider-2', 'provider-1'])
+        self.assertEqual([m.name for m in tags['deepseek']],
+                         ['provider-2', 'provider-1'])
 
     def test_list_tags_flattens_nested(self):
         """嵌套模型列表被展平"""
@@ -596,16 +635,23 @@ class TestListTags(unittest.TestCase):
     def test_list_tags_exclude_disabled(self):
         """排除禁用模型"""
         config = make_test_config()
-        # model-c 已禁用（enable=False），将其加入标签以覆盖过滤路径
         config['model_tag']['fast'].append('model-c')
         manager = LLMProviderManager(config)
         tags = manager.list_tags()
         self.assertEqual([m.name for m in tags['fast']], ['model-a', 'model-b'])
 
+    def test_list_tags_exclude_disabled_provider(self):
+        """逻辑模型的全禁用提供商被排除"""
+        config = make_test_config()
+        config['api']['provider-2']['enable'] = False
+        manager = LLMProviderManager(config)
+        tags = manager.list_tags()
+        self.assertEqual([m.name for m in tags['deep']], ['provider-1'])
+        self.assertEqual([m.name for m in tags['deepseek']], ['provider-1'])
+
     def test_list_tags_filters_unconfigured(self):
         """标签中未在 api 配置的模型名被过滤"""
         manager = LLMProviderManager(make_test_config())
-        # 构造期校验会拒绝未配置的模型名，直接注入以覆盖过滤路径
         manager.model_tag['fast'] = ['model-a', 'model-x']
         tags = manager.list_tags()
         self.assertEqual([m.name for m in tags['fast']], ['model-a'])
@@ -621,74 +667,98 @@ class TestListTags(unittest.TestCase):
         self.assertEqual([m.name for m in tags['fast']], ['model-a'])
 
 
-class TestConfigUpdate(unittest.TestCase):
-    def test_update_config(self):
-        """全量配置更新"""
-        manager = LLMProviderManager(make_test_config())
-        new_config = make_test_config()
-        new_config['api']['model-a']['parallel'] = 8
-        manager.update_config(new_config)
-        models = manager.list_models()
-        model_a = [m for m in models if m.name == 'model-a'][0]
-        self.assertEqual(model_a.parallel, 8)
+class TestModelProviderConfig(unittest.TestCase):
+    def test_conflict_with_api_key(self):
+        config = make_test_config()
+        config['model_provider']['model-a'] = ['provider-1']
+        with self.assertRaises(ValueError):
+            LLMProviderManager(config)
 
-    def test_update_api_config(self):
-        """单模型配置更新"""
-        test_config = make_test_config()
-        manager = LLMProviderManager(test_config)
-        updated = test_config['api']['model-a'].copy()
-        updated.update({'parallel': 10})
-        manager.update_api_config('model-a', updated)
-        models = manager.list_models()
-        model_a = [m for m in models if m.name == 'model-a'][0]
-        self.assertEqual(model_a.parallel, 10)
+    def test_conflict_with_tag(self):
+        config = make_test_config()
+        config['model_provider']['fast'] = ['provider-1']
+        with self.assertRaises(ValueError):
+            LLMProviderManager(config)
 
-    def test_change_api_status(self):
-        """启用/禁用模型"""
-        manager = LLMProviderManager(make_test_config())
-        # model-c is initially disabled
-        self.assertIn('model-c', manager.disabled_models)
-        # Enable model-c
-        manager.change_api_status('model-c', True)
-        self.assertNotIn('model-c', manager.disabled_models)
-        models = manager.list_models()
-        names = [m.name for m in models]
-        self.assertIn('model-c', names)
-        # Disable model-a
-        manager.change_api_status('model-a', False)
-        self.assertIn('model-a', manager.disabled_models)
-        models = manager.list_models()
-        names = [m.name for m in models]
-        self.assertNotIn('model-a', names)
+    def test_invalid_values(self):
+        for value in ([], 'provider-1', ['provider-x'], [1]):
+            with self.subTest(value=value):
+                config = make_test_config()
+                config['model_provider']['bad'] = value
+                with self.assertRaises(ValueError):
+                    LLMProviderManager(config)
 
-    def test_update_model_tag(self):
-        """更新标签"""
-        manager = LLMProviderManager(make_test_config())
-        manager.update_model_tag('fast', ['model-b', 'model-a'])
-        result = manager.resolve_model(['fast'])
-        # Now model-b is first, so it has highest weight
-        self.assertEqual(result, ['model-b', 'model-a'])
+    def test_tag_must_reference_known_model(self):
+        config = make_test_config()
+        config['model_tag']['bad'] = ['unknown']
+        with self.assertRaises(ValueError):
+            LLMProviderManager(config)
+
+
+class TestUpdateModelProvider(unittest.TestCase):
+    def setUp(self):
+        self.manager = LLMProviderManager(make_test_config())
+
+    def test_update_model_provider(self):
+        """更新逻辑模型的提供商列表"""
+        self.manager.update_model_provider('deepseek', ['provider-1'])
+        with mock.patch.object(self.manager, 'get_queue_length', return_value=0):
+            result = self.manager.resolve_model('deepseek')
+        self.assertEqual(_names(result), ['provider-1'])
+
+    def test_update_invalid_values(self):
+        with self.assertRaises(ValueError):
+            self.manager.update_model_provider('model-a', ['provider-1'])
+        with self.assertRaises(ValueError):
+            self.manager.update_model_provider('fast', ['provider-1'])
+        with self.assertRaises(ValueError):
+            self.manager.update_model_provider('deepseek', [])
+        with self.assertRaises(ValueError):
+            self.manager.update_model_provider('deepseek', [1])
+        with self.assertRaises(ValueError):
+            self.manager.update_model_provider('deepseek', ['provider-x'])
+
+    def test_update_api_config_logical_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.manager.update_api_config('deepseek', {'url': 'x', 'model': 'x'})
+
+    def test_update_model_tag_logical_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.manager.update_model_tag('deepseek', ['model-a'])
+
+
+class TestUserAgentAndHeaders(unittest.TestCase):
+    def setUp(self):
+        self.manager = LLMProviderManager(make_test_config())
+
+    def test_user_agent(self):
+        from aitoolman import VERSION
+        self.assertEqual(
+            self.manager.http_client.headers.get('user-agent'),
+            f'aitoolman/{VERSION}')
+
+    def test_http_client_has_only_user_agent(self):
+        self.assertNotIn('x-default', self.manager.http_client.headers)
+
+    def test_merge_headers(self):
+        merged = self.manager._merge_headers({'X-Model': 'model'})
+        self.assertEqual(merged['X-Default'], 'default')
+        self.assertEqual(merged['X-Model'], 'model')
+
+    def test_model_headers_override_default(self):
+        merged = self.manager._merge_headers({'X-Default': 'model'})
+        self.assertEqual(merged['X-Default'], 'model')
 
 
 class TestCalculateTagWeights(unittest.TestCase):
     def test_calculate_tag_weights(self):
         """验证权重预计算结果"""
         manager = LLMProviderManager(make_test_config())
-        # 'fast' tag: model-a (rank 0), model-b (rank 1)
         fast_weights = manager.model_tag_weights['fast']
-        self.assertIn('model-a', fast_weights)
-        self.assertIn('model-b', fast_weights)
-        # model-a should have higher weight than model-b
         self.assertGreater(fast_weights['model-a'], fast_weights['model-b'])
-        # Weights should sum approximately to 1
         self.assertAlmostEqual(sum(fast_weights.values()), 1.0, places=9)
-        # 'cheap' tag: model-b only
-        cheap_weights = manager.model_tag_weights['cheap']
-        self.assertEqual(cheap_weights, {'model-b': 1.0})
-        # alias_a tag (from model_alias)
-        alias_weights = manager.model_tag_weights.get('alias_a')
-        self.assertEqual(alias_weights, {'model-a': 1.0})
-
+        self.assertEqual(manager.model_tag_weights['cheap'], {'model-b': 1.0})
+        self.assertEqual(manager.model_tag_weights['deep'], {'deepseek': 1.0})
 
 
 def make_nested_test_config():
@@ -760,7 +830,6 @@ def make_nested_test_config():
             'cheap': ['model-b', ['model-d', 'model-e']],
             'same': [['model-f1', 'model-f2', 'model-f3']],
         },
-        'model_alias': {},
     }
 
 
@@ -771,70 +840,53 @@ class TestNestedModelList(unittest.TestCase):
         """嵌套组内模型共享排名权重"""
         manager = LLMProviderManager(make_nested_test_config())
         weights = manager.model_tag_weights['low_cost']
-        # model-d 和 model-e 共享位置2的权重，应该相等
         self.assertEqual(weights['model-d'], weights['model-e'])
-        # model-a (位置0) 权重最高
         self.assertGreater(weights['model-a'], weights['model-b'])
-        # model-b (位置1) 权重高于 model-d/e (位置2)
         self.assertGreater(weights['model-b'], weights['model-d'])
         self.assertGreaterEqual(sum(weights.values()), 1.0)
 
     def test_nested_resolve_model(self):
         """嵌套标签解析返回所有可用模型"""
         manager = LLMProviderManager(make_nested_test_config())
-        result = manager.resolve_model(['low_cost'])
-        # model-a 权重最高，排第一
-        self.assertEqual(result[0], 'model-a')
-        # model-d 和 model-e 都应在结果中
-        self.assertIn('model-d', result)
-        self.assertIn('model-e', result)
+        names = _names(manager.resolve_model('low_cost'))
+        self.assertEqual(names[0], 'model-a')
+        self.assertIn('model-d', names)
+        self.assertIn('model-e', names)
 
     def test_nested_multiple_tags(self):
         """多标签交集匹配嵌套列表"""
         manager = LLMProviderManager(make_nested_test_config())
-        # 'low_cost' 有 model-a, model-b, model-d, model-e
-        # 'cheap' 有 model-b, model-d, model-e
-        # 交集为 model-b, model-d, model-e
-        result = manager.resolve_model(['low_cost', 'cheap'])
-        self.assertIn('model-b', result)
-        self.assertIn('model-d', result)
-        self.assertIn('model-e', result)
-        self.assertNotIn('model-a', result)
+        names = _names(manager.resolve_model('low_cost,cheap'))
+        self.assertIn('model-b', names)
+        self.assertIn('model-d', names)
+        self.assertIn('model-e', names)
+        self.assertNotIn('model-a', names)
 
     def test_nested_token_filter(self):
-        """Token限制过滤嵌套组模型"""
+        """Token 限制过滤嵌套组模型"""
         manager = LLMProviderManager(make_nested_test_config())
-        # model-b 和 model-e 有 max_input_tokens=1000, bytes_per_token=4.0
-        long_text = "a" * 5000  # 5000 bytes / 4.0 = 1250 tokens > 1000
+        long_text = "a" * 5000
         messages = [Message.from_content(long_text, role="user")]
-        result = manager.resolve_model(['low_cost'], messages)
-        # model-b 和 model-e 被过滤，剩 model-a 和 model-d
-        self.assertIn('model-a', result)
-        self.assertIn('model-d', result)
-        self.assertNotIn('model-b', result)
-        self.assertNotIn('model-e', result)
+        names = _names(manager.resolve_model('low_cost', messages))
+        self.assertIn('model-a', names)
+        self.assertIn('model-d', names)
+        self.assertNotIn('model-b', names)
+        self.assertNotIn('model-e', names)
 
     def test_nested_mixed_list(self):
         """平面与嵌套列表混用兼容"""
         manager = LLMProviderManager(make_nested_test_config())
-        # 'fast' 标签为纯平面列表，行为不变
-        result_fast = manager.resolve_model(['fast'])
-        self.assertEqual(result_fast[0], 'model-a')
-        # 'cheap' 标签包含嵌套列表
-        result_cheap = manager.resolve_model(['cheap'])
-        self.assertEqual(result_cheap[0], 'model-b')
+        self.assertEqual(_names(manager.resolve_model('fast'))[0], 'model-a')
+        self.assertEqual(_names(manager.resolve_model('cheap'))[0], 'model-b')
 
     def test_nested_random_selection(self):
         """同权重模型随机轮流选择"""
         manager = LLMProviderManager(make_nested_test_config())
-        # 'cheap' 标签: model-b (位置0, 权重高), [model-d, model-e] (位置1, 共享权重)
-        # model-d 和 model-e 权重相同，排序应随机
         results = set()
         for _ in range(20):
-            result = manager.resolve_model(['cheap'])
-            if len(result) >= 3:
-                results.add((result[1], result[2]))
-        # 应至少观察到两种不同的顺序（随机性验证）
+            names = _names(manager.resolve_model('cheap'))
+            if len(names) >= 3:
+                results.add((names[1], names[2]))
         self.assertGreater(len(results), 1)
 
     def test_nested_random_selection_same_group(self):
@@ -842,8 +894,7 @@ class TestNestedModelList(unittest.TestCase):
         manager = LLMProviderManager(make_nested_test_config())
         results = set()
         for _ in range(100):
-            result = manager.resolve_model(['same'])
-            results.add(tuple(result))
+            results.add(tuple(_names(manager.resolve_model('same'))))
         self.assertEqual(len(results), 6)
 
     def test_nested_disabled_model(self):
@@ -851,37 +902,33 @@ class TestNestedModelList(unittest.TestCase):
         config = make_nested_test_config()
         config['api']['model-d']['enable'] = False
         manager = LLMProviderManager(config)
-        result = manager.resolve_model(['low_cost'])
-        self.assertNotIn('model-d', result)
-        self.assertIn('model-e', result)
+        names = _names(manager.resolve_model('low_cost'))
+        self.assertNotIn('model-d', names)
+        self.assertIn('model-e', names)
 
     def test_backward_compatibility(self):
         """向后兼容：原有平面列表配置仍正常工作"""
-        manager = LLMProviderManager(make_test_config())
-        # 原有 fast 标签行为不变
-        result = manager.resolve_model(['fast'])
-        self.assertEqual(result[0], 'model-a')
-        # 原有权重计算不变
+        manager = LLMProviderManager(make_nested_test_config())
+        self.assertEqual(_names(manager.resolve_model('fast'))[0], 'model-a')
         fast_weights = manager.model_tag_weights['fast']
         self.assertGreater(fast_weights['model-a'], fast_weights['model-b'])
 
     def test_nested_resolve_model_load_balancing(self):
         """同级模型按并发量升序排序"""
         manager = LLMProviderManager(make_nested_test_config())
-        # model-f1/f2/f3 在 'same' 标签中共享权重，模拟不同并发负载
         queue_map = {'model-f1': 3, 'model-f2': 1, 'model-f3': 2}
-        with mock.patch.object(manager, 'get_queue_length', side_effect=lambda name: queue_map.get(name, 0)):
-            result = manager.resolve_model(['same'], context_id='test-context')
-        # 并发量少的模型排在前面：f2(1) -> f3(2) -> f1(3)
-        self.assertEqual(result, ['model-f2', 'model-f3', 'model-f1'])
+        with mock.patch.object(manager, 'get_queue_length',
+                               side_effect=lambda name: queue_map.get(name, 0)):
+            names = _names(manager.resolve_model('same', context_id='test-context'))
+        self.assertEqual(names, ['model-f2', 'model-f3', 'model-f1'])
 
     def test_nested_resolve_model_stable_with_context_id(self):
         """相同 context_id 输出稳定"""
         manager = LLMProviderManager(make_nested_test_config())
         results = set()
         for _ in range(10):
-            result = manager.resolve_model(['same'], context_id='stable-ctx')
-            results.add(tuple(result))
+            results.add(tuple(_names(
+                manager.resolve_model('same', context_id='stable-ctx'))))
         self.assertEqual(len(results), 1)
 
     def test_nested_resolve_model_different_context_id(self):
@@ -889,216 +936,111 @@ class TestNestedModelList(unittest.TestCase):
         manager = LLMProviderManager(make_nested_test_config())
         results = set()
         for i in range(20):
-            result = manager.resolve_model(['same'], context_id='ctx-%d' % i)
-            results.add(tuple(result))
+            results.add(tuple(_names(
+                manager.resolve_model('same', context_id='ctx-%d' % i))))
         self.assertGreater(len(results), 1)
 
 
-class TestTagRankSyntax(unittest.TestCase):
-    """tag:rank 语法功能测试"""
+class TestGlobalRank(unittest.TestCase):
+    """全局 :N 旋转与 model_rank 测试"""
 
-    def test_tag_rank_no_rank_suffix_unchanged(self):
-        """不使用 :rank 后缀的标签行为完全不变，rank=1 等同于不使用 rank"""
-        manager = LLMProviderManager(make_nested_test_config())
-        result_no_rank = manager.resolve_model(['low_cost'], context_id='test-ctx')
-        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
-        self.assertEqual(result_no_rank, result_rank_1)
+    def setUp(self):
+        self.manager = LLMProviderManager(make_nested_test_config())
 
-    def test_tag_rank_rank_2_moves_first_to_end(self):
-        """rank=2 将第1项移到末尾，第2项变为最高优先"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost: [model-a, model-b, [model-d, model-e]]
-        # rank=2 后顺序: [model-b, [model-d, model-e], model-a]
-        result = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
-        # model-b 现在是最高优先
-        self.assertEqual(result[0], 'model-b')
-        # model-a 移到末尾
-        self.assertEqual(result[-1], 'model-a')
+    def test_no_suffix_equals_rank_1(self):
+        self.assertEqual(
+            _names(self.manager.resolve_model('low_cost', context_id='test-ctx')),
+            _names(self.manager.resolve_model('low_cost:1', context_id='test-ctx')))
 
-    def test_tag_rank_rank_3_moves_first_two_to_end(self):
-        """rank=3 将前2项移到末尾，第3项变为最高优先"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost: [model-a, model-b, [model-d, model-e]]
-        # rank=3 后顺序: [[model-d, model-e], model-a, model-b]
-        # model-d 和 model-e 共享位置0的权重（最高）
-        result = manager.resolve_model(['low_cost:3'], context_id='fixed-ctx')
-        # model-a 和 model-b 权重低于 model-d/model-e
-        self.assertNotIn(result[0], ['model-a', 'model-b'])
-        # 第一位应是嵌套组内的模型
-        self.assertIn(result[0], ['model-d', 'model-e'])
+    def test_rank_2_rotates_expanded_models(self):
+        names = _names(self.manager.resolve_model('low_cost:2', context_id='test-ctx'))
+        self.assertEqual(names[0], 'model-b')
+        self.assertEqual(names[-1], 'model-a')
 
-    def test_tag_rank_overflow_modulo(self):
-        """超出范围的 rank 自动取模循环（4个模型传 rank=6 等同于 rank=2）"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost 有3个元素
-        # rank=4 等同于 rank=1 (shift = 3 % 3 = 0)
-        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
-        result_rank_4 = manager.resolve_model(['low_cost:4'], context_id='test-ctx')
-        self.assertEqual(result_rank_1, result_rank_4)
-        # rank=5 等同于 rank=2 (shift = 4 % 3 = 1)
-        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
-        result_rank_5 = manager.resolve_model(['low_cost:5'], context_id='test-ctx')
-        self.assertEqual(result_rank_2, result_rank_5)
+    def test_rank_period_is_expanded_length(self):
+        # low_cost 展开 4 个模型
+        self.assertEqual(
+            _names(self.manager.resolve_model('low_cost:5', context_id='test-ctx')),
+            _names(self.manager.resolve_model('low_cost:1', context_id='test-ctx')))
+        self.assertEqual(
+            _names(self.manager.resolve_model('low_cost:6', context_id='test-ctx')),
+            _names(self.manager.resolve_model('low_cost:2', context_id='test-ctx')))
 
-    def test_tag_rank_nested_list_as_single_element(self):
-        """嵌套列表视为单个元素整体移位"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost: [model-a, model-b, [model-d, model-e]]
-        # rank=3 后: [[model-d, model-e], model-a, model-b]
-        # 嵌套组 [model-d, model-e] 整体移到第一位
-        result = manager.resolve_model(['low_cost:3'], context_id='nested-test')
-        # 第一位应是 model-d 或 model-e（嵌套组内的模型）
-        self.assertIn(result[0], ['model-d', 'model-e'])
-        # model-a 和 model-b 应在后面
-        self.assertIn('model-a', result)
-        self.assertIn('model-b', result)
+    def test_model_rank_accumulates(self):
+        self.assertEqual(
+            _names(self.manager.resolve_model(
+                'low_cost', context_id='test-ctx', model_rank=1)),
+            _names(self.manager.resolve_model('low_cost:2', context_id='test-ctx')))
 
-    def test_tag_rank_multiple_tags_independent(self):
-        """混合使用多个标签，各标签独立调整"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost:2 → [model-b, [model-d, model-e], model-a]
-        # fast (无rank) → [model-a, model-b]
-        # 交集为 model-a, model-b
-        result = manager.resolve_model(['low_cost:2', 'fast'], context_id='test-ctx')
-        self.assertIn('model-a', result)
-        self.assertIn('model-b', result)
-        # model-b 在 low_cost:2 中权重最高，在 fast 中权重第二
-        # model-a 在 low_cost:2 中权重最低，在 fast 中权重最高
-        # 两者权重相近，但 model-b 在 low_cost:2 的提升应使其排名靠前
-        self.assertEqual(result[0], 'model-b')
+    def test_zero_and_negative_rank(self):
+        self.assertEqual(
+            _names(self.manager.resolve_model('low_cost:0', context_id='test-ctx')),
+            _names(self.manager.resolve_model('low_cost:4', context_id='test-ctx')))
+        self.assertEqual(
+            _names(self.manager.resolve_model('low_cost:-1', context_id='test-ctx')),
+            _names(self.manager.resolve_model('low_cost:3', context_id='test-ctx')))
 
-    def test_tag_rank_multiple_tags_both_adjusted(self):
-        """多个标签都使用 rank 调整，各自独立计算"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost:2 → [model-b, [model-d, model-e], model-a]
-        # fast:2 → [model-b, model-a]
-        # 交集为 model-a, model-b
-        # model-b 在两个标签中都是最高优先
-        result = manager.resolve_model(['low_cost:2', 'fast:2'], context_id='test-ctx')
-        self.assertEqual(result[0], 'model-b')
+    def test_multiple_tags_with_global_rank(self):
+        names = _names(self.manager.resolve_model(
+            'low_cost,fast:2', context_id='test-ctx'))
+        self.assertEqual(names[0], 'model-b')
 
-    def test_tag_rank_invalid_rank_fallback(self):
-        """rank 部分非整数时，整个字符串作为标签名查找"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # "low_cost:abc" 中 abc 无法转为整数
-        # 回退为查找名为 "low_cost:abc" 的标签/模型，不存在则抛出异常
+    def test_invalid_rank_raises(self):
         with self.assertRaises(LLMNoAvailableModelError):
-            manager.resolve_model(['low_cost:abc'])
+            self.manager.resolve_model('low_cost:abc')
 
-    def test_tag_rank_weights_verification(self):
-        """验证 rank 调整后的权重计算正确"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # 原始 low_cost 权重: model-a 最高
-        original_weights = manager.model_tag_weights['low_cost']
-        self.assertGreater(original_weights['model-a'], original_weights['model-b'])
+    def test_rank_does_not_modify_config(self):
+        original = list(self.manager.model_tag['low_cost'])
+        self.manager.resolve_model('low_cost:2')
+        self.manager.resolve_model('low_cost:3')
+        self.assertEqual(self.manager.model_tag['low_cost'], original)
 
-        # rank=2 后: model-b 应成为最高权重
-        tag_matched = manager._resolve_tag_weights(['low_cost:2'])
-        adjusted_weights = tag_matched['low_cost']
-        self.assertGreater(adjusted_weights['model-b'], adjusted_weights['model-a'])
-        # model-a 移到末尾，权重最低
-        self.assertLess(adjusted_weights['model-a'], adjusted_weights['model-b'])
-
-    def test_tag_rank_single_element_tag(self):
-        """单元素标签使用 rank 不影响结果"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # same 标签只有1个嵌套元素 [[model-f1, model-f2, model-f3]]
-        # rank=2 时，由于只有1个元素，shift=0，不调整
-        result_rank_1 = manager.resolve_model(['same:1'], context_id='test-ctx')
-        result_rank_2 = manager.resolve_model(['same:2'], context_id='test-ctx')
-        # 两者结果应相同（都包含所有模型）
-        self.assertEqual(set(result_rank_1), set(result_rank_2))
-
-    def test_tag_rank_with_direct_model_name(self):
-        """tag:rank 语法不适用于直接模型名，rank 被忽略"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # model-a:2 会被解析为 tag_name="model-a", rank=2
-        # 但 model-a 不是标签，是直接模型名，rank 被忽略
-        # 精确匹配优先，直接返回 model-a
-        result = manager.resolve_model(['model-a:2'])
-        self.assertEqual(result, ['model-a'])
-
-    def test_tag_rank_fast_tag(self):
-        """测试 fast 标签（纯平面列表）的 rank 调整"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # fast: [model-a, model-b]
-        # rank=2 后: [model-b, model-a]
-        result = manager.resolve_model(['fast:2'], context_id='test-ctx')
-        self.assertEqual(result[0], 'model-b')
-        self.assertEqual(result[1], 'model-a')
-
-    def test_tag_rank_does_not_modify_original_config(self):
-        """rank 调整不影响原始配置"""
-        manager = LLMProviderManager(make_nested_test_config())
-        original_models = list(manager.model_tag['low_cost'])
-        # 使用 rank 调整
-        manager.resolve_model(['low_cost:2'])
-        manager.resolve_model(['low_cost:3'])
-        # 原始配置不应改变
-        self.assertEqual(manager.model_tag['low_cost'], original_models)
-        # 原始权重也不应改变
-        original_weights = manager.model_tag_weights['low_cost']
-        self.assertGreater(original_weights['model-a'], original_weights['model-b'])
-
-    def test_tag_rank_with_token_filter(self):
-        """rank 调整与 Token 限制过滤组合使用"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost:2 → [model-b, [model-d, model-e], model-a]
-        # model-b 和 model-e 有 max_input_tokens=1000
-        long_text = "a" * 5000  # 1250 tokens > 1000
+    def test_rank_with_token_filter(self):
+        long_text = "a" * 5000
         messages = [Message.from_content(long_text, role="user")]
-        result = manager.resolve_model(['low_cost:2'], messages, context_id='test-ctx')
-        # model-b 和 model-e 被过滤
-        self.assertNotIn('model-b', result)
-        self.assertNotIn('model-e', result)
-        # model-d (位置1) 和 model-a (位置2) 保留
-        # model-d 权重更高（位置1 vs 位置2）
-        self.assertEqual(result[0], 'model-d')
+        names = _names(self.manager.resolve_model('low_cost:2', messages))
+        self.assertNotIn('model-b', names)
+        self.assertNotIn('model-e', names)
+        self.assertEqual(names[0], 'model-d')
 
-    def test_tag_rank_large_rank_value(self):
-        """较大的 rank 值正确取模循环"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost 有3个元素
-        # rank=10: shift = 9 % 3 = 0，等同于 rank=1
-        result_rank_1 = manager.resolve_model(['low_cost:1'], context_id='test-ctx')
-        result_rank_10 = manager.resolve_model(['low_cost:10'], context_id='test-ctx')
-        self.assertEqual(result_rank_1, result_rank_10)
-        # rank=11: shift = 10 % 3 = 1，等同于 rank=2
-        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
-        result_rank_11 = manager.resolve_model(['low_cost:11'], context_id='test-ctx')
-        self.assertEqual(result_rank_2, result_rank_11)
 
-    def test_tag_rank_zero_rank(self):
-        """rank=0 等同于不调整（shift = -1 % N = N-1）"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost 有3个元素
-        # rank=0: shift = (0-1) % 3 = 2，等同于 rank=3
-        result_rank_0 = manager.resolve_model(['low_cost:0'], context_id='test-ctx')
-        result_rank_3 = manager.resolve_model(['low_cost:3'], context_id='test-ctx')
-        self.assertEqual(result_rank_0, result_rank_3)
+class TestConfigUpdate(unittest.TestCase):
+    def test_update_config(self):
+        """全量配置更新"""
+        manager = LLMProviderManager(make_test_config())
+        new_config = make_test_config()
+        new_config['api']['model-a']['parallel'] = 8
+        manager.update_config(new_config)
+        model_a = [m for m in manager.list_models() if m.name == 'model-a'][0]
+        self.assertEqual(model_a.parallel, 8)
 
-    def test_tag_rank_negative_rank(self):
-        """负数 rank 正确取模循环"""
-        manager = LLMProviderManager(make_nested_test_config())
-        # low_cost 有3个元素
-        # rank=-1: shift = (-1-1) % 3 = -2 % 3 = 1，等同于 rank=2
-        result_rank_neg1 = manager.resolve_model(['low_cost:-1'], context_id='test-ctx')
-        result_rank_2 = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
-        self.assertEqual(result_rank_neg1, result_rank_2)
+    def test_update_api_config(self):
+        """单模型配置更新"""
+        test_config = make_test_config()
+        manager = LLMProviderManager(test_config)
+        updated = test_config['api']['model-a'].copy()
+        updated.update({'parallel': 10})
+        manager.update_api_config('model-a', updated)
+        model_a = [m for m in manager.list_models() if m.name == 'model-a'][0]
+        self.assertEqual(model_a.parallel, 10)
 
-    def test_tag_rank_disabled_model_in_shifted_position(self):
-        """rank 调整后禁用模型仍被过滤"""
-        config = make_nested_test_config()
-        # 禁用 model-b（在 low_cost 中位置1）
-        config['api']['model-b']['enable'] = False
-        manager = LLMProviderManager(config)
-        # low_cost:2 → [model-b(disabled), [model-d, model-e], model-a]
-        # model-b 被过滤后剩 model-a, model-d, model-e
-        result = manager.resolve_model(['low_cost:2'], context_id='test-ctx')
-        self.assertNotIn('model-b', result)
-        # model-d/model-e 在位置1，model-a 在位置2
-        # model-d/model-e 权重高于 model-a
-        self.assertIn(result[0], ['model-d', 'model-e'])
+    def test_change_api_status(self):
+        """启用/禁用模型"""
+        manager = LLMProviderManager(make_test_config())
+        self.assertIn('model-c', manager.disabled_models)
+        manager.change_api_status('model-c', True)
+        self.assertNotIn('model-c', manager.disabled_models)
+        self.assertIn('model-c', [m.name for m in manager.list_models()])
+        manager.change_api_status('model-a', False)
+        self.assertIn('model-a', manager.disabled_models)
+        self.assertNotIn('model-a', [m.name for m in manager.list_models()])
+
+    def test_update_model_tag(self):
+        """更新标签"""
+        manager = LLMProviderManager(make_test_config())
+        manager.update_model_tag('fast', ['model-b', 'model-a'])
+        self.assertEqual(_names(manager.resolve_model('fast')),
+                         ['model-b', 'model-a'])
 
 
 if __name__ == '__main__':

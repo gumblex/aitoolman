@@ -373,9 +373,10 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str
     template_params: Dict[str, Any]
-    # 模型名称或模型标签（多个取交集）
-    model_name: Union[str, List[str], None] = None
+    # 模型名称或模型标签（可含全局 :N 旋转后缀）
+    model_name: Optional[str] = None
     model_rank: int = 0
+    rank_by_model: bool = False
     context_messages: List[Message] = []
     media_content: Optional[List[MediaContent]] = None
 

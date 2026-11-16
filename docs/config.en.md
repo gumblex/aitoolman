@@ -59,54 +59,37 @@ Additional notes:
 * For "anthropic" format, `headers` should include `"X-Api-Key"` and `"anthropic-version" = "2023-06-01"`; `body_options` should include `max_tokens`
 
 
-### 1.4 [model_tag] Section
+### 1.4 [model_tag] / [model_provider] Section
 Model tag configuration for model routing and grouped scheduling, sorted by priority. Try to define all needed tags here.
 
-Business code can use tags without caring about underlying specific models, which supports flexible switching and routing. Model routing supports passing multiple tags at the same time, the system will automatically match all available models that satisfy all tags, and select the optimal model combined with input token limit and model priority. For example, passing `["code", "multimodal"]` will automatically select multimodal models that support code use cases, passing `["low_cost", "fast"]` will automatically select low cost and low latency models, to adapt to all kinds of cross scenarios.
+Business code can use tags without caring about underlying specific models, which supports flexible switching and routing. Model routing supports passing multiple tags at the same time, the system will automatically match all available models that satisfy all tags, and select the optimal model combined with input token limit and model priority. For example, passing `"code,multimodal"` will automatically select multimodal models that support code use cases, passing `"low_cost,fast"` will automatically select low cost and low latency models, to adapt to all kinds of cross scenarios.
 
-Original `[model_alias]` config (`alias = model_name`) will be merged into `[model_tag]`. Each alias is a tag, corresponding to a single-item list.
+`[model_provider]` declares multiple providers for one model: `logical_name = ["[api] key", ...]`. The logical name can be used in `[model_tag]` or called directly; providers of the same model are sorted by queue length and stable random after scoring, and share the weight of the logical name. A logical name must not collide with an `[api]` key or a tag. `[api]` models not declared here remain independently usable.
 
 `"Tag Name" = List of strings (supports one level of nesting)`
 
-Key is the tag name, value is a list of model names. List order determines recommendation priority (earlier entries have higher weight). Model names must exist in the `[api]` section. Elements can be strings or string lists. Models in a nested list share the rank weight of their position, and same-weight models will be shuffled randomly. This can be used to rotate usage of identical/similar models across multiple providers.
+Key is the tag name, value is a list of model names. List order determines recommendation priority (earlier entries have higher weight). Models can be `[api]` model names or `[model_provider]` logical model names. Elements can be strings or string lists. Models in a nested list share the rank weight of their position, and same-weight models will be shuffled randomly. This can be used to rotate usage of identical/similar models across multiple providers.
 
 **Example:**
 ```toml
+[model_provider]
+deepseek = ["deepseek-provider1", "deepseek-provider2"]
+
 [model_tag]
 image = ['doubao-seed-2.0-pro']
 cheap = ['doubao-seed-2.0-mini','qwen-flash']
-fast = ['deepseek-v4-flash','qwen-flash']
-low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
-# Use models from multiple providers in rotation
-"deepseek-v4-flash" = [["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
+fast = ['deepseek','qwen-flash']
+low_cost = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek"]
 ```
 
 **Weight Calculation:**
 Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. All models in a nested list share the rank weight of their position. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
 
-**tag:rank Syntax:**
+**Global :N Syntax:**
 
-When calling `resolve_model`, you can append a `:rank` suffix to a tag name to dynamically adjust the model priority order within that tag. The syntax is `tag_name:rank`, where `rank` is an integer.
+When calling `resolve_model` or passing the module `model_name`, a single string is accepted, with multiple tags separated by commas (e.g., `"image,cheap"`). An optional `:N` suffix at the end of the whole string cyclically rotates the final sorted candidate list by N-1 positions. N is added to `model_rank` (`shift = (N - 1 + model_rank) % candidate_count`). For example, `"image,cheap:3"` rotates 2 positions after sorting the intersection of `image` and `cheap`. A non-integer suffix or an unmatched item raises `LLMNoAvailableModelError`.
 
-- `rank=1`: No adjustment, keeps original order (equivalent to not using rank)
-- `rank=2`: Moves the 1st item to the end, making the 2nd item highest priority
-- `rank=N`: Moves the first N-1 items to the end, making the N-th item highest priority
-- Ranks exceeding the range automatically wrap around using modulo (e.g., with 4 models, rank=6 is equivalent to rank=2)
 
-Shifting operates at the outer element level of the list, with nested lists treated as single elements that shift together. Models within a nested list share the weight of that position.
-
-**Example:**
-```python
-# Assuming "code" tag is configured as ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]
-# Passing ['code:2'] → qwen3.7-max has highest priority
-# Passing ['code:3'] → deepseek-v4-pro has highest priority
-# Passing ['code:5'] → Equivalent to rank=1, glm-5.1 has highest priority
-# Mixed usage: ['code:2', 'image:3'] each tag adjusts independently
-```
-
-Tags without the `:rank` suffix behave exactly as before. The `tag:rank` syntax applies only to tag names, not to direct model names.
-
-When calling `resolve_model` or passing the module `model_name`, a single string is also accepted, with multiple tags separated by commas (e.g., `"fast:2,code:2/3"`), optionally followed by a `/N` suffix (counting from 1) to cyclically rotate the final candidate model list; `/` has no special meaning for list input.
 
 ### 1.5 [http] Section
 Configuration for the HTTP server (`python3 -m aitoolman http`), see docs/http_server.en.md for details.
@@ -196,7 +179,7 @@ Specific configuration for each module, module names can be customized.
 | Parameter           | Type    | Default Value                                       | Description                                                                            |
 |---------------------|---------|-----------------------------------------------------|----------------------------------------------------------------------------------------|
 | `description`       | String  | `''`                                                | Description text for this module                                                       |
-| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module, also supports a list of multiple tags         |
+| `model`             | String  | Inherited from `[module_default].model`             | Model name or alias used by this module                                                |
 | `stream`            | Boolean | Inherited from `[module_default].stream`            | Whether this module uses streaming output                                              |
 | `post_processor`    | String  | Inherited from `[module_default].post_processor`    | Post-processor for this module                                                         |
 | `options`           | Dict    | Inherited from `[module_default].options`           | Request options for this module                                                        |
@@ -216,7 +199,7 @@ Application-layer model alias configuration, which is used for flexible configur
 
 | Parameter | Type                    | Default Value | Description                                     |
 |-----------|-------------------------|---------------|-------------------------------------------------|
-| (Alias)   | String / List of String | None          | Maps to the actual model name or tag names list |
+| (Alias)   | String                  | None          | Maps to the actual model name or tag name       |
 
 ### 2.5 Template Syntax
 Templates use Jinja2 syntax, supporting variable substitution and basic control structures.
@@ -272,7 +255,7 @@ model = "code"  # Using model tag
 template.user = """Please write a code example for {{functionality}} using {{language}} language, with detailed comments"""
 
 [module.task_adder]
-model = ["fast", "low_cost"]  # Use multiple tags to filter models that satisfy both conditions
+model = "fast,low_cost"  # Use multiple tags to filter models that satisfy both conditions
 stream = true
 template.user = "As a schedule assistant, you can help users add to-do items. Analyze the user's instruction: if there are specific to-do items, call the tool; if not, ask the user to provide detailed information about the task. User says: {{user_input}}"
 
@@ -332,7 +315,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. Notes
 
-1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be either a model name from the `[api]` section of `llm_provider.toml`, a tag defined in the `[model_tag]` section, or an alias defined in the `[model_alias]` section.
+1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be a model name from the `[api]` section of `llm_provider.toml`, a logical model name from `[model_provider]`, a tag defined in the `[model_tag]` section, or an alias defined in the `[model_alias]` section.
 
 2. **Template Variables**: Variables used in templates must be provided during invocation, otherwise rendering will fail.
 
@@ -340,4 +323,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. Supports `tag:rank` syntax to dynamically adjust model priority within tags (see Section 1.4 for details). When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.
+5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. Supports a trailing global `:N` suffix to cyclically rotate the final candidate list (see Section 1.4 for details). When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.

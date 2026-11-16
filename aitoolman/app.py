@@ -20,7 +20,7 @@ class ModuleConfig(NamedTuple):
     """模块配置"""
     name: str
     description: str
-    model: Union[str, List[str], None] = None
+    model: Optional[str] = None
     templates: Dict[str, str] = {}
     tools: Dict[str, Dict[str, Any]] = {}
     stream: bool = False
@@ -81,11 +81,12 @@ class _LLMModule(NamedTuple):
 
     async def __call__(
             self, *,
-            _model_name: Union[str, List[str], None] = None,
+            _model_name: Optional[str] = None,
             _context_messages: Optional[List[Message]] = None,
             _media_content: Optional[List[MediaContent]] = None,
             _output_channel: Optional[_channel.ChannelWriter] = None,
             _model_rank: int = 0,
+            _rank_by_model: bool = False,
             _context_id: Optional[str] = None,
             **kwargs
     ) -> LLMModuleResult:
@@ -94,6 +95,7 @@ class _LLMModule(NamedTuple):
             template_params=kwargs,
             model_name=_model_name,
             model_rank=_model_rank,
+            rank_by_model=_rank_by_model,
             context_messages=_context_messages,
             media_content=_media_content,
             output_channel=_output_channel
@@ -236,8 +238,12 @@ class LLMApplication:
         model_tags = (module_request.model_name or config.model)
         if not model_tags:
             raise LLMNoAvailableModelError("No model name or tags provided.")
-        model_names = await self.client.resolve_model(model_tags, messages, context_id=(context_id or self.context_id))
-        model_name = model_names[module_request.model_rank % len(model_names)]
+        model_names = await self.client.resolve_model(
+            model_tags, messages, context_id=(context_id or self.context_id),
+            model_rank=module_request.model_rank, rank_by_model=module_request.rank_by_model)
+        if not model_names:
+            raise LLMNoAvailableModelError("No available model resolved.")
+        model_name = model_names[0][0]
         return LLMDirectRequest(
             model_name=model_name,
             messages=messages,

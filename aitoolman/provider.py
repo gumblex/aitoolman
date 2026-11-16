@@ -16,6 +16,7 @@ from .channel import ChannelEvent
 from .loop_detect import LoopDetector
 from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall, ModelInfo, LLMNoAvailableModelError
 from .resmanager import ResourceManager
+from ._version import VERSION
 
 import httpx
 import msgspec
@@ -816,25 +817,25 @@ class AnthropicFormat(LLMFormatStrategy):
         )
 
 
-def _parse_rank_suffix(text: str, sep: str) -> Tuple[str, Optional[int]]:
-    """解析“名称<sep>N”后缀，返回（名称、rank 或 None）；N 非整数时原样返回（原文、None）"""
-    if sep in text:
-        name, _, suffix = text.rpartition(sep)
-        try:
-            return name, int(suffix)
-        except ValueError:
-            pass
-    return text, None
+def _split_global_rank(text: str) -> Tuple[str, int]:
+    """解析整串末尾的 ":N" 全局旋转后缀，返回（标签串, N）；无后缀时 N=1，后缀非法时抛 LLMNoAvailableModelError"""
+    tag_text, sep, suffix = text.rpartition(':')
+    if not sep:
+        return text, 1
+    try:
+        return tag_text, int(suffix)
+    except ValueError:
+        raise LLMNoAvailableModelError(f"Invalid rank suffix in tags: {text}") from None
 
 
-def _rotate_by_rank(models: List[str], rank: int) -> List[str]:
-    """按 1 计数循环旋转列表，shift=(rank-1)%len；长度不大于 1 或 shift 为 0 时原样返回"""
-    if len(models) <= 1:
-        return models
-    shift = (rank - 1) % len(models)
+def _rotate_by_shift(items: List[Any], shift: int) -> List[Any]:
+    """按 shift 循环左移列表；长度不大于 1 或 shift 为 0 时原样返回"""
+    if len(items) <= 1:
+        return items
+    shift = shift % len(items)
     if shift == 0:
-        return models
-    return models[shift:] + models[:shift]
+        return items
+    return items[shift:] + items[:shift]
 
 
 class LLMProviderManager:
@@ -852,7 +853,7 @@ class LLMProviderManager:
 
         self.http_client = httpx.AsyncClient(
             timeout=self.timeout, http2=True,
-            headers=self.default_config.get('headers', {})
+            headers={'User-Agent': f'aitoolman/{VERSION}'}
         )
 
         # 资源管理器（控制模型并行度）
@@ -867,19 +868,37 @@ class LLMProviderManager:
         self.api_config = config['api']
         self.disabled_models: Set[str] = set()
 
-        # 合并 model_tag 和 model_alias
         self.model_tag = config.get('model_tag', {})
-        for alias_name, model_name in config.get('model_alias', {}).items():
-            if alias_name not in self.model_tag:
-                self.model_tag[alias_name] = [model_name]
-            elif model_name not in self.model_tag[alias_name]:
-                self.model_tag[alias_name].append(model_name)
+
+        # 读取并校验 model_provider 配置
+        self.model_provider: Dict[str, List[str]] = {}
+        for provider_name, providers in config.get('model_provider', {}).items():
+            if provider_name in self.api_config:
+                raise ValueError(
+                    f"Model provider '{provider_name}' conflicts with api config")
+            if provider_name in self.model_tag:
+                raise ValueError(
+                    f"Model provider '{provider_name}' conflicts with tag config")
+            if not isinstance(providers, list) or not providers:
+                raise ValueError(
+                    f"Model provider '{provider_name}' must be a non-empty list")
+            for m in providers:
+                if not isinstance(m, str):
+                    raise ValueError(
+                        f"Provider '{m}' in model_provider '{provider_name}' must be a string")
+                if m not in self.api_config:
+                    raise ValueError(
+                        f"Provider '{m}' in model_provider '{provider_name}' not found in api config")
+            self.model_provider[provider_name] = list(providers)
+
+        # 模型名集合：api 模型名与逻辑模型名
+        self.model_names: Set[str] = set(self.api_config) | set(self.model_provider)
 
         # 校验 model_tag 中的模型名
         for tag, models in self.model_tag.items():
             for m in self._flatten_model_list(models):
-                if m not in self.api_config:
-                    raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
+                if m not in self.model_names:
+                    raise ValueError(f"Model '{m}' in tag '{tag}' not found in config")
 
         for model_name, model_config in self.api_config.items():
             if not model_config.get('enable', True):
@@ -928,143 +947,226 @@ class LLMProviderManager:
         """获取模型当前并发负载量（活跃请求数 + 等待队列长度）"""
         return self.resource_manager.get_queue_length(model_name)
 
+    def _within_token_limit(self, model_name: str, msg_length) -> bool:
+        """判断消息长度是否在模型输入 Token 限制内"""
+        model_config = self.api_config.get(model_name, {})
+        max_input_tokens = model_config.get(
+            'max_input_tokens', self.default_config.get('max_input_tokens'))
+        if max_input_tokens is None:
+            return True
+        bytes_per_token = model_config.get(
+            'bytes_per_token',
+            self.default_config.get('bytes_per_token', self.default_bytes_per_token)
+        )
+        return estimate_text_token(msg_length, bytes_per_token) <= max_input_tokens
+
     def _resolve_tag_weights(self, input_tags: List[str]) -> Dict[str, Dict[str, float]]:
-        """解析标签并计算权重，支持 tag:rank 语法动态调整排序"""
+        """解析标签，返回匹配到的标签/模型权重表"""
         tag_matched: Dict[str, Dict[str, float]] = {}
         for tag_input in input_tags:
-            # 解析 tag:rank 语法
-            tag_name, rank = _parse_rank_suffix(tag_input, ':')
-
-            if tag_name in self.model_tag_weights:
-                if rank is not None:
-                    # 有 rank 调整：动态重算权重
-                    models = _rotate_by_rank(self.model_tag[tag_name], rank)
-                    tag_matched[tag_name] = calculate_rank_weights(
-                        models, self.rank_adjust_ratio)
-                else:
-                    tag_matched[tag_name] = self.model_tag_weights[tag_name]
-            elif tag_name in self.api_config:
-                tag_matched[tag_name] = {tag_name: 1.0}
+            if tag_input in self.model_tag_weights:
+                tag_matched[tag_input] = self.model_tag_weights[tag_input]
+            elif tag_input in self.model_names:
+                tag_matched[tag_input] = {tag_input: 1.0}
         return tag_matched
 
-    def resolve_model(self, input_tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]:
-        """解析出最终使用的真实模型名
+    def _model_queue_length(self, model_name: str) -> int:
+        """模型层队列长度：逻辑模型取未禁用提供商队列长度的最小值"""
+        if model_name in self.model_provider:
+            queues = [self.get_queue_length(p)
+                      for p in self.model_provider[model_name]
+                      if p not in self.disabled_models]
+            return min(queues) if queues else 0
+        return self.get_queue_length(model_name)
+
+    def _resolve_model_providers(
+            self, model_name: str, messages: Optional[List[Message]] = None,
+            context_id: str = ''
+    ) -> List[str]:
+        """将模型名或逻辑模型名解析为排序后的提供商列表
 
         Args:
-            input_tags: 标签/模型名/别名，支持传入单个字符串（, 分隔多个标签，末尾 /N 后缀按 1 计数对最终候选列表循环旋转）或列表（支持 tag:rank 语法动态调整排序）
-            messages: 可选消息列表，用于Token数估算过滤
+            model_name: 模型名或逻辑模型名
+            messages: 可选消息列表，用于 Token 数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
 
         Returns:
-            真实模型名
+            提供商名列表
+
+        Raises:
+            LLMNoAvailableModelError: 无可用提供商
+        """
+        if model_name in self.model_provider:
+            providers = [m for m in self.model_provider[model_name]
+                         if m not in self.disabled_models]
+            if messages is not None:
+                msg_length = calc_message_length(messages)
+                providers = [m for m in providers
+                             if self._within_token_limit(m, msg_length)]
+            if not providers:
+                raise LLMNoAvailableModelError(
+                    f"No available provider for model: {model_name}")
+            rng = random.Random(context_id or None)
+            return sorted(providers, key=lambda m: (
+                self.get_queue_length(m), rng.random()))
+        if model_name in self.api_config and model_name not in self.disabled_models:
+            if messages is not None:
+                msg_length = calc_message_length(messages)
+                if not self._within_token_limit(model_name, msg_length):
+                    raise LLMNoAvailableModelError(
+                        f"No available provider for model: {model_name}")
+            return [model_name]
+        raise LLMNoAvailableModelError(
+            f"No available provider for model: {model_name}")
+
+    def resolve_model(
+            self, input_tags: str, messages: Optional[List[Message]] = None,
+            context_id: str = '', model_rank: int = 0, rank_by_model: bool = False
+    ) -> List[Tuple[str, float]]:
+        """解析出最终使用的提供商名及其评分
+
+        Args:
+            input_tags: 标签/模型名/逻辑模型名，支持以英文逗号分隔多个标签，末尾可带 :N 全局旋转后缀
+            messages: 可选消息列表，用于 Token 数估算过滤
+            context_id: 可选上下文 ID，用于稳定随机排序的种子
+            model_rank: 候选偏移量，与 :N 后缀相加决定最终旋转位数
+            rank_by_model: 为 True 时先旋转模型层再按提供商展开，否则先展开提供商再旋转
+
+        Returns:
+            提供商名与模型层评分的列表
 
         Raises:
             LLMNoAvailableModelError: 无可用模型
         """
-        # 字符串输入：提取末尾 /N 旋转后缀，再按英文逗号分隔为标签列表
-        rotate_rank = None
-        if isinstance(input_tags, str):
-            input_tags, rotate_rank = _parse_rank_suffix(input_tags, '/')
-            input_tags = input_tags.split(',')
+        tag_text, global_rank = _split_global_rank(input_tags)
+        input_tags = tag_text.split(',')
         if not input_tags:
             raise LLMNoAvailableModelError("No tags provided.")
+        for tag in input_tags:
+            if tag not in self.model_tag_weights and tag not in self.model_names:
+                raise LLMNoAvailableModelError(
+                    f"No available model for tags: {input_tags}")
+
         # 1. 精确匹配优先
+        models: Optional[List[Tuple[str, float]]] = None
         for tag in input_tags:
             if tag in self.api_config and tag not in self.disabled_models:
-                return [tag]
+                models = [(tag, 1.0)]
+                break
+            if tag in self.model_provider and any(
+                    p not in self.disabled_models for p in self.model_provider[tag]):
+                models = [(tag, 1.0)]
+                break
 
-        # 2. 标签匹配与权重计算
-        tag_matched = self._resolve_tag_weights(input_tags)
+        if models is None:
+            # 2. 标签匹配与权重计算
+            tag_matched = self._resolve_tag_weights(input_tags)
+            if not tag_matched:
+                raise LLMNoAvailableModelError(
+                    f"No available model for tags: {input_tags}")
+            all_model_sets = [set(weights.keys()) for weights in tag_matched.values()]
+            common_models = all_model_sets[0]
+            for s in all_model_sets[1:]:
+                common_models = common_models & s
 
-        if not tag_matched:
-            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
-
-        # 取交集
-        all_model_sets = [set(weights.keys()) for weights in tag_matched.values()]
-        if not all_model_sets:
-            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
-
-        common_models = all_model_sets[0]
-        for s in all_model_sets[1:]:
-            common_models = common_models & s
-
-        # 过滤禁用模型
-        common_models = common_models - self.disabled_models
-
-        if not common_models:
-            raise LLMNoAvailableModelError(f"No available model for tags: {input_tags}")
-
-        # 3. Token限制过滤
-        if messages is not None:
-            msg_length = calc_message_length(messages)
+            # 过滤禁用模型（api 模型直接禁用，或逻辑模型所有提供商均禁用）
+            common_models = common_models - self.disabled_models
             for model_name in list(common_models):
-                model_config = self.api_config.get(model_name, {})
-                max_input_tokens = model_config.get(
-                    'max_input_tokens', self.default_config.get('max_input_tokens'))
-                if max_input_tokens is not None:
-                    bytes_per_token = model_config.get(
-                        'bytes_per_token',
-                        self.default_config.get('bytes_per_token', self.default_bytes_per_token)
-                    )
-                    estimated_tokens = estimate_text_token(msg_length, bytes_per_token)
-                    if estimated_tokens > max_input_tokens:
-                        common_models.discard(model_name)
-
+                if model_name in self.model_provider and all(
+                        p in self.disabled_models for p in self.model_provider[model_name]):
+                    common_models.discard(model_name)
             if not common_models:
                 raise LLMNoAvailableModelError(
-                    f"No available model within token limit for tags: {input_tags}")
+                    f"No available model for tags: {input_tags}")
 
-        # 4. 权重求和取最高
-        model_total_weights: Dict[str, float] = {}
-        for model_name in common_models:
-            model_total_weights[model_name] = round(sum(
-                math.log(tag_weights.get(model_name, 1e-8))
-                for tag_weights in tag_matched.values()
-            ), 6)
+            # 3. Token 限制过滤（api 模型按自身限制，逻辑模型留到展开阶段）
+            if messages is not None:
+                msg_length = calc_message_length(messages)
+                for model_name in list(common_models):
+                    if model_name in self.model_provider:
+                        continue
+                    if not self._within_token_limit(model_name, msg_length):
+                        common_models.discard(model_name)
+                if not common_models:
+                    raise LLMNoAvailableModelError(
+                        f"No available model within token limit for tags: {input_tags}")
 
-        rng = random.Random(context_id or None)
-        best_models = sorted(common_models, key=lambda m: (
-            model_total_weights[m],
-            -self.get_queue_length(m),
-            rng.random()
-        ), reverse=True)
-        # 有 /N 旋转后缀时旋转最终候选列表（单元素列表为无操作）
-        if rotate_rank is not None:
-            best_models = _rotate_by_rank(best_models, rotate_rank)
-        return best_models
+            # 4. 权重求和排序
+            model_total_weights: Dict[str, float] = {}
+            for model_name in common_models:
+                model_total_weights[model_name] = round(sum(
+                    math.log(tag_weights.get(model_name, 1e-8))
+                    for tag_weights in tag_matched.values()
+                ), 6)
 
-    def list_models(self, tags: Union[str, List[str], None] = None) -> List[ModelInfo]:
+            rng = random.Random(context_id or None)
+            best_models = sorted(common_models, key=lambda m: (
+                model_total_weights[m],
+                -self._model_queue_length(m),
+                rng.random()
+            ), reverse=True)
+            models = [(m, model_total_weights[m]) for m in best_models]
+
+        # 5. 按 rank_by_model 选择旋转对象并展开提供商
+        if rank_by_model:
+            shift = (global_rank - 1 + model_rank) % len(models) if models else 0
+            rotated = _rotate_by_shift(models, shift)
+            result: List[Tuple[str, float]] = []
+            for model_name, score in rotated:
+                for provider in self._resolve_model_providers(
+                        model_name, messages=messages, context_id=context_id):
+                    result.append((provider, score))
+            return result
+
+        expanded: List[Tuple[str, float]] = []
+        for model_name, score in models:
+            for provider in self._resolve_model_providers(
+                    model_name, messages=messages, context_id=context_id):
+                expanded.append((provider, score))
+        shift = (global_rank - 1 + model_rank) % len(expanded) if expanded else 0
+        return _rotate_by_shift(expanded, shift)
+
+    def list_models(self, tags: Optional[str] = None) -> List[ModelInfo]:
         """列出匹配的可用模型
 
         Args:
-            tags: 可选标签/模型名/别名，无tag返回所有可用模型
+            tags: 可选标签/模型名/逻辑模型名，无 tag 返回所有可用 api 模型
 
         Returns:
-            ModelInfo列表，按权重降序排列
+            ModelInfo 列表，按权重降序排列
         """
         if not tags:
             models = []
-            for name, config in self.api_config.items():
+            for name in self.api_config:
                 if name in self.disabled_models:
                     continue
                 models.append(self._make_model_info(name))
             return models
 
-        model_names = self.resolve_model(tags)
-        return list(map(self._make_model_info, model_names))
+        candidates = self.resolve_model(tags)
+        return [self._make_model_info(name) for name, _ in candidates]
 
     def list_tags(self) -> Dict[str, List[ModelInfo]]:
-        """列出 [model_tag] 配置的所有标签及其模型信息
+        """列出 [model_tag] 与 [model_provider] 的逻辑模型及其模型信息
 
         Returns:
-            标签名 -> 模型信息列表。按配置顺序遍历；展平嵌套列表；
-            排除禁用模型；标签本身保留（模型全部禁用时值为空列表）。
+            名称 -> 模型信息列表。model_tag 展开嵌套列表，逻辑模型替换为其提供商；
+            model_provider 条目以提供商列表呈现
         """
         result: Dict[str, List[ModelInfo]] = {}
         for tag, models in self.model_tag.items():
-            names = [m for m in self._flatten_model_list(models)
-                     if m in self.api_config and m not in self.disabled_models]
-            result[tag] = list(map(self._make_model_info, names))
+            names: List[str] = []
+            for m in self._flatten_model_list(models):
+                if m in self.model_provider:
+                    names.extend(p for p in self.model_provider[m]
+                                 if p not in self.disabled_models)
+                elif m in self.api_config and m not in self.disabled_models:
+                    names.append(m)
+            result[tag] = [self._make_model_info(m) for m in names]
+        for provider_name, providers in self.model_provider.items():
+            result[provider_name] = [
+                self._make_model_info(m) for m in providers
+                if m not in self.disabled_models]
         return result
 
     def _make_model_info(self, model_name: str) -> ModelInfo:
@@ -1077,6 +1179,11 @@ class LLMProviderManager:
         for tag_name, tag_weights in self.model_tag_weights.items():
             if model_name in tag_weights:
                 tags[tag_name] = tag_weights[model_name]
+                continue
+            for provider_name, providers in self.model_provider.items():
+                if model_name in providers and provider_name in tag_weights:
+                    tags[tag_name] = tag_weights[provider_name]
+                    break
 
         return ModelInfo(
             name=model_name,
@@ -1101,6 +1208,10 @@ class LLMProviderManager:
         if not self._initialized:
             await self.http_client.__aenter__()
             self._initialized = True
+
+    def _merge_headers(self, model_headers: Dict[str, str]) -> Dict[str, str]:
+        """合并默认请求头与模型请求头（模型请求头优先）"""
+        return {**self.default_config.get('headers', {}), **model_headers}
 
     async def _end_request_with_error(
         self, request: LLMProviderRequest, response: LLMProviderResponse, error_text: str, finish_reason: FinishReason
@@ -1161,7 +1272,7 @@ class LLMProviderManager:
                 request=request,
                 url=model_config["url"],
                 json=request_body,
-                headers=model_config.get("headers", {}),
+                headers=self._merge_headers(model_config.get("headers", {})),
                 timeout=model_config.get("timeout_batch", self.timeout_batch)
             )
         except Exception as e:
@@ -1229,7 +1340,7 @@ class LLMProviderManager:
                 method="POST",
                 url=model_config["url"],
                 json=request_body,
-                headers=model_config.get("headers", {}),
+                headers=self._merge_headers(model_config.get("headers", {})),
                 timeout=model_config.get("timeout", self.timeout)
             ) as http_response:
                 http_response.raise_for_status()
@@ -1331,17 +1442,25 @@ class LLMProviderManager:
     async def _call_llm_api(self, request: LLMProviderRequest, response: LLMProviderResponse):
         """核心API调用入口，返回完整的LLM响应对象"""
 
-        # 校验模型配置
-        real_model_name = request.model_name
+        # 解析真实提供商
+        try:
+            providers = self._resolve_model_providers(
+                request.model_name, messages=request.messages,
+                context_id=request.context_id)
+        except LLMNoAvailableModelError as e:
+            await self._end_request_with_error(
+                request, response, str(e), FinishReason.error_request
+            )
+            return
+        real_model_name = providers[0]
         model_config = self.api_config.get(real_model_name, {}).copy()
         if not model_config:
             await self._end_request_with_error(
                 request, response,
-                f"Model not found: {request.model_name}",
+                f"Model not found: {real_model_name}",
                 FinishReason.error_request
             )
             return
-        request.model_name = real_model_name
         response.model_name = real_model_name
 
         api_type = model_config.get("type", self.default_config.get('api_type', 'openai'))
@@ -1374,10 +1493,10 @@ class LLMProviderManager:
 
         # 计算排队时间与队列长度
         queue_start = time.monotonic()
-        response.queue_length = self.resource_manager.get_queue_length(request.model_name)
+        response.queue_length = self.resource_manager.get_queue_length(real_model_name)
 
         # 获取资源锁（控制模型并行度）
-        async with self.resource_manager.acquire(request.model_name, request.request_id):
+        async with self.resource_manager.acquire(real_model_name, request.request_id):
             response.queue_time = time.monotonic() - queue_start
 
             # 根据请求类型处理
@@ -1500,7 +1619,11 @@ class LLMProviderManager:
 
     def update_api_config(self, model_name: str, model_config: Dict[str, Any]):
         """更新单个模型配置"""
+        if model_name in self.model_provider:
+            raise ValueError(
+                f"Api model '{model_name}' conflicts with model provider")
         self.api_config[model_name] = model_config.copy()
+        self.model_names = set(self.api_config) | set(self.model_provider)
 
         # 更新 disabled_models
         if not model_config.get('enable', True):
@@ -1524,11 +1647,35 @@ class LLMProviderManager:
 
     def update_model_tag(self, tag: str, models: List[Union[str, List[str]]]):
         """更新 model_tag"""
+        if tag in self.model_provider:
+            raise ValueError(
+                f"Tag '{tag}' conflicts with model provider")
         for m in self._flatten_model_list(models):
-            if m not in self.api_config:
-                raise ValueError(f"Model '{m}' in tag '{tag}' not found in api config")
+            if m not in self.model_names:
+                raise ValueError(f"Model '{m}' in tag '{tag}' not found in config")
         self.model_tag[tag] = models
         self._calculate_all_tag_weights()
+
+    def update_model_provider(self, provider_name: str, providers: List[str]):
+        """更新 model_provider"""
+        if provider_name in self.api_config:
+            raise ValueError(
+                f"Model provider '{provider_name}' conflicts with api config")
+        if provider_name in self.model_tag:
+            raise ValueError(
+                f"Model provider '{provider_name}' conflicts with tag config")
+        if not providers:
+            raise ValueError(
+                f"Model provider '{provider_name}' must be a non-empty list")
+        for m in providers:
+            if not isinstance(m, str):
+                raise ValueError(
+                    f"Provider '{m}' in model_provider '{provider_name}' must be a string")
+            if m not in self.api_config:
+                raise ValueError(
+                    f"Provider '{m}' in model_provider '{provider_name}' not found in api config")
+        self.model_provider[provider_name] = list(providers)
+        self.model_names = set(self.api_config) | set(self.model_provider)
 
     async def close(self):
         """清理资源"""

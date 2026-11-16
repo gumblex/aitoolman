@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0
+### 新增
+- 新增 `[model_provider]` 配置，一个逻辑模型名可对应多个提供商
+- 模型路由支持全局 `:N` 旋转语法（如 `"image,cheap:3"`），旋转值与 `model_rank` 相加
+- `LLMModuleRequest` 新增 `rank_by_model`，用于选择按模型或按提供商切换次优候选
+- provider 请求附加 `User-Agent: aitoolman/<version>`
+- CLI 新增 `version` 子命令
+
+### 修改
+- `resolve_model` 返回提供商及其模型层评分列表；模型名与标签统一为英文逗号分隔的字符串
+- 移除 `llm_provider.toml` 的 `[model_alias]` 兼容性；应用层 `[model_alias]` 保持不变
+- 移除 `/N` 旋转与按标签 `tag:rank` 旋转语法
+- ZMQ 服务端 `resolve_model` 响应格式变更，客户端与服务端需同步升级
+
 ## 0.9.1
 ### 修改
 - 修改文档，反映当前项目概况

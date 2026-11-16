@@ -422,7 +422,7 @@ class _FakeZmqClient:
                  models=None, tags=None, stream_events=None, pause_after=None,
                  stream_pause=None, end_with_none_event=False):
         self.response = response
-        self.candidates = candidates if candidates is not None else ["model-a"]
+        self.candidates = candidates if candidates is not None else [("model-a", 1.0)]
         self.resolve_error = resolve_error
         self.models = models if models is not None else []
         self.tags = tags if tags is not None else {}

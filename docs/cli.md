@@ -55,7 +55,7 @@ options:
   -z, --zmq-endpoint ZMQ_ENDPOINT
                         ZeroMQ ROUTER endpoint (e.g., tcp://localhost:5555) (for ZMQ Client)
   -a, --auth AUTH       ZeroMQ auth token
-  -m, --model MODEL     Model name to use
+  -m, --model MODEL     Model name/tag to use (separate multiple tags with commas)
   -p, --prompt PROMPT   Path to prompt text file
   -M, --media [MEDIA ...]
                         Path to media files (images/videos), e.g., -M img1.jpg img2.mp4
@@ -76,7 +76,7 @@ usage: python3 -m aitoolman code-edit [-h] [-v] (-c CONFIG | -z ZMQ_ENDPOINT) [-
                                       [-p PROMPT] [-M [MEDIA ...]] [--batch] [--no-system]
                                       [--overwrite]
 
-LLM代码修改工具 - 使用AI助手修改代码文件
+LLM文本文件编辑工具 - 使用AI助手修改/生成文本文件
 
 options:
   -h, --help            show this help message and exit
@@ -85,7 +85,7 @@ options:
   -z, --zmq-endpoint ZMQ_ENDPOINT
                         ZeroMQ服务端点（如: tcp://localhost:5555）
   -a, --auth AUTH       ZeroMQ auth token
-  -m, --model MODEL     指定模型名称（如: Kimi-K2, DeepSeek-v3）
+  -m, --model MODEL     指定模型名称/标签（多个标签以英文逗号分隔，如: "code,multimodal"）
   -r, --reference REFERENCE [REFERENCE ...]
                         参考文件路径（提供上下文，可多个）
   -i, --input INPUT [INPUT ...]
@@ -158,3 +158,13 @@ options:
                         ZeroMQ ROUTER endpoint
   -a, --auth AUTH       ZeroMQ management auth token
 ```
+
+## 版本
+```
+usage: python3 -m aitoolman version [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
+打印当前版本，如 `aitoolman 0.10.0`。

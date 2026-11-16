@@ -5,7 +5,7 @@ import logging
 import sqlite3
 import datetime
 import textwrap
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Tuple
 
 import msgspec
 import zmq
@@ -14,7 +14,7 @@ import zmq.asyncio
 from . import util
 from . import model as _model
 from . import zmqprotocol
-from .model import LLMProviderRequest, LLMProviderResponse, LLMApiRequestError, ToolCall, Message, ModelInfo
+from .model import LLMProviderRequest, LLMProviderResponse, LLMApiRequestError, LLMApplicationError, ToolCall, Message, ModelInfo
 from .channel import ChannelWriter, ChannelEvent
 from .client import LLMClient
 
@@ -336,20 +336,35 @@ class LLMZmqClient(LLMClient):
 
     async def resolve_model(
             self,
-            tags: Union[str, List[str]],
+            tags: str,
             messages: Optional[List[Message]] = None,
-            context_id: Optional[str] = None
-    ) -> List[str]:
+            context_id: Optional[str] = None,
+            model_rank: int = 0,
+            rank_by_model: bool = False
+    ) -> List[Tuple[str, float]]:
         """异步解析模型"""
-        if isinstance(tags, str):
-            tags = [tags]
-        kwargs = {'tags': tags, 'context_id': context_id or self.client_id}
+        kwargs = {
+            'tags': tags,
+            'context_id': context_id or self.client_id,
+            'model_rank': model_rank,
+            'rank_by_model': rank_by_model
+        }
         if messages is not None:
             kwargs['messages'] = [m.to_dict() for m in messages]
         try:
-            return await self._send_rpc('resolve_model', kwargs)
+            result = await self._send_rpc('resolve_model', kwargs)
         except TimeoutError:
             raise LLMApiRequestError("resolve_model RPC request timeout")
+        candidates = []
+        for item in result or []:
+            if (not isinstance(item, (list, tuple)) or len(item) != 2
+                    or not isinstance(item[0], str)
+                    or not isinstance(item[1], (int, float))):
+                raise LLMApplicationError(
+                    "Incompatible resolve_model response from server,"
+                    " please upgrade aitoolman server and client")
+            candidates.append((item[0], float(item[1])))
+        return candidates
 
     async def update_config(self, new_config: Dict[str, Any]):
         await self._send_rpc('update_config', {'new_config': new_config})
@@ -362,6 +377,9 @@ class LLMZmqClient(LLMClient):
 
     async def update_model_tag(self, tag: str, models: List[str]):
         await self._send_rpc('update_model_tag', {'tag': tag, 'models': models})
+
+    async def update_model_provider(self, provider_name: str, providers: List[str]):
+        await self._send_rpc('update_model_provider', {'provider_name': provider_name, 'providers': providers})
 
 
 class LLMMonitor:

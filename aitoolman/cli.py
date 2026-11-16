@@ -8,6 +8,7 @@ from . import app as _app
 from . import util
 from . import client as _client
 from . import channel as _channel
+from ._version import VERSION
 from .model import Message, MediaContent, LLMDirectRequest
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,8 @@ def subparser_client(subparsers):
     subp.add_argument(
         '-a', '--auth', help='ZeroMQ auth token')
     subp.add_argument(
-        '-m', '--model', required=True, action='append',
-        help='Model name/tag to use, can specify multiple for model routing')
+        '-m', '--model', required=True,
+        help='Model name/tag to use (separate multiple tags with commas)')
 
     # Inputs
     subp.add_argument(
@@ -87,7 +88,7 @@ def subparser_client(subparsers):
 def subparser_code_edit(subparsers):
     subp = subparsers.add_parser(
         'code-edit',
-        description="LLM Code Editing Tool - Modify code files with AI assistant",
+        description="LLM 文本文件编辑工具 - 使用 AI 助手修改/生成文本文件",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage Examples:
@@ -130,8 +131,8 @@ python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://loc
         help="ZeroMQ auth token"
     )
     subp.add_argument(
-        "-m", "--model", type=str, required=True, action='append',
-        help="Model name/tag to use, can specify multiple for model routing"
+        "-m", "--model", type=str, required=True,
+        help="Model name/tag to use (separate multiple tags with commas)"
     )
 
     subp.add_argument(
@@ -276,6 +277,11 @@ python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --cli
     return subp
 
 
+def subparser_version(subparsers):
+    subp = subparsers.add_parser('version', help='Print version')
+    return subp
+
+
 # --- Run functions ---
 
 async def _run_client_session(args):
@@ -337,11 +343,11 @@ async def _run_client_session(args):
         )]
 
         # Resolve actual model
-        model_names = await client.resolve_model(args.model, messages=messages)
-        actual_model = model_names[0]
+        candidates = await client.resolve_model(args.model, messages=messages)
+        actual_model = candidates[0][0]
         logger.info("Resolved model from candidates: %s", ', '.join(
-            (f'[{m}]' if i == 0 else m)
-            for i, m in enumerate(model_names)
+            (f'[{name}] ({score:.4f})' if i == 0 else f'{name} ({score:.4f})')
+            for i, (name, score) in enumerate(candidates)
         ))
 
         # 6. Construct LLMDirectRequest
@@ -483,6 +489,10 @@ def run_manage(args):
     asyncio.run(_run_manage_session(args))
 
 
+def run_version(args):
+    print(f"aitoolman {VERSION}")
+
+
 def run_http(args):
     from . import http_server
     http_server.run_http(args)
@@ -502,9 +512,10 @@ def main():
     subparser_monitor(subparsers)
     subparser_manage(subparsers)
     subparser_http(subparsers)
+    subparser_version(subparsers)
 
     args = parser.parse_args()
-    if args.verbose:
+    if getattr(args, 'verbose', 0):
         logging.getLogger('aitoolman').setLevel(logging.DEBUG)
 
     globals()['run_' + args.subparser_name.replace('-', '_')](args)

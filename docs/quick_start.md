@@ -114,8 +114,9 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
-    model_name: Union[str, List[str], None] = None  # 指定模型名/标签/标签列表，支持 tag:rank 语法（如 code:2），覆盖模块默认配置
+    model_name: Optional[str] = None  # 指定模型名/标签，多个标签以英文逗号分隔，可含全局 :N 旋转后缀，覆盖模块默认配置
     model_rank: int = 0   # 模型路由候选排名（从0开始，超出自动取模，详见模型路由功能）
+    rank_by_model: bool = False  # True 按模型旋转后拆分提供商，False 拆分提供商后旋转
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
 
@@ -665,8 +666,8 @@ class LLMClient(abc.ABC):
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
-    # 解析实际候选模型
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: Optional[str] = None) -> List[str]: ...
+    # 解析实际候选提供商及其评分
+    async def resolve_model(self, tags: str, messages: Optional[List[Message]] = None, context_id: Optional[str] = None, model_rank: int = 0, rank_by_model: bool = False) -> List[Tuple[str, float]]: ...
 ```
 
 #### 4.2.2 本地客户端
@@ -748,8 +749,8 @@ class LLMProviderManager:
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
 
-    # 解析候选模型
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]: ...
+    # 解析候选提供商及其评分
+    def resolve_model(self, tags: str, messages: Optional[List[Message]] = None, context_id: str = '', model_rank: int = 0, rank_by_model: bool = False) -> List[Tuple[str, float]]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # 列出可用模型
 ```
 
@@ -757,44 +758,46 @@ class LLMProviderManager:
 框架内置灵活的模型路由机制，通过标签分组实现业务代码与具体模型的解耦，支持多标签匹配、自动权重计算、Token超限过滤、多候选降级重试等能力，便于统一调整模型资源、平衡成本和效果。
 
 #### 5.3.1 配置方式
-在提供商配置文件的 `[model_tag]` 段定义标签与模型的映射关系，每个标签下的模型列表按推荐优先级排序（越靠前权重越高）。业务代码中直接使用标签，无需关心底层具体模型，支持随时调整模型组合而不修改业务代码。
-详细配置说明参考《[配置文件文档](./config.md)》的 model_tag 部分。
+在提供商配置文件的 `[model_tag]` 段定义标签与模型的映射关系，每个标签下的模型列表按推荐优先级排序（越靠前权重越高）；`[model_provider]` 段声明一个模型有多个提供商，其逻辑模型名可用于标签或直接调用。业务代码中直接使用标签，无需关心底层具体提供商，支持随时调整模型组合而不修改业务代码。
+详细配置说明参考《[配置文件文档](./config.md)》的 model_tag / model_provider 部分。
 
 #### 5.3.2 路由算法
-输入标签列表（`input_tags`）后，系统按以下规则计算最优候选模型列表：
-1. **精确匹配优先**：遍历 input_tags，若存在与真实模型名完全匹配的项，直接返回该模型（单元素列表）
-2. **标签交集匹配**：查找每个输入标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/别名视为单元素集合，权重为1）。若标签使用 `tag:rank` 语法（如 `fast:2`），会先按指定排名循环移位模型列表再计算权重
-3. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型
-4. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序。使用 tag:rank 语法时，权重计算会根据 rank 值调整模型在标签内的排序位置（详见 [配置文件文档](./config.md)）
-5. **排队长度排序**：权重相同的同级模型，按当前排队任务数从低到高排序，优先选择排队较少的模型
-6. **稳定随机排序**：若权重和并发量仍相同，以 `context_id`（如有）或 `client_id` 为随机种子进行稳定排序，同一上下文的多次调用结果稳定，不同上下文之间实现负载均衡
+输入标签字符串（`input_tags`）后，系统按以下规则计算最优候选提供商列表：
+1. **解析全局旋转值**：整串末尾 `:N` 剥离为全局旋转值（N 缺省为 1，非法后缀抛 `LLMNoAvailableModelError`），剩余部分按英文逗号分隔为标签；任一项未匹配到标签/模型名/逻辑模型名即抛 `LLMNoAvailableModelError`
+2. **精确匹配优先**：遍历标签项，若存在与模型名或逻辑模型名完全匹配的项，该模型直接入选（评分 1.0）
+3. **标签交集匹配**：查找每个标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/逻辑模型名视为单元素集合，权重为1）
+4. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型；逻辑模型在拆分提供商时按其提供商的限制过滤
+5. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序
+6. **排队长度排序**：权重相同的同级模型，按当前排队任务数从低到高排序，优先选择排队较少的模型；逻辑模型取其提供商的最小队列长度
+7. **稳定随机排序**：若权重和并发量仍相同，以 `context_id`（如有）或 `client_id` 为随机种子进行稳定排序，同一上下文的多次调用结果稳定，不同上下文之间实现负载均衡
+8. **按提供商拆分**：按 `rank_by_model` 选择拆分时机——True 时先按 `shift=(N-1+model_rank)` 旋转模型列表再拆分，False 时先拆分提供商再旋转提供商列表
 
-返回候选模型列表
+返回候选提供商及其模型层评分列表
 
 #### 5.3.3 使用方式
-- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages, context_id=context_id)`，传入标签列表、可选的消息列表和上下文 ID（可选），得到排序后的候选模型列表
-- **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，可传入单个标签字符串或多个标签的列表，系统自动路由到最优模型
-- **单字符串输入**：`resolve_model` 接口与模块 `model_name` 参数也支持传入单个字符串，多个标签以英文逗号分隔（如 `"fast:2,code:2/3"`），末尾可用 `/N` 后缀（从 1 计数，与 tag:rank 规则一致）对最终候选模型列表循环旋转；列表输入时 `/` 无特殊含义
-- **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
+- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages, context_id=context_id, model_rank=model_rank, rank_by_model=rank_by_model)`，传入标签字符串、可选的消息列表和上下文 ID（可选），得到排序后的候选提供商及模型层评分列表
+- **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，传入标签字符串，系统自动路由到最优提供商
+- **单字符串输入**：`resolve_model` 接口与模块 `model_name` 参数均使用单个字符串，多个标签以英文逗号分隔（如 `"image,cheap"`）；整串末尾可附加 `:N` 后缀，对最终候选列表循环旋转 N-1 位
+- **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模；与全局 `:N` 的旋转值相加（`shift=(N-1+model_rank)%候选数`）。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
+- **rank_by_model 参数**：选择旋转作用的对象。True 时评分后先按模型旋转，再按 `[model_provider]` 拆分为提供商；False 时先拆分为提供商再旋转。默认 False
 - **context_id 参数**：`resolve_model` 的 `context_id` 参数用于作为稳定随机排序的随机种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id` 作为种子
-- **tag:rank 语法**：在标签名后添加 `:rank` 后缀可调整该标签的模型排序优先级，rank 为整数。rank=1 不调整，rank=N 将前 N-1 项移到末尾，超出范围自动取模循环。例如 `code:2` 表示将 code 标签的第1项移到末尾；多个标签可分别指定 rank，如 `_model_name=["code:2", "fast:3"]`。tag:rank 仅适用于标签名，不适用于直接模型名；不使用 `:rank` 后缀时行为不变。详细规则参考《[配置文件文档](./config.md)》的 model_tag 部分
 
 
 使用示例：
 ```python
-# 选择 fast 标签的第 2 优先级模型
-result = await app['module'](_model_name="fast:2", text="Hello")
+# 选择 fast 标签排序后的候选提供商
+result = await app['module'](_model_name="fast", text="Hello")
 
-# 多标签交叉时混合使用 tag:rank 和普通标签
-candidates = await client.resolve_model(["code:2", "multimodal"])
+# 多标签交叉，整串末尾旋转 2 位
+candidates = await client.resolve_model("code,multimodal:3")
 ```
 
 #### 5.3.4 应用场景
 - 按业务场景分组：如 `fast`（快速响应）、`precise`（高精度）、`low_cost`（低成本）、`code`（代码处理）、`multimodal`（多模态）等，业务代码直接使用场景标签
-- 多标签交叉匹配：如传入 `["code", "multimodal"]` 自动选择同时支持代码和多模态能力，在两者中最优的模型
+- 多标签交叉匹配：如传入 "code,multimodal" 自动选择同时支持代码和多模态能力，在两者中最优的模型
 - 故障自动降级：主模型不可用时自动切换到备用模型，提升服务可用性
 - 成本动态调整：根据业务优先级自动选择不同成本档位的模型
-- 标签内排序调整：使用 tag:rank 语法灵活调整标签内模型优先级，无需修改配置文件即可临时切换首选模型
+- 全局排序调整：使用整串末尾 :N 语法灵活调整最终候选列表起点，无需修改配置文件即可临时切换首选提供商
 
 ## 6. 实用工具
 
@@ -886,7 +889,7 @@ rank_adjust_ratio = 0.25 # 模型路由权重调整参数，可选
 # 模型标签配置，用于模型路由，按优先级排序，尽量写全
 # 业务代码使用标签，无需关心底层具体模型，支持灵活切换和路由
 # 模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。
-# 例如传入 `["code", "multimodal"]` 可自动选择支持多模态的代码模型，传入 `["low_cost", "fast"]` 可自动选择低成本且响应快的模型，适配各类交叉场景。
+# 例如传入 "code,multimodal" 可自动选择支持多模态的代码模型，传入 "low_cost,fast" 可自动选择低成本且响应快的模型，适配各类交叉场景。
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # 低成本模型组，适合批量文本处理
 "fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # 高速响应模型组，适合快速处理任务
@@ -1063,7 +1066,7 @@ async def main():
             code_content=open("app.py").read(),
             instruction="参考截图添加错误处理逻辑",
             references=[{"filename": "utils.py", "content": open("utils.py").read()}],
-            _model_name=["code", "multimodal"],
+            _model_name="code,multimodal",
             _output_channel=output_channel
         )
         result.raise_for_status()
@@ -1098,7 +1101,7 @@ async def process_ticket(app_factory, ticket):
     result = await app['ticket_classifier'](
         ticket_content=ticket['content'],
         ticket_type=ticket['type'],
-        _model_name=["low_cost", "fast"] # 使用低成本+高速模型组
+        _model_name="low_cost,fast" # 使用低成本+高速模型组
     )
     result.raise_for_status()
     return {
@@ -1391,7 +1394,7 @@ python3 -m aitoolman client \
 # 指定多个标签，自动路由到匹配的最优模型
 python3 -m aitoolman client \
   -z tcp://localhost:5555 \
-  -m code -m multimodal \
+  -m "code,multimodal" \
   -a your-auth-token
 ```
 

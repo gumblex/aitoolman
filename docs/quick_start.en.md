@@ -114,9 +114,9 @@ class LLMModuleRequest(typing.NamedTuple):
     """Application layer template request parameters (module configuration)"""
     module_name: str                    # Module name
     template_params: Dict[str, Any]     # Template parameters
-    model_name: Union[str, List[str], None] = None  # Specify model name/tag/tag list, supports tag:rank syntax (e.g. code:2), override module default configuration
-    # Model routing candidate rank (starts from 0, automatically applies modulo when exceeded, see Model Routing feature for details)
-    model_rank: int = 0
+    model_name: Optional[str] = None  # Specify model name/tag, separate multiple tags with commas, may include a global :N rotation suffix, override module default configuration
+    model_rank: int = 0   # Model routing candidate rank (starts from 0, automatically applies modulo when exceeded, see Model Routing feature for details)
+    rank_by_model: bool = False  # True rotates models before splitting providers, False splits providers before rotating
     context_messages: List[Message] = []  # Context messages
     media_content: Optional[List[MediaContent]] = None  # Multimedia content
 
@@ -661,8 +661,8 @@ class LLMClient(abc.ABC):
     async def audit_event(self, context_id: str, event_type: str, **kwargs): ...
     
     async def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
-    # Resolve actual candidate models
-    async def resolve_model(self, tags: Union[str, List[str]], messages: Optional[List[Message]] = None, context_id: Optional[str] = None) -> List[str]: ...
+    # Resolve actual candidate providers and their scores
+    async def resolve_model(self, tags: str, messages: Optional[List[Message]] = None, context_id: Optional[str] = None, model_rank: int = 0, rank_by_model: bool = False) -> List[Tuple[str, float]]: ...
 ```
 
 #### 4.2.2 Local Client
@@ -744,8 +744,8 @@ class LLMProviderManager:
     async def cancel_request(self, request_id: str): ...
     async def cancel_all_requests(self, client_id: str, context_id: Optional[str] = None): ...
 
-    # Select candidate models
-    def resolve_model(self, tags: List[str], messages: Optional[List[Message]] = None, context_id: str = '') -> List[str]: ...
+    # Resolve candidate providers and their scores
+    def resolve_model(self, tags: str, messages: Optional[List[Message]] = None, context_id: str = '', model_rank: int = 0, rank_by_model: bool = False) -> List[Tuple[str, float]]: ...
     def list_models(self, tag: Optional[str] = None) -> List[ModelInfo]: ... # List available models
 ```
 
@@ -753,44 +753,46 @@ class LLMProviderManager:
 The framework has a built-in flexible model routing mechanism that decouples business code from specific models through tag grouping. It supports multi-tag matching, automatic weight calculation, token over-limit filtering, multi-candidate degradation retry and other capabilities, facilitating unified adjustment of model resources and balancing cost and effect.
 
 #### 5.3.1 Configuration Method
-Define the mapping between tags and models in the `[model_tag]` section of the provider configuration file. The model list under each tag is sorted by recommendation priority (the higher the ranking, the higher the weight). Business code directly uses tags without concerning the underlying specific models, and supports adjusting model combinations at any time without modifying business code.
-For detailed configuration instructions, refer to the [Configuration File Documentation](./config.md) model_tag section.
+Define the mapping between tags and models in the `[model_tag]` section of the provider configuration file. The model list under each tag is sorted by recommendation priority (the higher the ranking, the higher the weight). The `[model_provider]` section declares that a model has multiple providers, and its logical model name can be used in tags or called directly. Business code directly uses tags without concerning the underlying specific providers, and supports adjusting model combinations at any time without modifying business code.
+For detailed configuration instructions, refer to the [Configuration File Documentation](./config.md) model_tag / model_provider section.
 
 #### 5.3.2 Routing Algorithm
-After inputting the tag list (`input_tags`), the system calculates the optimal candidate model list according to the following rules:
-1. **Exact match first**: Traverse input_tags. If there is an item that exactly matches the actual model name, return the model directly (single-element list).
-2. **Tag intersection matching**: Find the model set and corresponding weight for each input tag, and take the intersection of models corresponding to all tags (a single model name/alias is treated as a single-element set with weight 1). If a tag uses the `tag:rank` syntax (e.g., `fast:2`), the model list is cyclically shifted by the specified rank before calculating weights.
-3. **Token limit filtering**: If the `messages` parameter is provided, automatically estimate the total number of input tokens, and filter out models configured with `max_input_tokens` where the total token count exceeds the limit.
-4. **Weight Sorting**: Sum the weight of each model across all matched tags, and sort the models in descending order of total weight. When using tag:rank syntax, weight calculation adjusts the model's position within the tag based on the rank value (see [Configuration File Documentation](./config.md))
-5. **Queue Length Sorting**: For models at the same tier with identical total weight, sort them in ascending order of the current number of pending queued tasks, to prioritize models with shorter queues
-6. **Stable Random Sorting**: If the total weight and queue length of models are still exactly the same, use `context_id` (if available) or `client_id` as the random seed for stable sorting. Multiple calls under the same context will return consistent results, while load balancing is achieved across different contexts
+After inputting the tag string (`input_tags`), the system calculates the optimal candidate provider list according to the following rules:
+1. **Parse global rotation value**: A trailing `:N` on the whole string is stripped as the global rotation value (N defaults to 1; an invalid suffix raises `LLMNoAvailableModelError`), and the remainder is split by English commas into tags; if any item matches no tag/model name/logical model name, `LLMNoAvailableModelError` is raised
+2. **Exact match first**: Traverse the tag items. If there is an item that exactly matches a model name or logical model name, that model is selected directly (score 1.0)
+3. **Tag intersection matching**: Find the model set and corresponding weight for each tag, and take the intersection of models corresponding to all tags (a single model name/logical model name is treated as a single-element set with weight 1)
+4. **Token limit filtering**: If the `messages` parameter is provided, automatically estimate the total number of input tokens, and filter out models configured with `max_input_tokens` where the total token count exceeds the limit; logical models are filtered by their providers' limits when split into providers
+5. **Weight Sorting**: Sum the weight of each model across all tags, and sort the models in descending order of total weight
+6. **Queue Length Sorting**: For models at the same tier with identical total weight, sort them in ascending order of the current number of pending queued tasks, prioritizing models with shorter queues; a logical model uses the minimum queue length of its providers
+7. **Stable Random Sorting**: If the total weight and queue length of models are still exactly the same, use `context_id` (if available) or `client_id` as the random seed for stable sorting. Multiple calls under the same context return consistent results, while load balancing is achieved across different contexts
+8. **Split by provider**: Choose the split timing according to `rank_by_model` — when True, rotate the model list by `shift=(N-1+model_rank)` before splitting; when False, split into providers first and then rotate the provider list
 
-The sorted candidate model list will be returned after the above processing.
+The sorted candidate provider list with model-layer scores is returned after the above processing.
 
 #### 5.3.3 Usage
-- **resolve_model Interface**: Directly call `client.resolve_model(tags, messages, context_id=context_id)`, pass in the tag list, optional message list and optional context ID, to get the sorted candidate model list
-- **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, you can pass in a single tag string or a list of multiple tags, and the system will automatically route to the optimal model.
-- **Single string input**: The `resolve_model` interface and the module `model_name` parameter also accept a single string, with multiple tags separated by commas (e.g., `"fast:2,code:2/3"`), optionally followed by a `/N` suffix (counting from 1, consistent with the tag:rank rule) to cyclically rotate the final candidate model list; `/` has no special meaning for list input.
-- **model_rank parameter**: Used to select the Nth model in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied. When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing.
+- **resolve_model Interface**: Directly call `client.resolve_model(tags, messages, context_id=context_id, model_rank=model_rank, rank_by_model=rank_by_model)`, passing in the tag string, an optional message list and an optional context ID, to get the sorted candidate provider list with model-layer scores
+- **Module call parameter passing**: Through the `model_name` parameter of `LLMModuleRequest` or the `_model_name` parameter of `app['module'](_model_name=xxx)`, pass in a tag string, and the system automatically routes to the optimal provider
+- **Single string input**: Both the `resolve_model` interface and the module `model_name` parameter accept a single string, with multiple tags separated by English commas (e.g., `"image,cheap"`); a `:N` suffix may be appended to the end of the whole string to cyclically rotate the final candidate list by N-1 positions
+- **model_rank parameter**: Used to select the Nth item in the candidate list (counting from 0). If it exceeds the length of the candidate list, modulo operation is automatically applied; it is added to the global `:N` rotation value (`shift=(N-1+model_rank)%candidate_count`). When encountering a `LLMRetriableError` (retriable error), you can increment `model_rank` and retry to automatically switch to the next priority candidate model, achieving fault degradation and load balancing
+- **rank_by_model parameter**: Selects the rotation target. When True, rotate by model after scoring, then split into providers according to `[model_provider]`; when False, split into providers first and then rotate. Defaults to False
 - **context_id Parameter**: The `context_id` parameter of the `resolve_model` interface acts as the random seed for stable random sorting, ensuring that multiple calls with the same `context_id` return consistent results. If it is not explicitly passed, `client_id` will be used as the seed by default
-- **tag:rank Syntax**: Add a `:rank` suffix to a tag name to adjust the model ordering priority for that tag, where rank is an integer. rank=1 makes no adjustment, rank=N moves the first N-1 items to the end, values exceeding the range automatically apply modulo cycling. For example, `code:2` moves the first item of the code tag to the end; multiple tags can specify ranks independently, e.g., `_model_name=["code:2", "fast:3"]`. tag:rank only applies to tag names, not direct model names; behavior remains unchanged when the `:rank` suffix is not used. For detailed rules, refer to the model_tag section in the [Configuration File Documentation](./config.md)
 
 
 Usage example:
 ```python
-# Select the 2nd priority model from the fast tag
-result = await app['module'](_model_name="fast:2", text="Hello")
+# Select the candidate providers of the fast tag after sorting
+result = await app['module'](_model_name="fast", text="Hello")
 
-# Mix tag:rank and plain tags in multi-tag cross matching
-candidates = await client.resolve_model(["code:2", "multimodal"])
+# Multi-tag cross matching, rotating the whole string by 2 positions
+candidates = await client.resolve_model("code,multimodal:3")
 ```
 
 #### 5.3.4 Application Scenarios
 - Group by business scenario: such as `fast` (fast response), `precise` (high precision), `low_cost` (low cost), `code` (code processing), `multimodal` (multimodal), etc. Business code directly uses scenario tags.
-- Multi-tag cross matching: For example, passing `["code", "multimodal"]` will automatically select the optimal model that supports both code and multimodal capabilities.
+- Multi-tag cross matching: For example, passing "code,multimodal" will automatically select the optimal model that supports both code and multimodal capabilities.
 - Automatic fault degradation: Automatically switch to the backup model when the primary model is unavailable, improving service availability.
 - Dynamic cost adjustment: Automatically select models of different cost tiers according to business priority.
-- Tag-internal rank adjustment: Use tag:rank syntax to flexibly adjust model priority within a tag, enabling temporary preferred model switching without modifying configuration files.
+- Global rank adjustment: Use the trailing :N syntax to flexibly adjust the starting point of the final candidate list, enabling temporary preferred provider switching without modifying configuration files.
 
 ## 6. Utility Tools
 
@@ -881,7 +883,7 @@ rank_adjust_ratio = 0.25 # Model routing weight adjustment parameter, optional
 # Model tag configuration for model routing, sorted by priority, fill in as completely as possible
 # Use tags in business code without worrying about underlying specific models, supporting flexible switching and routing
 # Model routing supports passing multiple tags at the same time, the system will automatically match available models that meet all tags, and automatically select the optimal model combined with input token count limits and model priority.
-# For example, passing `["code", "multimodal"]` will automatically select a code model that supports multimodal, passing `["low_cost", "fast"]` will automatically select a low-cost and fast-response model, adapting to various cross scenarios.
+# For example, passing "code,multimodal" will automatically select a code model that supports multimodal, passing "low_cost,fast" will automatically select a low-cost and fast-response model, adapting to various cross scenarios.
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # Low-cost model group, suitable for batch text processing
 "fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # High-speed response model group, suitable for fast task processing
@@ -1058,7 +1060,7 @@ async def main():
             code_content=open("app.py").read(),
             instruction="Add error handling logic referring to the screenshot",
             references=[{"filename": "utils.py", "content": open("utils.py").read()}],
-            _model_name=["code", "multimodal"],
+            _model_name="code,multimodal",
             _output_channel=output_channel
         )
         result.raise_for_status()
@@ -1093,7 +1095,7 @@ async def process_ticket(app_factory, ticket):
     result = await app['ticket_classifier'](
         ticket_content=ticket['content'],
         ticket_type=ticket['type'],
-        _model_name=["low_cost", "fast"] # Use low-cost + high-speed model group
+        _model_name="low_cost,fast" # Use low-cost + high-speed model group
     )
     result.raise_for_status()
     return {
@@ -1387,7 +1389,7 @@ python3 -m aitoolman client \
 # Specify multiple tags, automatically route to the matched optimal model
 python3 -m aitoolman client \
   -z tcp://localhost:5555 \
-  -m code -m multimodal \
+  -m "code,multimodal" \
   -a your-auth-token
 ```
 

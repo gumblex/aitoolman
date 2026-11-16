@@ -548,7 +548,7 @@ async def handle_chat_completions(
     # 模型解析先于流式响应 prepare，失败时可直接返回普通 HTTP 错误
     try:
         candidates = await client.resolve_model(model, messages=messages)
-        actual_model = candidates[0]
+        actual_model = candidates[0][0]
     except LLMNoAvailableModelError as e:
         return make_error_response(str(e), "model_not_found", status=404)
     except LLMLengthLimitError as e:

@@ -53,7 +53,7 @@ The request body follows the OpenAI chat/completions format:
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | String | Required. Supports model names, tags, `tag:rank`, comma-separated multiple tags, and a trailing `/N` rotation; resolved to the actual model via model routing |
+| `model` | String | Required. Supports model names, logical model names, and tags; separate multiple tags with commas and optionally append a global `:N` rotation suffix to the whole string; resolved to the actual model via model routing |
 | `messages` | Array | Required. OpenAI message format, supporting text and `image_url` image content; unrecognized forms are passed through as-is |
 | `stream` | Boolean | Default false. When true, the response is returned as an SSE stream |
 | `tools` | Array | Optional. OpenAI tool format, converted to aitoolman tool configuration |
@@ -69,13 +69,13 @@ Response:
 
 ### GET /v1/models
 
-Returns the OpenAI-format model list, with model tags also listed as model entries (`id` is the tag name; when a tag name duplicates a model name, the model takes precedence, and empty tags are omitted):
+Returns the OpenAI-format model list, with model tags and logical model names also listed as model entries (`id` is the tag or logical model name):
 
 ```json
 {"object": "list", "data": [{"id": "model or tag name", "object": "model", "created": 0, "owned_by": "aitoolman"}]}
 ```
 
-Tag entries can be used directly as the `model` parameter of a request (resolved to the actual model via model routing).
+Tag entries and logical model names can be used directly as the `model` parameter of a request (resolved to the actual model via model routing).
 
 ### GET /health
 

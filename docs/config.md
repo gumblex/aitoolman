@@ -59,54 +59,37 @@
 * "anthropic" 格式，headers 应有 `"X-Api-Key"`, `"anthropic-version" = "2023-06-01"`；body_options 应有 `max_tokens`
 
 
-### 1.4 [model_tag] 部分
+### 1.4 [model_tag] / [model_provider] 部分
 模型标签配置，用于模型路由和分组调度。按优先级排序，应尽量写全。
 
-业务代码可以使用标签，无需关心底层具体模型，支持灵活切换和路由。模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。例如传入 `["code", "multimodal"]` 可自动选择支持多模态的代码模型，传入 `["low_cost", "fast"]` 可自动选择低成本且响应快的模型，适配各类交叉场景。
+业务代码可以使用标签，无需关心底层具体模型，支持灵活切换和路由。模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。例如传入 `"code,multimodal"` 可自动选择支持多模态的代码模型，传入 `"low_cost,fast"` 可自动选择低成本且响应快的模型，适配各类交叉场景。
 
-原有 `[model_alias]` 配置（`别名 = 模型名`）会自动合并到 `[model_tag]`，每个别名作为标签，对应单元素列表。
+`[model_provider]` 用于声明一个模型有多个提供商，`逻辑模型名 = ["[api] 键名", ...]`。逻辑模型名可用于 `[model_tag]` 或直接调用；同一模型的提供商在评分后按队列长度与稳定随机排序，其权重与逻辑模型名共享。逻辑模型名不得与 `[api]` 键名或标签同名。未在此声明的 `[api]` 模型仍可独立使用。
 
 `标签名 = 字符串列表（支持一层嵌套）`
 
-键为标签名，值为模型列表。列表顺序为推荐优先级（越靠前权重越高）。模型名必须存在于 `[api]` 部分。元素可为字符串或字符串列表，嵌套列表中的模型共享该位置的排名权重，随机排序同权重模型。可用于轮流使用多个提供商的相同（类似）模型。
+键为标签名，值为模型列表。列表顺序为推荐优先级（越靠前权重越高）。模型可为 `[api]` 模型名或 `[model_provider]` 逻辑模型名。元素可为字符串或字符串列表，嵌套列表中的模型共享该位置的排名权重，随机排序同权重模型。可用于轮流使用多个提供商的相同（类似）模型。
 
 **示例：**
 ```toml
+[model_provider]
+deepseek = ["deepseek-provider1", "deepseek-provider2"]
+
 [model_tag]
 image = ['doubao-seed-2.0-pro']
 cheap = ['doubao-seed-2.0-mini','qwen-flash']
-fast = ['deepseek-v4-flash','qwen-flash']
-low_cost = ["doubao-seed-2.0-mini", "qwen-flash", ["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
-# 多个提供商轮流使用
-"deepseek-v4-flash" = [["deepseek-v4-flash-a", "deepseek-v4-flash-b", "deepseek-v4-flash-c"]]
+fast = ['deepseek','qwen-flash']
+low_cost = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek"]
 ```
 
 **权重计算：**
 列表中模型的权重按位置计算，越靠前权重越高。嵌套列表中的所有模型共享其所在位置的权重。权重公式中 `rank_adjust_ratio` 参数控制权重衰减速率，默认0.25。
 
-**tag:rank 语法：**
+**全局 :N 语法：**
 
-在调用 `resolve_model` 时，可以在标签名后附加 `:rank` 后缀来动态调整标签内模型的排序优先级。语法格式为 `tag_name:rank`，其中 `rank` 为整数。
+调用 `resolve_model` 或模块 `model_name` 时，可传入单个字符串，多个标签以英文逗号分隔（如 `"image,cheap"`）。整串末尾可附加 `:N` 后缀，对排序后的最终候选列表循环旋转 N-1 位。N 与 `model_rank` 累加（`shift = (N - 1 + model_rank) % 候选数`）。例如 `"image,cheap:3"` 表示 `image` 与 `cheap` 交集排序后旋转 2 位。后缀非整数、或分隔项无匹配时抛出 `LLMNoAvailableModelError`。
 
-- `rank=1`：不调整，保持原始顺序（等同于不使用 rank）
-- `rank=2`：将第1项移到末尾，第2项变为最高优先
-- `rank=N`：将前 N-1 项移到末尾，第 N 项变为最高优先
-- 超出范围的 rank 会自动取模循环（例如4个模型传入 rank=6 等同于 rank=2）
 
-移位在列表的外层元素级别进行，嵌套列表视为单个元素整体移位，嵌套列表内的模型共享该位置的权重。
-
-**示例：**
-```python
-# 假设 "code" 标签配置为 ["glm-5.1", "qwen3.7-max", "deepseek-v4-pro", "kimi-k2.5"]
-# 传入 ['code:2'] → qwen3.7-max 优先级最高
-# 传入 ['code:3'] → deepseek-v4-pro 优先级最高
-# 传入 ['code:5'] → 等同于 rank=1，glm-5.1 优先级最高
-# 混合使用：['code:2', 'image:3'] 各标签独立调整
-```
-
-不使用 `:rank` 后缀的标签行为完全不变。`tag:rank` 语法仅适用于标签名，不适用于直接模型名。
-
-调用 `resolve_model` 或模块 `model_name` 时也支持传入单个字符串，多个标签以英文逗号分隔（如 `"fast:2,code:2/3"`），末尾可用 `/N` 后缀（从 1 计数）对最终候选模型列表循环旋转；列表输入时 `/` 无特殊含义。
 
 ### 1.5 [http] 部分
 HTTP 服务（`python3 -m aitoolman http`）的配置，详见 docs/http_server.md。
@@ -215,7 +198,7 @@ client_tokens = ["sk-xxx"]
 
 | 参数   | 类型        | 默认值 | 说明            |
 |------|-----------|-----|---------------|
-| `别名` | 字符串/字符串列表 | 无   | 映射到实际的模型或标签名称 |
+| `别名` | 字符串 | 无   | 映射到实际的模型或标签名称 |
 
 ### 2.5 模板语法
 模板使用 Jinja2 语法，支持变量替换和基本控制结构。
@@ -271,7 +254,7 @@ model = "code"  # 使用模型别名
 template.user = """请使用{{language}}语言编写一个{{functionality}}的代码示例，并添加详细注释"""
 
 [module.task_adder]
-model = ["fast", "low_cost"]
+model = "fast,low_cost"
 stream = true
 template.user = "你作为一个日程助手，可以帮用户添加待办事项。分析用户指令，如果有具体的待办事项则调用工具，没有则面向用户，让用户详细说明代表事项。用户说：{{user_input}}"
 
@@ -331,7 +314,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. 注意事项
 
-1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_provider.toml` 的 `[api]` 部分的模型名称，也可以是 `[model_alias]` 部分定义的别名。
+1. **模型名称一致性**：`app_prompt.toml` 中的 `model` 可以是 `llm_provider.toml` 的 `[api]` 模型名称、`[model_provider]` 的逻辑模型名、`[model_tag]` 的标签名，也可以是 `[model_alias]` 部分定义的别名。
 
 2. **模板变量**：模板中使用的变量必须在调用时提供，否则会渲染失败。
 
@@ -339,4 +322,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **工具调用**：工具配置必须包含完整的参数定义，否则可能无法正确解析。
 
-5. **模型路由**：使用 `model_tag` 进行模型路由时，系统会根据标签权重和模型可用性自动选择最优模型。支持 `tag:rank` 语法动态调整标签内模型排序优先级（详见 1.4 节）。传入 `messages` 时，会自动估算Token数并过滤超出限制的模型。
+5. **模型路由**：使用 `model_tag` 进行模型路由时，系统会根据标签权重和模型可用性自动选择最优模型。支持整串末尾 `:N` 语法对最终候选列表循环旋转（详见 1.4 节）。传入 `messages` 时，会自动估算Token数并过滤超出限制的模型。

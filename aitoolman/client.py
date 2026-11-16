@@ -1,6 +1,6 @@
 import abc
 import logging
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Tuple
 
 from . import util
 from .channel import ChannelWriter
@@ -98,18 +98,23 @@ class LLMClient(abc.ABC):
     @abc.abstractmethod
     async def resolve_model(
             self,
-            tags: Union[str, List[str]],
+            tags: str,
             messages: Optional[List[Message]] = None,
-            context_id: Optional[str] = None
-    ) -> List[str]:
-        """解析出最终使用的真实模型名
+            context_id: Optional[str] = None,
+            model_rank: int = 0,
+            rank_by_model: bool = False
+    ) -> List[Tuple[str, float]]:
+        """解析出最终使用的真实模型名及其评分
 
         Args:
-            tags: 标签/模型名/别名，支持单个字符串或列表
+            tags: 标签/模型名/逻辑模型名，多个以英文逗号分隔，末尾可带 :N 全局旋转后缀
             messages: 可选消息列表，用于Token数估算过滤
+            context_id: 可选上下文 ID，用于稳定随机排序的种子
+            model_rank: 候选偏移量
+            rank_by_model: 为 True 时先旋转模型层再拆分提供商，否则先拆分提供商再旋转
 
         Returns:
-            真实模型名
+            提供商名与模型层评分的列表
 
         Raises:
             LLMNoAvailableModelError: 无可用模型
@@ -130,6 +135,10 @@ class LLMClient(abc.ABC):
 
     async def update_model_tag(self, tag: str, models: List[str]):
         """更新 model_tag"""
+        raise NotImplementedError
+
+    async def update_model_provider(self, provider_name: str, providers: List[str]):
+        """更新 model_provider"""
         raise NotImplementedError
 
 
@@ -183,13 +192,17 @@ class LLMLocalClient(LLMClient):
 
     async def resolve_model(
             self,
-            tags: Union[str, List[str]],
+            tags: str,
             messages: Optional[List[Message]] = None,
-            context_id: Optional[str] = None
-    ) -> List[str]:
+            context_id: Optional[str] = None,
+            model_rank: int = 0,
+            rank_by_model: bool = False
+    ) -> List[Tuple[str, float]]:
         if not tags:
             raise LLMNoAvailableModelError("No tags provided.")
-        return self.provider_manager.resolve_model(tags, messages, context_id=context_id or self.client_id)
+        return self.provider_manager.resolve_model(
+            tags, messages, context_id=context_id or self.client_id,
+            model_rank=model_rank, rank_by_model=rank_by_model)
 
     async def update_config(self, new_config: Dict[str, Any]):
         self.provider_manager.update_config(new_config)
@@ -202,3 +215,6 @@ class LLMLocalClient(LLMClient):
 
     async def update_model_tag(self, tag: str, models: List[str]):
         self.provider_manager.update_model_tag(tag, models)
+
+    async def update_model_provider(self, provider_name: str, providers: List[str]):
+        self.provider_manager.update_model_provider(provider_name, providers)

@@ -405,7 +405,7 @@ class LLMZmqServer:
         kwargs = json_data.kwargs or {}
 
         # 管理类方法需要权限校验
-        manage_methods = {'update_config', 'update_api_config', 'change_api_status', 'update_model_tag'}
+        manage_methods = {'update_config', 'update_api_config', 'change_api_status', 'update_model_tag', 'update_model_provider'}
         if not self._check_permission(auth_token, manage=(method in manage_methods)):
             await self.send_rpc_response(client_id, request_id,
                 error=LLMPermissionDeniedError("Permission denied for method: %s" % method))
@@ -430,10 +430,13 @@ class LLMZmqServer:
                           for tag, models in tag_models.items()}
             elif method == 'resolve_model':
                 result = self.provider_manager.resolve_model(
-                    kwargs.get('tags', []),
+                    kwargs.get('tags', ''),
                     [Message.from_dict(m) for m in kwargs.get('messages')] if kwargs.get('messages') else None,
-                    context_id=kwargs.get('context_id', '')
+                    context_id=kwargs.get('context_id', ''),
+                    model_rank=kwargs.get('model_rank', 0),
+                    rank_by_model=kwargs.get('rank_by_model', False)
                 )
+                result = [[name, score] for name, score in result]
             elif method == 'update_config':
                 self.provider_manager.update_config(kwargs['new_config'])
                 logger.info("Config updated successfully")
@@ -452,6 +455,10 @@ class LLMZmqServer:
             elif method == 'update_model_tag':
                 self.provider_manager.update_model_tag(kwargs['tag'], kwargs['models'])
                 logger.info("Model tags updated successfully")
+                result = None
+            elif method == 'update_model_provider':
+                self.provider_manager.update_model_provider(kwargs['provider_name'], kwargs['providers'])
+                logger.info("Model providers updated successfully")
                 result = None
             else:
                 raise ValueError(f"Unknown method: {method}")
