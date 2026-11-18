@@ -588,6 +588,8 @@ class DBLLMMonitor(LLMMonitor):
         """初始化数据库表"""
         conn = sqlite3.connect(self.db_path, isolation_level=None)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA cache_size=-262144")
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("BEGIN")
         cursor.execute(self.SQL_CREATE_TABLE_schema_version)
         cursor.execute(
@@ -608,6 +610,7 @@ class DBLLMMonitor(LLMMonitor):
         cursor.execute("COMMIT")
         cursor.execute("SELECT major, minor FROM schema_version WHERE id=1")
         version_row = cursor.fetchone()
+        migrated = False
         if version_row == (1, 0):
             logger.warning("Migrating db from 1.0 to 1.1")
             cursor.execute("BEGIN")
@@ -630,6 +633,7 @@ class DBLLMMonitor(LLMMonitor):
             version_row = (1, 1)
             cursor.execute("UPDATE schema_version SET major=?, minor=? WHERE id=1", version_row)
             cursor.execute("COMMIT")
+            migrated = True
         if version_row == (1, 1):
             logger.warning("Migrating db from 1.1 to 1.2")
             cursor.execute("BEGIN")
@@ -657,8 +661,10 @@ class DBLLMMonitor(LLMMonitor):
             version_row = (1, 2)
             cursor.execute("UPDATE schema_version SET major=?, minor=? WHERE id=1", version_row)
             cursor.execute("COMMIT")
-        cursor.execute("VACUUM")
-        logger.info("Migration done.")
+            migrated = True
+        if migrated:
+            cursor.execute("VACUUM")
+            logger.info("Migration done.")
         conn.close()
 
     def on_llm_request(self, data: Dict[str, Any]):

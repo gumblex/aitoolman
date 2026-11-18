@@ -84,12 +84,14 @@ class LLMFormatStrategy(abc.ABC):
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers: List[Dict[str, Any]] = []
+        self.stream_other_data: Dict[str, Any] = {}
 
     def clear_stream_buffers(self) -> None:
         """清空流式解析缓冲"""
         self.stream_content_buffer = ''
         self.stream_reasoning_buffer = ''
         self.stream_tool_buffers = []
+        self.stream_other_data = {}
 
     def build_stream_response_message(self) -> Dict[str, Any]:
         """流式结束时构造 response_message（content/tool_calls，含推理内容时附加 reasoning_content）"""
@@ -99,6 +101,7 @@ class LLMFormatStrategy(abc.ABC):
         }
         if self.stream_reasoning_buffer:
             response_message["reasoning_content"] = self.stream_reasoning_buffer
+        response_message.update(self.stream_other_data)
         return response_message
 
     @abc.abstractmethod

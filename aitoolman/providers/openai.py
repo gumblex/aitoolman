@@ -28,15 +28,8 @@ class OpenAIUsage(msgspec.Struct):
     prompt_tokens_details: Optional[OpenAIPromptTokensDetails] = None
 
 
-class OpenAIDelta(msgspec.Struct):
-    content: Optional[str] = None
-    reasoning_content: Optional[str] = None
-    role: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-
-
 class OpenAIChoice(msgspec.Struct):
-    delta: Optional[OpenAIDelta] = None
+    delta: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
     index: Optional[int] = None
 
@@ -48,6 +41,10 @@ class OpenAIChunk(msgspec.Struct):
 
 
 class OpenAICompatibleFormat(LLMFormatStrategy):
+    KNOWN_DELTA_FIELDS = frozenset((
+        'content', 'reasoning_content', 'role', 'tool_calls'
+    ))
+
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
 
@@ -263,14 +260,14 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         if not choices:
             return ProviderStreamEvent.empty()
         choice = choices[0]
-        delta = choice.delta or OpenAIDelta()
+        delta: Dict[str, Any] = choice.delta or {}
 
         # 6. 处理finish_reason
         if choice.finish_reason:
             response.finish_reason = map_finish_reason(choice.finish_reason) or choice.finish_reason
 
         # 7. 增量累积工具调用内容
-        for tool_delta in delta.tool_calls or ():
+        for tool_delta in delta.get('tool_calls') or ():
             tool_id = tool_delta.get("id")
             if tool_id:
                 tool_item = tool_delta.copy()
@@ -287,13 +284,17 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             for key, value in fn_delta.items():
                 fn_item[key] = fn_item.get(key, '') + value
 
-        content_delta = delta.content or ''
-        reasoning_delta = delta.reasoning_content or ''
+        content_delta = delta.get('content') or ''
+        reasoning_delta = delta.get('reasoning_content') or ''
 
         if content_delta:
             self.stream_content_buffer += content_delta
         if reasoning_delta:
             self.stream_reasoning_buffer += reasoning_delta
+
+        for key, value in delta.items():
+            if key not in self.KNOWN_DELTA_FIELDS:
+                self.stream_other_data = value
 
         # 8. 返回当前chunk的内容（工具调用暂不返回）
         return ProviderStreamEvent(

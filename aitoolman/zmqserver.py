@@ -383,7 +383,7 @@ class LLMZmqServer:
             'request_messages': [m.to_dict() for m in request.messages],
             'request_tools': request.tools,
             'request_options': request.options,
-            'response_message': [m._asdict() for m in response.response_message]
+            'response_message': [m.to_dict() for m in response.response_message]
         }
         await self.pub_socket.send_multipart([
             b'llm_request',

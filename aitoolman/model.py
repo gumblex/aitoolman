@@ -181,7 +181,7 @@ class Message(typing.NamedTuple):
 
     def to_dict(self) -> Dict[str, Any]:
         """将Message对象序列化为字典"""
-        return {
+        d = {
             "role": self.role,
             "content": self.content,
             "media_content": [m.to_dict() for m in self.media_content] if self.media_content else None,
@@ -189,6 +189,7 @@ class Message(typing.NamedTuple):
             "tool_call_id": self.tool_call_id,
             "raw_value": self.raw_value
         }
+        return {k: v for k, v in d.items() if v is not None}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
@@ -225,7 +226,7 @@ class ToolCall(typing.NamedTuple):
     """LLM回复的工具调用请求"""
     name: str
     arguments_text: str
-    arguments: Optional[Dict[str, Any]]
+    arguments: Optional[Dict[str, Any]] = None
     id: Optional[str] = None
     type: str = 'function'
 
