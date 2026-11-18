@@ -265,6 +265,7 @@ class LLMProviderResponse:
     total_response_time: Optional[float] = None
 
     # 响应内容
+    provider_response_id: Optional[str] = None
     response_text: str = ""
     response_reasoning: str = ""
     response_tool_calls: List[ToolCall] = field(default_factory=list)
@@ -274,10 +275,11 @@ class LLMProviderResponse:
     finish_reason: Optional[str] = None
     error_text: Optional[str] = None
     prompt_tokens: Optional[int] = None
+    cached_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
 
     # 完整请求/响应数据
-    response_message: Optional[Message] = None
+    response_message: List[Message] = field(default_factory=list)
 
     def raise_for_status(self):
         FinishReason.raise_for_status(self.finish_reason, self.error_text)
@@ -397,6 +399,7 @@ class LLMModuleResult:
     request: LLMDirectRequest
     post_processor: Optional[str] = None
     # 原始响应
+    provider_response_id: Optional[str] = None
     response_text: str = ""
     response_reasoning: str = ""
     # 处理后的结果
@@ -408,7 +411,7 @@ class LLMModuleResult:
     # 原始模板参数
     request_params: Dict[str, Any] = field(default_factory=dict)
     # 原始响应（用于拼接上下文）
-    response_message: Optional[Message] = None
+    response_message: List[Message] = field(default_factory=list)
     # 后处理结果
     data: Any = None
 
@@ -421,6 +424,7 @@ class LLMModuleResult:
             request=request,
             post_processor=(str(request.post_processor) if request.post_processor is not None else None),
             # 原始响应字段直接映射
+            provider_response_id=response.provider_response_id,
             response_text=response.response_text,
             response_reasoning=response.response_reasoning,
             # 初始处理后的文本暂等同于原始响应（后续可按需重写）
@@ -461,7 +465,7 @@ class LLMModuleResult:
 
         context = list(self.request.messages)
         if self.response_message:
-            context.append(self.response_message)
+            context.extend(self.response_message)
 
         for tool_call in self.tool_calls:
             tool_name = tool_call.name

@@ -3,8 +3,8 @@ import msgspec.json
 from unittest import mock
 
 from aitoolman.sse import ServerSentEvent
-from aitoolman.provider import OpenAICompatibleFormat, AnthropicFormat, LLMProviderManager
-from aitoolman.model import LLMProviderRequest, LLMProviderResponse, LLMNoAvailableModelError, Message
+from aitoolman.provider import OpenAICompatibleFormat, AnthropicFormat, ResponsesFormat, LLMProviderManager
+from aitoolman.model import LLMProviderRequest, LLMProviderResponse, LLMNoAvailableModelError, MediaContent, Message
 
 
 # OK
@@ -378,6 +378,378 @@ class TestAnthropicFormat(unittest.TestCase):
         self.assertEqual(event.content, "")
 
 
+class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
+    """OpenAI Responses API 格式策略测试"""
+
+    def setUp(self):
+        self.model_config = {
+            "model": "gpt-5",
+            "url": "https://api.openai.com/v1/responses",
+            "body_options": {"temperature": 0.7}
+        }
+        self.format_strategy = ResponsesFormat(self.model_config)
+
+    def _make_response(self, stream):
+        return LLMProviderResponse(
+            client_id="test_client",
+            context_id="test_context",
+            request_id="test_request",
+            model_name="gpt-5",
+            stream=stream
+        )
+
+    def test_make_request_body_system_to_instructions(self):
+        """system 消息合并为 instructions，options 覆盖 body_options"""
+        request = LLMProviderRequest(
+            client_id="test_client",
+            context_id="test_context",
+            request_id="test_request",
+            model_name="gpt-5",
+            messages=[
+                Message(role="system", content="system prompt"),
+                Message.from_content("hello", role="user"),
+            ],
+            options={"temperature": 0.2},
+            stream=False
+        )
+
+        body = self.format_strategy.make_request_body(request)
+
+        self.assertEqual(body["model"], "gpt-5")
+        self.assertEqual(body["instructions"], "system prompt")
+        self.assertEqual(body["input"],
+                         [{"role": "user", "content": "hello"}])
+        self.assertEqual(body["stream"], False)
+        self.assertEqual(body["temperature"], 0.2)
+
+    def test_make_request_body_with_tools(self):
+        """工具定义为平铺结构（无 function 嵌套层）"""
+        request = LLMProviderRequest(
+            client_id="test_client",
+            context_id="test_context",
+            request_id="test_request",
+            model_name="gpt-5",
+            messages=[Message.from_content("hello", role="user")],
+            tools={"add": {"description": "加法", "param": {}}},
+            stream=False
+        )
+
+        body = self.format_strategy.make_request_body(request)
+
+        self.assertEqual(body["tools"][0]["type"], "function")
+        self.assertEqual(body["tools"][0]["name"], "add")
+        self.assertEqual(body["tools"][0]["description"], "加法")
+        self.assertNotIn("function", body["tools"][0])
+
+    def test_serialize_message_raw_value_passthrough(self):
+        """reasoning 原始项原样回传，保留 encrypted_content"""
+        raw = {
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [],
+            "encrypted_content": "cipher"
+        }
+        message = Message(role="assistant", content=None, raw_value=raw)
+        self.assertEqual(self.format_strategy.serialize_message(message), raw)
+
+    def test_serialize_message_tool_result(self):
+        """tool 消息转为 function_call_output 输入项"""
+        message = Message(role="tool", content="42", tool_call_id="call_1")
+        self.assertEqual(self.format_strategy.serialize_message(message), {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "42"
+        })
+
+    def test_serialize_message_function_call_expand(self):
+        """assistant 工具调用消息展开为 function_call 输入项列表"""
+        message = Message(role="assistant", content=None, raw_value={
+            "tool_calls": [{
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "add",
+                "arguments": '{"a": 1}'
+            }]
+        })
+        self.assertEqual(self.format_strategy.serialize_message(message), [{
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "add",
+            "arguments": '{"a": 1}'
+        }])
+
+    def test_serialize_message_media_to_input_image(self):
+        """媒体内容转为 input_image 输入项"""
+        message = Message(
+            role="user",
+            content="看图",
+            media_content=[MediaContent(
+                media_type="image",
+                raw_value={
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,xxx"
+                }
+            )]
+        )
+        self.assertEqual(self.format_strategy.serialize_message(message), {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "看图"},
+                {"type": "input_image", "image_url": "data:image/png;base64,xxx"}
+            ]
+        })
+
+    def test_parse_batch_response_output_items(self):
+        """按 output 顺序输出 reasoning/message/function_call 三项"""
+        response = self._make_response(False)
+        response_data = {
+            "id": "resp_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "想"}],
+                    "encrypted_content": "cipher"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "你好"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "add",
+                    "arguments": '{"a": 1}'
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 3}
+            }
+        }
+
+        self.format_strategy.parse_batch_response(response, response_data)
+
+        self.assertEqual(response.provider_response_id, "resp_1")
+        self.assertEqual(response.response_text, "你好")
+        self.assertEqual(response.response_reasoning, "想")
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.prompt_tokens, 10)
+        self.assertEqual(response.completion_tokens, 5)
+        self.assertEqual(response.cached_tokens, 3)
+        self.assertNotIn("output", response.response_meta)
+        self.assertEqual(len(response.response_tool_calls), 1)
+        self.assertEqual(response.response_tool_calls[0].id, "call_1")
+        self.assertEqual(response.response_tool_calls[0].name, "add")
+        self.assertEqual(response.response_tool_calls[0].arguments, {"a": 1})
+        self.assertEqual(len(response.response_message), 3)
+        self.assertEqual(
+            response.response_message[0].raw_value["type"], "reasoning")
+        self.assertEqual(response.response_message[1].content, "你好")
+        self.assertEqual(
+            response.response_message[2].raw_value["call_id"], "call_1")
+
+    def test_parse_stream_response_created(self):
+        """response.created 记录提供商响应 ID"""
+        response = self._make_response(True)
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.created",
+                "response": {"id": "resp_1"}
+            })))
+        self.assertFalse(event.is_end)
+        self.assertEqual(response.provider_response_id, "resp_1")
+
+    def test_parse_stream_output_text_and_reasoning(self):
+        """文本/推理增量累积到缓冲并按事件输出"""
+        response = self._make_response(True)
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "message", "role": "assistant", "content": []}
+            })))
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "Hello"
+            })))
+        self.assertEqual(event.content, "Hello")
+        self.assertEqual(self.format_strategy.stream_content_buffer, "Hello")
+        self.assertEqual(self.format_strategy.stream_message_text[0], "Hello")
+
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.reasoning_text.delta",
+                "delta": "think"
+            })))
+        self.assertEqual(event.reasoning, "think")
+        self.assertEqual(self.format_strategy.stream_reasoning_buffer, "think")
+
+    def test_parse_stream_reasoning_raw_and_summary(self):
+        """reasoning_raw_text/reasoning_summary_text 增量累积，done 修正完整文本"""
+        response = self._make_response(True)
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.reasoning_raw_text.delta",
+                "output_index": 1,
+                "delta": "raw"
+            })))
+        self.assertEqual(event.reasoning, "raw")
+        self.assertEqual(self.format_strategy.stream_reasoning_raw[1], "raw")
+
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": 1,
+                "delta": "sum"
+            })))
+        self.assertEqual(self.format_strategy.stream_reasoning_summary[1], "sum")
+
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.reasoning_raw_text.done",
+                "output_index": 1,
+                "text": "RAW"
+            })))
+        self.assertFalse(event.is_end)
+        self.assertEqual(self.format_strategy.stream_reasoning_raw[1], "RAW")
+
+    def test_parse_stream_function_call_arguments(self):
+        """function_call 参数增量累积，done 幂等覆盖最终值"""
+        response = self._make_response(True)
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.output_item.added",
+                "output_index": 2,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "add",
+                    "arguments": ""
+                }
+            })))
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 2,
+                "delta": '{"a": 1}'
+            })))
+        self.assertEqual(
+            self.format_strategy.stream_tool_index[2]["arguments"], '{"a": 1}')
+
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.function_call_arguments.done",
+                "output_index": 2,
+                "arguments": '{"a": 2}'
+            })))
+        self.assertEqual(
+            self.format_strategy.stream_tool_index[2]["arguments"], '{"a": 2}')
+        self.assertEqual(len(self.format_strategy.stream_tool_buffers), 1)
+
+    def test_parse_stream_end_event_with_output(self):
+        """response.completed 携带完整 output 时返回按序消息列表并清空缓冲"""
+        response = self._make_response(True)
+        self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "Hello"
+            })))
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello"}]
+                    }],
+                    "usage": {"input_tokens": 10, "output_tokens": 5}
+                }
+            })))
+        self.assertTrue(event.is_end)
+        self.assertEqual(response.provider_response_id, "resp_1")
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.prompt_tokens, 10)
+        self.assertEqual(response.completion_tokens, 5)
+        self.assertEqual(len(event.response_message), 1)
+        self.assertEqual(event.response_message[0]["content"], "Hello")
+        self.assertEqual(self.format_strategy.stream_content_buffer, "")
+
+    def test_parse_stream_end_event_fallback_to_stream_state(self):
+        """结束载荷无 output 时回退到流式累积项构造消息列表"""
+        response = self._make_response(True)
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_1", "summary": []}
+            },
+            {
+                "type": "response.reasoning_raw_text.delta",
+                "output_index": 0,
+                "delta": "raw"
+            },
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {"type": "message", "role": "assistant", "content": []}
+            },
+            {
+                "type": "response.output_text.delta",
+                "output_index": 1,
+                "delta": "Hi"
+            }
+        ]
+        for data in events:
+            self.format_strategy.parse_stream_event(
+                response, ServerSentEvent(data=msgspec.json.encode(data)))
+
+        event = self.format_strategy.parse_stream_event(
+            response,
+            ServerSentEvent(data=msgspec.json.encode({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "status": "completed"}
+            })))
+        self.assertTrue(event.is_end)
+        self.assertEqual(len(event.response_message), 2)
+        self.assertEqual(event.response_message[0]["type"], "reasoning")
+        self.assertEqual(event.response_message[0]["content"],
+                         [{"type": "reasoning_text", "text": "raw"}])
+        self.assertEqual(event.response_message[1]["content"], "Hi")
+
+    def test_parse_stream_invalid_event_returns_empty(self):
+        """非法 JSON、空行与未知事件返回空事件，不中断流"""
+        response = self._make_response(True)
+        for data in (b"{invalid json", b"   ",
+                     msgspec.json.encode({"type": "response.unknown"})):
+            event = self.format_strategy.parse_stream_event(
+                response, ServerSentEvent(data=data))
+            self.assertFalse(event.is_end)
+            self.assertEqual(event.content, "")
+            self.assertIsNone(event.response_message)
+
+
 def _names(result):
     return [name for name, _ in result]
 
@@ -558,16 +930,18 @@ class TestResolveModel(unittest.TestCase):
             manager.resolve_model('deepseek')
 
     def test_rank_by_model_rotates_models(self):
-        """rank_by_model 决定先旋转模型层还是先展开提供商"""
+        """rank_by_model 决定 model_rank 旋转模型层还是提供商列表"""
         config = make_test_config()
         config['model_tag']['combo'] = ['deepseek', 'model-a']
         manager = LLMProviderManager(config)
         queue_map = {'provider-1': 1, 'provider-2': 2, 'model-a': 0}
         with mock.patch.object(manager, 'get_queue_length',
                                side_effect=lambda n: queue_map.get(n, 0)):
-            by_provider = manager.resolve_model('combo:2', context_id='test-ctx')
+            by_provider = manager.resolve_model(
+                'combo', context_id='test-ctx', model_rank=1)
             by_model = manager.resolve_model(
-                'combo:2', context_id='test-ctx', rank_by_model=True)
+                'combo', context_id='test-ctx', model_rank=1,
+                rank_by_model=True)
         self.assertEqual(_names(by_provider),
                          ['provider-2', 'model-a', 'provider-1'])
         self.assertEqual(_names(by_model),
@@ -1002,6 +1376,57 @@ class TestGlobalRank(unittest.TestCase):
         self.assertNotIn('model-b', names)
         self.assertNotIn('model-e', names)
         self.assertEqual(names[0], 'model-d')
+
+
+class TestGlobalRankModelLayer(unittest.TestCase):
+    """:N 恒定按模型层旋转测试（标签混合逻辑模型与 api 模型）"""
+
+    def setUp(self):
+        config = make_test_config()
+        config['model_tag']['combo'] = ['deepseek', 'model-a']
+        self.manager = LLMProviderManager(config)
+        self.queue_map = {'provider-1': 1, 'provider-2': 2, 'model-a': 0}
+
+    def _resolve(self, tags, **kwargs):
+        with mock.patch.object(self.manager, 'get_queue_length',
+                               side_effect=lambda n: self.queue_map.get(n, 0)):
+            return _names(self.manager.resolve_model(
+                tags, context_id='test-ctx', **kwargs))
+
+    def test_no_suffix_default_unchanged(self):
+        """无 :N 后缀时行为不变，model_rank 仅旋转提供商列表"""
+        self.assertEqual(self._resolve('combo'),
+                         ['provider-1', 'provider-2', 'model-a'])
+        self.assertEqual(self._resolve('combo', model_rank=1),
+                         ['provider-2', 'model-a', 'provider-1'])
+
+    def test_global_rank_rotates_model_layer(self):
+        """:N 按模型层旋转后再展开提供商"""
+        self.assertEqual(self._resolve('combo:2'),
+                         ['model-a', 'provider-1', 'provider-2'])
+
+    def test_global_rank_ignores_rank_by_model(self):
+        """:N 的旋转结果不受 rank_by_model 影响"""
+        self.assertEqual(
+            self._resolve('combo:2'),
+            self._resolve('combo:2', rank_by_model=True))
+
+    def test_rank_by_model_true_stacks_model_rank(self):
+        """rank_by_model=True 时 model_rank 与 :N 在模型层叠加"""
+        self.assertEqual(
+            self._resolve('combo:2', model_rank=1, rank_by_model=True),
+            ['provider-1', 'provider-2', 'model-a'])
+
+    def test_rank_by_model_false_rank_only_providers(self):
+        """rank_by_model=False 时 model_rank 仅旋转展开后的提供商列表"""
+        self.assertEqual(
+            self._resolve('combo:2', model_rank=1),
+            ['provider-1', 'provider-2', 'model-a'])
+
+    def test_wraparound(self):
+        """:N 按模型层周期取模回绕"""
+        self.assertEqual(self._resolve('combo:3'), self._resolve('combo:1'))
+        self.assertEqual(self._resolve('combo:5'), self._resolve('combo:1'))
 
 
 class TestConfigUpdate(unittest.TestCase):

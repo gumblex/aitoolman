@@ -27,7 +27,7 @@ def run_response_function(
             stream=False,
             finish_reason=_model.FinishReason.length.value,
             response_text='',
-            response_message=None
+            response_message=[]
         )
     except _model.LLMContentFilterError as ex:
         return _model.LLMProviderResponse(
@@ -38,7 +38,8 @@ def run_response_function(
             stream=False,
             finish_reason=_model.FinishReason.content_filter.value,
             response_text=str(ex),
-            response_message=_model.Message(role='assistant', content=str(ex))
+            provider_response_id=_model.get_id(),
+            response_message=[_model.Message(role='assistant', content=str(ex))]
         )
     except Exception as ex:
         return _model.LLMProviderResponse(
@@ -59,10 +60,11 @@ def run_response_function(
             stream=False,
             finish_reason=_model.FinishReason.stop.value,
             response_text=response_content,
-            response_message=_model.Message(
+            provider_response_id=_model.get_id(),
+            response_message=[_model.Message(
                 role='assistant', content=response_content,
                 raw_value={"content": response_content}
-            )
+            )]
         )
     else:
         tool_calls_with_id = [tc._replace(id=_model.get_id()) for tc in response_content]
@@ -74,10 +76,11 @@ def run_response_function(
             stream=False,
             finish_reason=_model.FinishReason.tool_calls.value,
             response_tool_calls=tool_calls_with_id,
-            response_message=_model.Message(
+            provider_response_id=_model.get_id(),
+            response_message=[_model.Message(
                 role='assistant', content='',
                 raw_value={"tool_calls": [tc._asdict() for tc in tool_calls_with_id]}
-            )
+            )]
         )
 
 
@@ -94,10 +97,11 @@ def make_simple_response(
             stream=False,
             finish_reason=_model.FinishReason.stop.value,
             response_text=response_content,
-            response_message=_model.Message(
+            provider_response_id=_model.get_id(),
+            response_message=[_model.Message(
                 role='assistant', content=response_content,
                 raw_value={"content": response_content}
-            )
+            )]
         )
     else:
         return _model.LLMProviderResponse(
@@ -108,10 +112,11 @@ def make_simple_response(
             stream=False,
             finish_reason=_model.FinishReason.tool_calls.value,
             response_tool_calls=response_content,
-            response_message=_model.Message(
+            provider_response_id=_model.get_id(),
+            response_message=[_model.Message(
                 role='assistant', content='',
                 raw_value={"tool_calls": [tc._asdict() for tc in response_content]}
-            )
+            )]
         )
 
 
@@ -139,10 +144,11 @@ def make_tool_call_response(request: _model.LLMProviderRequest):
         stream=False,
         finish_reason=_model.FinishReason.stop.value,
         response_text=response_text,
-        response_message=_model.Message(
+        provider_response_id=_model.get_id(),
+        response_message=[_model.Message(
             role='assistant', content=response_text,
             raw_value={"content": response_text}
-        )
+        )]
     )
 
 
@@ -168,7 +174,7 @@ class LLMResponseGenerator:
                 stream=False,
                 finish_reason=_model.FinishReason.error_request.value,
                 error_text="no matching function",
-                response_message=None
+                response_message=[]
             )
         elif last_msg.role == _model.MessageRole.tool.value:
             tool_results = []
@@ -194,10 +200,11 @@ class LLMResponseGenerator:
                 stream=False,
                 finish_reason=_model.FinishReason.stop.value,
                 response_text=response_text,
-                response_message=_model.Message(
+                provider_response_id=_model.get_id(),
+                response_message=[_model.Message(
                     role='assistant', content=response_text,
                     raw_value={"content": response_text}
-                )
+                )]
             )
         return _model.LLMProviderResponse(
             client_id=request.client_id,
@@ -207,7 +214,7 @@ class LLMResponseGenerator:
             stream=False,
             finish_reason=_model.FinishReason.error_request.value,
             error_text="invalid message role",
-            response_message=None
+            response_message=[]
         )
 
 

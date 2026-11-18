@@ -176,8 +176,10 @@ class LLMZmqClient(LLMClient):
             finish_reason=response_data['finish_reason'],
             error_text=response_data['error_text'],
             prompt_tokens=response_data['prompt_tokens'],
+            cached_tokens=response_data.get('cached_tokens'),
             completion_tokens=response_data['completion_tokens'],
-            response_message=Message.from_dict(response_data['response_message']) if response_data['response_message'] else None
+            provider_response_id=response_data.get('provider_response_id'),
+            response_message=[Message.from_dict(m) for m in (response_data.get('response_message') or [])]
         )
         try:
             request.response.set_result(response)
@@ -413,6 +415,7 @@ class LLMMonitor:
         total_response_time = data.get('total_response_time') or 0
         finish_reason = data.get('finish_reason', 'unknown')
         prompt_tokens = data.get('prompt_tokens') or 0
+        cached_tokens = data.get('cached_tokens')
         completion_tokens = data.get('completion_tokens') or 0
 
         # 1. 一行总结
@@ -422,7 +425,10 @@ class LLMMonitor:
         if start_time:
             summary.append("Start: " + datetime.datetime.fromtimestamp(start_time).strftime('%H:%M:%S'))
         summary.append("Times: Queue=%.1fs, TTFT=%.1fs, Total=%ds" % (queue_time, time_to_first_token, total_response_time))
-        summary.append("Tokens: %d/%d" % (prompt_tokens, completion_tokens))
+        if cached_tokens:
+            summary.append("Tokens: %d(%d)/%d" % (prompt_tokens, cached_tokens, completion_tokens))
+        else:
+            summary.append("Tokens: %d/%d" % (prompt_tokens, completion_tokens))
         summary.append("Finish: " + finish_reason)
         logger.info(', '.join(summary))
 
@@ -538,6 +544,7 @@ class DBLLMMonitor(LLMMonitor):
             queue_length INTEGER,
             time_to_first_token REAL,
             total_response_time REAL,
+            provider_response_id TEXT,
             response_text TEXT,
             response_reasoning TEXT,
             response_tool_calls TEXT,
@@ -545,6 +552,7 @@ class DBLLMMonitor(LLMMonitor):
             finish_reason TEXT,
             error_text TEXT,
             prompt_tokens INTEGER,
+            cached_tokens INTEGER,
             completion_tokens INTEGER,
             request_messages TEXT,
             request_tools TEXT,
@@ -563,7 +571,7 @@ class DBLLMMonitor(LLMMonitor):
             timestamp REAL
         )
     ''')
-    DB_VERSION = (1, 1)
+    DB_VERSION = (1, 2)
 
     def __init__(self, pub_endpoint: str, pub_type: str = 'bind', verbose: bool = False, db_path: str = "llm_audit.db"):
         super().__init__(pub_endpoint, pub_type, verbose)
@@ -593,7 +601,7 @@ class DBLLMMonitor(LLMMonitor):
         cursor = conn.cursor()
         cursor.execute("BEGIN")
         cursor.execute(self.SQL_CREATE_TABLE_schema_version)
-        cursor.execute("INSERT OR IGNORE INTO schema_version (id, major, minor) VALUES (1, 1, 0)")
+        cursor.execute("INSERT OR IGNORE INTO schema_version (id, major, minor) VALUES (1, 2, 0)")
         cursor.execute("COMMIT")
         cursor.execute("SELECT major, minor FROM schema_version WHERE id=1")
         version_row = cursor.fetchone()
@@ -607,14 +615,43 @@ class DBLLMMonitor(LLMMonitor):
                 SELECT
                     id, client_id, context_id, request_id, model_name, stream,
                     start_time, queue_time, queue_length, time_to_first_token,
-                    total_response_time, response_text, response_reasoning,
+                    total_response_time, NULL provider_response_id,
+                    response_text, response_reasoning,
                     response_tool_calls, NULL response_meta, finish_reason, error_text,
                     prompt_tokens, completion_tokens, request_messages,
-                    request_tools, request_options, response_message, created_at
+                    request_tools, request_options, response_message,
+                    created_at
                 FROM llm_requests_1_0
             """)
             cursor.execute("DROP TABLE llm_requests_1_0")
             version_row = (1, 1)
+            cursor.execute("UPDATE schema_version SET major=?, minor=? WHERE id=1", version_row)
+            cursor.execute("COMMIT")
+        if version_row == (1, 1):
+            logger.warning("Migrating db from 1.1 to 1.2")
+            cursor.execute("BEGIN")
+            cursor.execute("ALTER TABLE llm_requests RENAME TO llm_requests_1_1")
+            cursor.execute(self.SQL_CREATE_TABLE_llm_requests)
+            cursor.execute("""
+                INSERT INTO llm_requests
+                SELECT
+                    id, client_id, context_id, request_id, model_name, stream,
+                    start_time, queue_time, queue_length, time_to_first_token,
+                    total_response_time,
+                    json_extract(response_meta, '$.id') provider_response_id,
+                    response_text, response_reasoning,
+                    response_tool_calls, response_meta, finish_reason, error_text,
+                    prompt_tokens,
+                    CAST(json_extract(response_meta, '$.usage.prompt_tokens_details.cached_tokens') AS INTEGER) cached_tokens,
+                    completion_tokens, request_messages,
+                    request_tools, request_options,
+                    CASE WHEN response_message IS NULL THEN NULL
+                         ELSE json_array(json(response_message)) END response_message,
+                    created_at
+                FROM llm_requests_1_1
+            """)
+            cursor.execute("DROP TABLE llm_requests_1_1")
+            version_row = (1, 2)
             cursor.execute("UPDATE schema_version SET major=?, minor=? WHERE id=1", version_row)
             cursor.execute("COMMIT")
         cursor.execute("VACUUM")
@@ -628,9 +665,10 @@ class DBLLMMonitor(LLMMonitor):
         keys = (
             'client_id', 'context_id', 'request_id', 'model_name', 'stream',
             'start_time', 'queue_time', 'queue_length', 'time_to_first_token',
-            'total_response_time', 'response_text', 'response_reasoning',
+            'total_response_time', 'provider_response_id',
+            'response_text', 'response_reasoning',
             'response_tool_calls', 'response_meta', 'finish_reason', 'error_text',
-            'prompt_tokens', 'completion_tokens', 'request_messages',
+            'prompt_tokens', 'cached_tokens', 'completion_tokens', 'request_messages',
             'request_tools', 'request_options', 'response_message',
         )
         db_data = {k: data.get(k) for k in keys}

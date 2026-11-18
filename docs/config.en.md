@@ -25,12 +25,12 @@ Default configuration inherited by all model configurations.
 | `parallel`        | Integer | 10              | Default model parallel processing capacity (number of concurrent requests)  |
 | `retry_duration`  | Float   | 0.5             | Initial retry interval (seconds)                                             |
 | `retry_factor`    | Float   | 1.5             | Retry interval multiplier for exponential backoff algorithm                 |
-| `api_type`        | String  | "openai"        | Default API type, available options: "openai", "anthropic"                  |
+| `api_type`        | String  | "openai"        | Default API type, available options: "openai", "anthropic", "responses"     |
 | `headers`         | Dict    | `{}`            | Default HTTP request headers, universal authentication info can be configured here |
 | `body_options`    | Dict    | `{}`            | Default request options such as max_tokens, temperature, etc.               |
 | `max_input_tokens` | Integer | None (No limit) | Maximum input token count supported by the model                            |
 | `bytes_per_token`  | Float   | 4.0             | Estimated UTF-8 bytes per token, used for token count estimation            |
-| `rank_adjust_ratio`| Float   | 0.25            | Weight adjustment parameter for rank weight calculation in model routing    |
+| `rank_adjust_ratio`| Float   | 0.25            | Weight adjustment parameter for tag candidate-priority scoring    |
 | `loop_detect_length` | Integer | 0 | Expected loop length (in characters) that can be detected by streaming loop detection; <=0 disables it; recommended 400 |
 
 
@@ -41,7 +41,7 @@ Specific configuration for each model, model names can be customized.
 | Parameter         | Type    | Default Value                               | Description                                                                           |
 |-------------------|---------|---------------------------------------------|---------------------------------------------------------------------------------------|
 | `url`             | String  | None (Required)                             | API endpoint URL                                                                      |
-| `type`            | String  | Inherited from `[default].api_type`         | API type, available options: "openai", "anthropic"                                    |
+| `type`            | String  | Inherited from `[default].api_type`         | API type, available options: "openai", "anthropic", "responses"                       |
 | `model`           | String  | None (Required)                             | Model identifier on the provider's side                                               |
 | `parallel`        | Integer | Inherited from `[default].parallel`         | Parallel processing capacity for this model                                           |
 | `headers`         | Dict    | Inherited from `[default].headers`          | Model-specific HTTP request headers                                                   |
@@ -57,38 +57,35 @@ Specific configuration for each model, model names can be customized.
 Additional notes:
 * For "openai" format, `headers` should include `Authorization`
 * For "anthropic" format, `headers` should include `"X-Api-Key"` and `"anthropic-version" = "2023-06-01"`; `body_options` should include `max_tokens`
+* For "responses" format, `headers` should include `Authorization`; `body_options` can be configured according to the provider documentation, e.g. `store`, `reasoning`
 
 
 ### 1.4 [model_tag] / [model_provider] Section
-Model tag configuration for model routing and grouped scheduling, sorted by priority. Try to define all needed tags here.
+Model routing uses two configuration groups: `model_provider` groups multiple providers of the same effective model into one logical model, mainly for load balancing and availability; `model_tag` selects concrete models by cost and effect.
 
-Business code can use tags without caring about underlying specific models, which supports flexible switching and routing. Model routing supports passing multiple tags at the same time, the system will automatically match all available models that satisfy all tags, and select the optimal model combined with input token limit and model priority. For example, passing `"code,multimodal"` will automatically select multimodal models that support code use cases, passing `"low_cost,fast"` will automatically select low cost and low latency models, to adapt to all kinds of cross scenarios.
+Business code can use tags without caring about underlying specific models, which supports flexible switching and routing. Model routing supports passing multiple tags at the same time, the system will automatically match all available models that satisfy all tags, and select the optimal model combined with input token limit and model priority. For example, passing `"code,multimodal"` will automatically select multimodal models that support code use cases, passing `"cheap,fast"` will automatically select low cost and low latency models, to adapt to all kinds of cross scenarios.
 
-`[model_provider]` declares multiple providers for one model: `logical_name = ["[api] key", ...]`. The logical name can be used in `[model_tag]` or called directly; providers of the same model are sorted by queue length and stable random after scoring, and share the weight of the logical name. A logical name must not collide with an `[api]` key or a tag. `[api]` models not declared here remain independently usable.
+`[model_provider]` declares `logical_name = ["[api] config name", ...]`. The logical name can be used in `[model_tag]` or called directly; it shares the priority of its position, and its providers are selected by queue length and stable random ordering using `context_id` (or `client_id` when not provided). A logical name must not collide with an `[api]` config name or a tag. `[api]` models not declared here remain independently usable.
 
-`"Tag Name" = List of strings (supports one level of nesting)`
-
-Key is the tag name, value is a list of model names. List order determines recommendation priority (earlier entries have higher weight). Models can be `[api]` model names or `[model_provider]` logical model names. Elements can be strings or string lists. Models in a nested list share the rank weight of their position, and same-weight models will be shuffled randomly. This can be used to rotate usage of identical/similar models across multiple providers.
+`"Tag Name" = List of strings (supports one level of nesting)`. The key is the tag name and the value is a model list; list order defines candidate priority and models in a nested list share the priority of that position. A model can be an `[api]` config/model name or a `[model_provider]` logical name. Business code can use a single tag or multiple tags separated by commas. A tag combination keeps models that satisfy all tags and selects the highest-scoring one using a combined score from tag weights, together with input token limits and model availability.
 
 **Example:**
 ```toml
 [model_provider]
 deepseek = ["deepseek-provider1", "deepseek-provider2"]
+"glm-5.3-flash" = ["glm-5.3-flash-provider1", "glm-5.3-flash-provider2"]
 
 [model_tag]
-image = ['doubao-seed-2.0-pro']
-cheap = ['doubao-seed-2.0-mini','qwen-flash']
+image = [["deepseek", "glm-5.3-flash"], 'doubao-seed-2.0-pro']
 fast = ['deepseek','qwen-flash']
-low_cost = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek"]
+cheap = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek"]
 ```
 
 **Weight Calculation:**
-Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. All models in a nested list share the rank weight of their position. The `rank_adjust_ratio` parameter controls the weight decay rate, defaulting to 0.25.
+Model weights within a tag list are calculated by position, with earlier entries receiving higher weights. All models in a nested list share the weight of that position; tag combinations are ordered by combined score. The `rank_adjust_ratio` parameter controls the decay rate of ranking weights and defaults to 0.25.
 
 **Global :N Syntax:**
-
-When calling `resolve_model` or passing the module `model_name`, a single string is accepted, with multiple tags separated by commas (e.g., `"image,cheap"`). An optional `:N` suffix at the end of the whole string cyclically rotates the final sorted candidate list by N-1 positions. N is added to `model_rank` (`shift = (N - 1 + model_rank) % candidate_count`). For example, `"image,cheap:3"` rotates 2 positions after sorting the intersection of `image` and `cheap`. A non-integer suffix or an unmatched item raises `LLMNoAvailableModelError`.
-
+When calling `resolve_model` or passing the module `model_name`, a single string is accepted, with multiple tags separated by commas. A trailing `:N` suffix starts from the Nth candidate and moves preceding candidates to the end. `:N` always rotates at the model layer; the rotation target of `model_rank` is determined by `rank_by_model`: with `rank_by_model=True`, `model_rank` accumulates with `:N` at the model layer; with `rank_by_model=False` (default), `model_rank` only rotates the expanded provider list. When user code catches a retriable error, it can increment `model_rank` and retry with the next candidate. A non-integer suffix or an unmatched item raises `LLMNoAvailableModelError`.
 
 
 ### 1.5 [http] Section
@@ -124,7 +121,7 @@ api_type = "openai"
 loop_detect_length = 400
 
 [model_tag]
-"low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
+"cheap" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]
 "fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]
 "creative" = ["deepseek-v4-pro", "kimi-k2.5"]
 "precise" = ["Doubao-Seed-2.0-pro", "glm-5.1"]
@@ -255,7 +252,7 @@ model = "code"  # Using model tag
 template.user = """Please write a code example for {{functionality}} using {{language}} language, with detailed comments"""
 
 [module.task_adder]
-model = "fast,low_cost"  # Use multiple tags to filter models that satisfy both conditions
+model = "fast,cheap"  # Use a tag combination to filter candidates by cost and speed
 stream = true
 template.user = "As a schedule assistant, you can help users add to-do items. Analyze the user's instruction: if there are specific to-do items, call the tool; if not, ask the user to provide detailed information about the task. User says: {{user_input}}"
 
@@ -315,7 +312,7 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 ## 4. Notes
 
-1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be a model name from the `[api]` section of `llm_provider.toml`, a logical model name from `[model_provider]`, a tag defined in the `[model_tag]` section, or an alias defined in the `[model_alias]` section.
+1. **Model Name Consistency**: The `model` field in `app_prompt.toml` can be an `[api]` config name, a `[model_provider]` logical model name, a `[model_tag]` name, a comma-separated tag combination, or an alias defined in the `[model_alias]` section.
 
 2. **Template Variables**: Variables used in templates must be provided during invocation, otherwise rendering will fail.
 
@@ -323,4 +320,4 @@ app.add_processor('custom_parser', lambda x: x.split('\n'))
 
 4. **Tool Calls**: Tool configuration must include complete parameter definitions, otherwise parsing may fail.
 
-5. **Model Routing**: When using `model_tag` for model routing, the system automatically selects the optimal model based on tag weights and model availability. Supports a trailing global `:N` suffix to cyclically rotate the final candidate list (see Section 1.4 for details). When `messages` are provided, token count is automatically estimated and models exceeding the `max_input_tokens` limit are filtered out.
+5. **Model Routing**: `model_tag` selects concrete models by cost and effect; list order defines candidate priority and nested lists define equal priority. A tag combination selects the highest-scoring candidate using a combined score from tag weights.

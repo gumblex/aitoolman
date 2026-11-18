@@ -89,7 +89,8 @@ def _make_response_data(**overrides):
         'error_text': None,
         'prompt_tokens': 3,
         'completion_tokens': 2,
-        'response_message': None,
+        'provider_response_id': None,
+        'response_message': [],
     }
     data.update(overrides)
     return data
@@ -338,7 +339,7 @@ class TestZmqClientReceiveDecode(unittest.IsolatedAsyncioTestCase):
 
         response_data = _make_response_data(
             response_meta={'usage': {'prompt_tokens': 3}},
-            response_message={'role': 'assistant', 'content': 'hi'})
+            response_message=[{'role': 'assistant', 'content': 'hi'}])
         await self._listen_once(client, 'response',
                                 ResponsePayload(request_id='req-1', response=response_data))
 
@@ -354,8 +355,9 @@ class TestZmqClientReceiveDecode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.prompt_tokens, 3)
         self.assertEqual(response.completion_tokens, 2)
         self.assertEqual(response.response_meta, {'usage': {'prompt_tokens': 3}})
-        self.assertEqual(response.response_message.role, 'assistant')
-        self.assertEqual(response.response_message.content, 'hi')
+        self.assertEqual(len(response.response_message), 1)
+        self.assertEqual(response.response_message[0].role, 'assistant')
+        self.assertEqual(response.response_message[0].content, 'hi')
         # 有正文时不写 EOF 事件
         self.assertEqual(req.output_channel.events, [])
 

@@ -1,28 +1,42 @@
-import abc
-import json
+"""LLM提供商管理器：API调用、资源管理与请求重试（格式策略实现见 providers 包）"""
+import typing
 import math
 import time
 import asyncio
 import logging
 import random
-import typing
 from typing import Optional, Dict, List, Tuple, Any, Callable, Set, Union
 
 from . import sse
 from . import util
-from . import postprocess
 from .util import calculate_rank_weights, calc_message_length, estimate_text_token
 from .channel import ChannelEvent
 from .loop_detect import LoopDetector
-from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ToolCall, ModelInfo, LLMNoAvailableModelError
+from .model import LLMProviderRequest, LLMProviderResponse, FinishReason, Message, ModelInfo, LLMNoAvailableModelError
 from .resmanager import ResourceManager
 from ._version import VERSION
+from .providers import (
+    FORMAT_STRATEGY_REGISTRY,
+    LLMFormatStrategy,
+    ProviderStreamEvent,
+    OpenAICompatibleFormat,
+    AnthropicFormat,
+    ResponsesFormat,
+)
 
 import httpx
-import msgspec
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+__all__ = [
+    'LLMFormatStrategy',
+    'ProviderStreamEvent',
+    'OpenAICompatibleFormat',
+    'AnthropicFormat',
+    'ResponsesFormat',
+    'LLMProviderManager',
+]
 
 
 def _get_retry_after(response: httpx.Response) -> Optional[int]:
@@ -33,788 +47,9 @@ def _get_retry_after(response: httpx.Response) -> Optional[int]:
     return None
 
 
-class ProviderStreamEvent(typing.NamedTuple):
-    is_end: bool
-    content: str
-    reasoning: str
-    tool_calls: Any
-    response_message: Any
-
-    @classmethod
-    def empty(cls, is_end=False):
-        return cls(is_end, '', '', [], None)
-
-
 class RequestTask(typing.NamedTuple):
     request: LLMProviderRequest
     task: asyncio.Task
-
-
-class OpenAIUsage(msgspec.Struct):
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-
-
-class OpenAIDelta(msgspec.Struct):
-    content: Optional[str] = None
-    reasoning_content: Optional[str] = None
-    role: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-
-
-class OpenAIChoice(msgspec.Struct):
-    delta: Optional[OpenAIDelta] = None
-    finish_reason: Optional[str] = None
-    index: Optional[int] = None
-
-
-class OpenAIChunk(msgspec.Struct):
-    choices: Optional[List[OpenAIChoice]] = None
-    usage: Optional[OpenAIUsage] = None
-
-
-class AnthropicUsage(msgspec.Struct):
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-
-
-class AnthropicMessage(msgspec.Struct):
-    id: Optional[str] = None
-    type: Optional[str] = None
-    role: Optional[str] = None
-    model: Optional[str] = None
-    content: Optional[Any] = None
-    stop_reason: Optional[str] = None
-    stop_sequence: Optional[str] = None
-    usage: Optional[AnthropicUsage] = None
-
-
-class AnthropicContentBlock(msgspec.Struct):
-    type: str
-    id: Optional[str] = None
-    name: Optional[str] = None
-    text: Optional[str] = None
-    thinking: Optional[str] = None
-    input: Optional[Any] = None
-
-
-class AnthropicDelta(msgspec.Struct):
-    type: Optional[str] = None
-    text: Optional[str] = None
-    thinking: Optional[str] = None
-    partial_json: Optional[str] = None
-    stop_reason: Optional[str] = None
-    stop_sequence: Optional[str] = None
-
-
-class AnthropicStreamEvent(msgspec.Struct):
-    type: str
-    index: Optional[int] = None
-    message: Optional[AnthropicMessage] = None
-    content_block: Optional[AnthropicContentBlock] = None
-    delta: Optional[AnthropicDelta] = None
-    usage: Optional[AnthropicUsage] = None
-
-
-# response_meta 已知字段：按 Struct 字段顺序合并非 None 值（同名后者覆盖）
-ANTHROPIC_META_FIELDS = ('id', 'type', 'role', 'model', 'stop_reason', 'stop_sequence', 'usage')
-ANTHROPIC_KNOWN_FIELDS = ('type', 'index', 'message', 'content_block', 'delta', 'usage')
-
-
-def _struct_meta_merge(source, field_names, buffer: Dict[str, Any]) -> None:
-    """按字段顺序将 Struct 中非 None 的字段合并入缓冲（Struct 值转为纯 dict）"""
-    for name in field_names:
-        value = getattr(source, name, None)
-        if value is None:
-            continue
-        buffer[name] = msgspec.structs.asdict(value) if isinstance(value, msgspec.Struct) else value
-
-
-class LLMFormatStrategy(abc.ABC):
-    """LLM请求/响应格式策略抽象类"""
-    def __init__(self, model_config: Dict[str, Any]):
-        self.model_config = model_config  # 模型配置（包含api_type、url、headers等）
-
-    @abc.abstractmethod
-    def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]:
-        """
-        转换工具配置格式为Provider格式。配置格式：
-
-        [tools.add_task]
-        type = "function"
-        description = "添加日程"
-        param.datetime.type = "string"
-        param.datetime.description = "日期时间，如 2025-12-31 12:34:56"
-        param.datetime.required = false
-        param.content.type = "string"
-        param.content.description = "待办事项"
-        param.content.required = true
-        """
-        pass
-
-    @abc.abstractmethod
-    def parse_tool_calls(self, tool_calls: List[Dict]) -> List[ToolCall]:
-        """解析大模型返回的工具调用"""
-        pass
-
-    @abc.abstractmethod
-    def serialize_message(self, message: Message) -> Dict[str, Any]:
-        """将Message转为对应提供商的消息体"""
-        pass
-
-    @abc.abstractmethod
-    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
-        """构建符合Provider要求的请求体"""
-        pass
-
-    @classmethod
-    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
-        return Message.from_content(message)
-
-    @abc.abstractmethod
-    def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
-        """解析非流式响应，填充LLMResponse"""
-        pass
-
-    @abc.abstractmethod
-    def parse_stream_event(self, response: LLMProviderResponse, event: sse.ServerSentEvent) -> ProviderStreamEvent:
-        """
-        解析流式响应的单个chunk
-        返回值：(是否结束, 内容片段, 推理片段, 工具调用列表)
-        """
-        pass
-
-
-class OpenAICompatibleFormat(LLMFormatStrategy):
-    def __init__(self, model_config: Dict[str, Any]):
-        super().__init__(model_config)
-
-        self.stream_content_buffer = ''
-        self.stream_reasoning_buffer = ''
-        self.stream_tool_buffers = []
-        self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
-        self._stream_chunk_decoder = msgspec.json.Decoder(type=OpenAIChunk)
-
-    def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]:
-        tools = []
-        for func_name, func_config in tools_configs.items():
-            # 构建function核心配置
-            function = {
-                "name": func_name,
-                "description": func_config.get("description", ""),
-                "parameters": {
-                    "type": "object",  # 参数结构固定为object类型（符合JSON Schema要求）
-                    "properties": {},
-                    "required": []
-                }
-            }
-            # 解析所有参数配置
-            param_configs = func_config.get("param", {})
-            for param_name, param_info in param_configs.items():
-                param = {"type": param_info.get("type", "string")}
-                desc = param_info.get("description", "")
-                if desc:
-                    param["description"] = desc
-                function["parameters"]["properties"][param_name] = param
-                if param_info.get("required"):
-                    function["parameters"]["required"].append(param_name)
-            # 构建完整的tool对象（固定type为function，与配置一致）
-            tool = {
-                "type": func_config.get("type", "function"),
-                "function": function
-            }
-            tools.append(tool)
-        return tools
-
-    def parse_tool_calls(self, tool_calls: List[Dict]) -> List[ToolCall]:
-        result = []
-        for raw_tool in tool_calls:
-            # 提取工具调用基础字段
-            tool_id = raw_tool.get("id")
-            tool_type = raw_tool.get("type", "function")
-            function = raw_tool.get("function", {})
-            name = function.get("name", '')
-            arguments_text = function.get("arguments", "")
-            arguments = postprocess.parse_json(arguments_text)
-
-            # 构造ToolCall对象
-            result.append(ToolCall(
-                id=tool_id,
-                type=tool_type,
-                name=name,
-                arguments_text=arguments_text,
-                arguments=arguments
-            ))
-        return result
-
-    def serialize_message(self, message: Message) -> Dict[str, Any]:
-        """将Message转为对应提供商的消息体"""
-
-        # 如果存在原始值，直接返回
-        if message.raw_value is not None:
-            return message.raw_value
-
-        result: Dict[str, Any] = {"role": message.role}
-
-        if message.media_content:
-            # 多媒体内容
-            content_list = []
-
-            # 添加文本部分（如果有）
-            if message.content:
-                content_list.append({
-                    "type": "text",
-                    "text": message.content
-                })
-
-            for media in message.media_content:
-                if media.raw_value:
-                    content_list.append(media.raw_value)
-                else:
-                    # 添加多媒体部分
-                    media_item = {}
-                    # 确定URL或数据
-                    url = None
-                    if media.url:
-                        url = media.url
-                    elif media.data and media.mime_type:
-                        # 生成data URL
-                        url = util.generate_data_url(
-                            media.data,
-                            media.mime_type
-                        )
-                    elif media.filename:
-                        # 从文件读取并生成data URL
-                        mime_type = util.get_mime_type(media.filename)
-                        with open(media.filename, 'rb') as f:
-                            data = f.read()
-                        url = util.generate_data_url(data, mime_type)
-                    if not url:
-                        raise ValueError("No media content")
-
-                    # 根据媒体类型构建不同的结构
-                    if media.media_type in ("image", "video"):
-                        url_type = media.media_type + "_url"
-                        media_item["type"] = url_type
-                        image_url_obj = {"url": url}
-                        if media.options:
-                            image_url_obj.update(media.options)
-                        media_item[url_type] = image_url_obj
-
-                    content_list.append(media_item)
-            result["content"] = content_list
-        elif message.content is not None:
-            result["content"] = message.content
-
-        if message.reasoning_content:
-            result["reasoning_content"] = message.reasoning_content
-        if message.tool_call_id:
-            result["tool_call_id"] = message.tool_call_id
-        return result
-
-    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
-        """构建OpenAI风格的请求体（model/messages/stream/tools等）"""
-        body = {
-            "model": self.model_config["model"],
-            "messages": [self.serialize_message(m) for m in request.messages],
-            "stream": request.stream
-        }
-        body.update(
-            {**self.model_config.get("body_options", {}), **request.options})
-        # 工具调用支持
-        if request.tools:
-            try:
-                body["tools"] = self.serialize_tool_description(request.tools)
-            except Exception as ex:
-                raise ValueError("Tool description format invalid (%s: %s)" % (type(ex).__name__, ex))
-        logger.debug("[%s] request body: %s", request.request_id, body)
-        return body
-
-    @classmethod
-    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
-        return Message(
-            role="assistant",
-            content=message.get("content", ""),
-            reasoning_content=message.get("reasoning_content", ""),
-            raw_value=message
-        )
-
-    def parse_batch_response(self, response: LLMProviderResponse, response_data: Dict[str, Any]) -> None:
-        """解析OpenAI非流式响应（含工具调用转换）"""
-        # response_meta：除 choices 外的字段原样整体存入
-        response.response_meta = {k: v for k, v in response_data.items() if k != 'choices'}
-        choices = response_data.get("choices", [])
-        if not choices:
-            raise ValueError("No choices in response")
-
-        choice = choices[0]
-        message = choice["message"]
-
-        response.response_text = message.get("content", "")
-        response.response_reasoning = message.get("reasoning_content", "")
-        response.response_tool_calls = self.parse_tool_calls(message.get("tool_calls") or [])
-        response.finish_reason = choice.get("finish_reason", FinishReason.stop.value)
-
-        # Token统计
-        usage = response_data.get("usage", {})
-        response.prompt_tokens = usage.get("prompt_tokens")
-        response.completion_tokens = usage.get("completion_tokens")
-        response.response_message = self.parse_response_message(response, message)
-
-    def parse_stream_event(self, response: LLMProviderResponse, event: sse.ServerSentEvent) -> ProviderStreamEvent:
-        """解析OpenAI流式响应（含工具调用增量累积）"""
-        # 1. 处理空行
-        line_bytes: bytes = event.data.strip()
-        if not line_bytes:
-            return ProviderStreamEvent.empty()
-
-        # 2. 处理流式结束标记（统一返回工具调用）
-        if line_bytes == b"[DONE]":
-            # 转换累积的工具调用为ToolCall列表
-            final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
-            response_message = {
-                "content": self.stream_content_buffer,
-                "tool_calls": self.stream_tool_buffers
-            }
-            if self.stream_reasoning_buffer:
-                response_message["reasoning_content"] = self.stream_reasoning_buffer
-
-            # 清空缓冲区
-            self.stream_tool_buffers.clear()
-            self.stream_content_buffer = ""
-            self.stream_reasoning_buffer = ""
-            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
-            if self.stream_last_raw_event is not None:
-                response_meta = util.decode_json(self.stream_last_raw_event.data)
-                if 'choices' in response_meta:
-                    del response_meta['choices']
-                self.stream_last_raw_event = None
-                response.response_meta = response_meta
-            # 设置结束标记并返回完整工具调用
-            if not response.finish_reason:
-                response.finish_reason = FinishReason.stop.value
-            return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
-
-        # 3. 用 Struct 解析JSON格式的chunk
-        try:
-            chunk_data = self._stream_chunk_decoder.decode(line_bytes)
-        except (msgspec.DecodeError, msgspec.ValidationError):
-            logger.warning("[%s: OpenAI] Invalid JSON chunk: %s", response.request_id, line_bytes)
-            return ProviderStreamEvent.empty()
-
-        # 缓存末帧原始事件（流结束后还原未知字段）
-        self.stream_last_raw_event = event
-
-        logger.debug('[%s] chunk_data: %s', response.request_id, chunk_data)
-
-        # 4. 按已知字段顺序合并meta，并处理Token统计
-        if chunk_data.usage:
-            response.prompt_tokens = chunk_data.usage.prompt_tokens
-            response.completion_tokens = chunk_data.usage.completion_tokens
-
-        # 5. 提取delta内容
-        choices = chunk_data.choices or []
-        if not choices:
-            return ProviderStreamEvent.empty()
-        choice = choices[0]
-        delta = choice.delta or OpenAIDelta()
-
-        # 6. 处理finish_reason
-        if choice.finish_reason:
-            response.finish_reason = choice.finish_reason
-
-        # 7. 增量累积工具调用内容
-        for tool_delta in delta.tool_calls or ():
-            tool_id = tool_delta.get("id")
-            if tool_id:
-                tool_item = tool_delta.copy()
-                self.stream_tool_buffers.append(tool_item)
-                continue
-            elif not self.stream_tool_buffers:
-                logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
-                continue
-
-            tool_item = self.stream_tool_buffers[-1]
-            fn_delta = tool_delta.get("function", {})
-            fn_item = tool_item.get("function", {})
-            tool_item['function'] = fn_item
-            for key, value in fn_delta.items():
-                fn_item[key] = fn_item.get(key, '') + value
-
-        content_delta = delta.content or ''
-        reasoning_delta = delta.reasoning_content or ''
-
-        if content_delta:
-            self.stream_content_buffer += content_delta
-        if reasoning_delta:
-            self.stream_reasoning_buffer += reasoning_delta
-
-        # 8. 返回当前chunk的内容（工具调用暂不返回）
-        return ProviderStreamEvent(
-            False,
-            content_delta,
-            reasoning_delta,
-            [], None
-        )
-
-
-class AnthropicFormat(LLMFormatStrategy):
-    def __init__(self, model_config: Dict[str, Any]):
-        super().__init__(model_config)
-
-        self.stream_content_buffer = ''
-        self.stream_reasoning_buffer = ''
-        self.stream_tool_buffers = []
-        self.current_tool_index = -1
-        self.stream_meta_buffer: Dict[str, Any] = {}
-        self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
-        self._stream_chunk_decoder = msgspec.json.Decoder(type=AnthropicStreamEvent)
-
-    def serialize_tool_description(
-            self, tools_configs: Dict[str, Dict[str, Any]]
-    ) -> List[Dict]:
-        """Convert tool configurations to Anthropic's tool format"""
-        tools = []
-        for func_name, func_config in tools_configs.items():
-            tool = {
-                "name": func_name,
-                "description": func_config.get("description", ""),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-            param_configs = func_config.get("param", {})
-            for param_name, param_info in param_configs.items():
-                param = {"type": param_info.get("type", "string")}
-                desc = param_info.get("description", "")
-                if desc:
-                    param["description"] = desc
-                tool["input_schema"]["properties"][param_name] = param
-                if param_info.get("required"):
-                    tool["input_schema"]["required"].append(param_name)
-            tools.append(tool)
-        return tools
-
-    def parse_tool_calls(self, tool_calls: List[Dict]) -> List[ToolCall]:
-        """Parse Anthropic tool calls into ToolCall objects"""
-        result = []
-        for raw_tool in tool_calls:
-            tool_id = raw_tool.get("id")
-            name = raw_tool.get("name", '')
-            input_data = raw_tool.get("input", {})
-            arguments_text = json.dumps(input_data) if input_data else ""
-            result.append(ToolCall(
-                id=tool_id,
-                type="tool_use",
-                name=name,
-                arguments_text=arguments_text,
-                arguments=input_data
-            ))
-        return result
-
-    def serialize_message(self, message: Message) -> Dict[str, Any]:
-        """Serialize a Message to Anthropic's message format"""
-        if message.raw_value is not None:
-            return message.raw_value
-
-        # Handle tool results (role=tool)
-        if message.role == "tool":
-            return {
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": message.tool_call_id or "",
-                    "content": message.content or ""
-                }]
-            }
-
-        result: Dict[str, Any] = {"role": message.role}
-        content_blocks = []
-
-        # Add text content
-        if message.content:
-            content_blocks.append({
-                "type": "text",
-                "text": message.content
-            })
-
-        # Add image content (base64 data URLs only)
-        for media in (message.media_content or ()):
-            url = None
-            if media.url:
-                url = media.url
-            elif media.data and media.mime_type:
-                url = util.generate_data_url(
-                    media.data,
-                    media.mime_type
-                )
-            elif media.filename:
-                mime_type = util.get_mime_type(media.filename)
-                with open(media.filename, 'rb') as f:
-                    data = f.read()
-                url = util.generate_data_url(data, mime_type)
-
-            if url and url.startswith("data:"):
-                base64_data = url.split(",", 1)[1] if "," in url else url
-                media_type = media.mime_type or "image/jpeg"
-
-                content_blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": base64_data
-                    }
-                })
-
-        if content_blocks:
-            result["content"] = content_blocks
-
-        return result
-
-    def make_request_body(self, request: LLMProviderRequest) -> Dict[str, Any]:
-        """Build Anthropic API request body"""
-        body = {
-            "model": self.model_config["model"],
-            "messages": [],
-            "stream": request.stream
-        }
-        body.update(request.options)
-        body.setdefault("max_tokens", 20000)
-
-        # Separate system messages and tool results
-        system_messages = []
-        regular_messages = []
-        tool_result_messages = []
-
-        for msg in request.messages:
-            if msg.role == "system":
-                system_messages.append(msg)
-            elif msg.role == "tool":
-                tool_result_messages.append(msg)
-            else:
-                regular_messages.append(msg)
-
-        # Add system messages as top-level system parameter
-        if system_messages:
-            system_content = []
-            for sys_msg in system_messages:
-                if sys_msg.content:
-                    system_content.append({
-                        "type": "text",
-                        "text": sys_msg.content
-                    })
-            if system_content:
-                body["system"] = system_content
-
-        # Serialize all messages
-        serialized_messages = []
-        for msg in regular_messages:
-            serialized_messages.append(self.serialize_message(msg))
-        for tool_msg in tool_result_messages:
-            serialized_messages.append(self.serialize_message(tool_msg))
-
-        body["messages"] = serialized_messages
-
-        # Handle tools
-        if request.tools and self.model_config.get("abilities", {}).get("tool"):
-            body["tools"] = self.serialize_tool_description(request.tools)
-
-        logger.debug("[%s] request body: %s", request.request_id, body)
-        return body
-
-    @classmethod
-    def parse_response_message(cls, response: LLMProviderResponse, message: Dict[str, Any]) -> Message:
-        return Message(
-            role="assistant",
-            content=response.response_text,
-            reasoning_content=response.response_reasoning,
-            raw_value=message
-        )
-
-    def parse_batch_response(self, response: LLMProviderResponse,
-                             response_data: Dict[str, Any]) -> None:
-        """Parse non-streaming response"""
-        # response_meta：除 content 外的字段原样整体存入
-        response.response_meta = {k: v for k, v in response_data.items() if k != 'content'}
-        response.response_text = ""
-        response.response_reasoning = ""
-
-        content_blocks = response_data.get("content") or []
-        tool_calls = []
-
-        for block in content_blocks:
-            block_type = block.get("type")
-            if block_type == "text":
-                response.response_text += block.get("text", "")
-            elif block_type == "thinking":
-                response.response_reasoning += block.get("thinking", "")
-            elif block_type == "tool_use":
-                tool_calls.append(block)
-
-        if tool_calls:
-            response.response_tool_calls = self.parse_tool_calls(tool_calls)
-            response.finish_reason = FinishReason.tool_calls.value
-        else:
-            # Map Anthropic stop_reason to FinishReason
-            stop_reason = response_data.get("stop_reason", "unknown")
-            if stop_reason == "end_turn":
-                response.finish_reason = FinishReason.stop.value
-            elif stop_reason == "max_tokens":
-                response.finish_reason = FinishReason.length.value
-            elif stop_reason == "tool_use":
-                response.finish_reason = FinishReason.tool_calls.value
-            elif stop_reason in FinishReason:
-                response.finish_reason = stop_reason
-            else:
-                logger.warning(
-                    "[%s: Anthropic] Unknown stop_reason: %s",
-                    response.request_id, stop_reason)
-                response.finish_reason = FinishReason.error_request.value
-                response.error_text = 'stop_reason: %s' % stop_reason
-
-        response.response_message = self.parse_response_message(response, response_data)
-        # Parse token usage
-        usage = response_data.get("usage", {})
-        response.prompt_tokens = usage.get("input_tokens")
-        response.completion_tokens = usage.get("output_tokens")
-
-    def parse_stream_event(self, response: LLMProviderResponse,
-                           event: sse.ServerSentEvent) -> ProviderStreamEvent:
-        """Parse streaming response chunk"""
-        logger.debug('[%s] stream event: %s', response.request_id, event)
-        # Handle event type
-        event_type = event.event
-        line_bytes: bytes = event.data.strip()
-        if event_type == "error":
-            response.finish_reason = FinishReason.error_request.value
-            response.error_text = line_bytes.decode('utf-8')
-            logger.error("[%s: Anthropic] Stream error: %s",
-                         response.request_id, response.error_text)
-            return ProviderStreamEvent(True, "", "", [], None)
-
-        # Handle stream end
-        if line_bytes == b"[DONE]" or event_type == "message_stop":
-            final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
-            response_message = {
-                "content": self.stream_content_buffer,
-                "tool_calls": self.stream_tool_buffers
-            }
-            if self.stream_reasoning_buffer:
-                response_message[
-                    "reasoning_content"] = self.stream_reasoning_buffer
-
-            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
-            if self.stream_last_raw_event is not None:
-                raw = util.decode_json(self.stream_last_raw_event.data)
-                for key, value in raw.items():
-                    if key not in ANTHROPIC_KNOWN_FIELDS:
-                        self.stream_meta_buffer[key] = value
-                self.stream_last_raw_event = None
-            response.response_meta = self.stream_meta_buffer
-
-            # Clear buffers
-            self.stream_tool_buffers = []
-            self.stream_content_buffer = ""
-            self.stream_reasoning_buffer = ""
-            self.stream_meta_buffer = {}
-            self.current_tool_index = -1
-
-            if not response.finish_reason:
-                response.finish_reason = FinishReason.stop.value
-
-            return ProviderStreamEvent(True, "", "", final_tool_calls, response_message)
-
-        if not line_bytes:
-            return ProviderStreamEvent.empty()
-
-        try:
-            chunk_data = self._stream_chunk_decoder.decode(line_bytes)
-        except (msgspec.DecodeError, msgspec.ValidationError):
-            logger.warning("[%s: Anthropic] Invalid JSON chunk: %s",
-                           response.request_id, line_bytes)
-            return ProviderStreamEvent.empty()
-
-        # 缓存末帧原始事件（流结束后还原未知字段）
-        self.stream_last_raw_event = event
-
-        # message_start: 按已知字段顺序合并 message 中的 meta（content 除外）
-        if chunk_data.type == "message_start" and chunk_data.message is not None:
-            _struct_meta_merge(chunk_data.message, ANTHROPIC_META_FIELDS, self.stream_meta_buffer)
-            if chunk_data.message.usage is not None:
-                response.prompt_tokens = chunk_data.message.usage.input_tokens
-                response.completion_tokens = chunk_data.message.usage.output_tokens
-
-        # Handle token usage (顶层 usage，如 message_delta 事件)
-        usage = chunk_data.usage
-        if usage is not None:
-            response.prompt_tokens = usage.input_tokens
-            response.completion_tokens = usage.output_tokens
-            self.stream_meta_buffer['usage'] = msgspec.structs.asdict(usage)
-
-        # message_delta: 合并 delta 中的 stop_reason/stop_sequence
-        if chunk_data.type == "message_delta" and chunk_data.delta is not None:
-            for meta_key in ('stop_reason', 'stop_sequence'):
-                meta_value = getattr(chunk_data.delta, meta_key, None)
-                if meta_value is not None:
-                    self.stream_meta_buffer[meta_key] = meta_value
-
-        # Handle content_block (start of new content block)
-        if chunk_data.content_block is not None:
-            block = chunk_data.content_block
-            block_type = block.type
-
-            if block_type == "tool_use":
-                # New tool call started
-                self.current_tool_index += 1
-                self.stream_tool_buffers.append({
-                    "id": block.id,
-                    "name": block.name,
-                    "input": {}
-                })
-
-        # Handle delta (content updates)
-        delta_text = ""
-        delta_reasoning = ""
-
-        if chunk_data.delta is not None:
-            delta = chunk_data.delta
-            delta_type = delta.type
-
-            if delta_type == "text_delta":
-                text = delta.text or ''
-                delta_text = text
-                self.stream_content_buffer += text
-
-            elif delta_type == "thinking_delta":
-                thinking = delta.thinking or ''
-                delta_reasoning = thinking
-                self.stream_reasoning_buffer += thinking
-
-            elif delta_type == "input_json_delta":
-                # Update current tool call's input
-                if self.current_tool_index >= 0 and self.stream_tool_buffers:
-                    partial_json = delta.partial_json or ''
-                    current_tool = self.stream_tool_buffers[
-                        self.current_tool_index]
-                    # Accumulate partial JSON (simplified approach)
-                    current_input = current_tool.get("input", {})
-                    if isinstance(current_input, dict) and not current_input:
-                        # Start with empty dict, will be filled by partial_json
-                        current_tool["input"] = partial_json
-                    elif isinstance(current_input, str):
-                        # Append to existing partial JSON string
-                        current_tool["input"] = current_input + partial_json
-
-        return ProviderStreamEvent(
-            False,
-            delta_text,
-            delta_reasoning,
-            [],  # Tool calls returned at end
-            None
-        )
 
 
 def _split_global_rank(text: str) -> Tuple[str, int]:
@@ -840,10 +75,7 @@ def _rotate_by_shift(items: List[Any], shift: int) -> List[Any]:
 
 class LLMProviderManager:
     """LLM提供商管理器，负责API调用、资源管理与请求重试"""
-    format_strategies = {
-        "openai": OpenAICompatibleFormat,
-        "anthropic": AnthropicFormat,
-    }
+    format_strategies = FORMAT_STRATEGY_REGISTRY
     default_bytes_per_token: float = 4.0
     default_rank_adjust_ratio: float = 0.25
 
@@ -1026,11 +258,11 @@ class LLMProviderManager:
         """解析出最终使用的提供商名及其评分
 
         Args:
-            input_tags: 标签/模型名/逻辑模型名，支持以英文逗号分隔多个标签，末尾可带 :N 全局旋转后缀
+            input_tags: 标签/模型名/逻辑模型名，支持以英文逗号分隔多个标签，末尾可带 :N 全局旋转后缀，恒定按模型层旋转
             messages: 可选消息列表，用于 Token 数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
-            model_rank: 候选偏移量，与 :N 后缀相加决定最终旋转位数
-            rank_by_model: 为 True 时先旋转模型层再按提供商展开，否则先展开提供商再旋转
+            model_rank: 候选偏移量，旋转对象由 rank_by_model 决定
+            rank_by_model: 为 True 时 model_rank 在模型层旋转后再按提供商展开，否则作用于展开后的提供商列表
 
         Returns:
             提供商名与模型层评分的列表
@@ -1107,10 +339,12 @@ class LLMProviderManager:
             ), reverse=True)
             models = [(m, model_total_weights[m]) for m in best_models]
 
-        # 5. 按 rank_by_model 选择旋转对象并展开提供商
+        # 5. :N 恒定按模型层旋转（不受 rank_by_model 影响）
+        models = _rotate_by_shift(models, global_rank - 1)
+
+        # 6. model_rank 按 rank_by_model 选择旋转对象并展开提供商
         if rank_by_model:
-            shift = (global_rank - 1 + model_rank) % len(models) if models else 0
-            rotated = _rotate_by_shift(models, shift)
+            rotated = _rotate_by_shift(models, model_rank)
             result: List[Tuple[str, float]] = []
             for model_name, score in rotated:
                 for provider in self._resolve_model_providers(
@@ -1123,8 +357,7 @@ class LLMProviderManager:
             for provider in self._resolve_model_providers(
                     model_name, messages=messages, context_id=context_id):
                 expanded.append((provider, score))
-        shift = (global_rank - 1 + model_rank) % len(expanded) if expanded else 0
-        return _rotate_by_shift(expanded, shift)
+        return _rotate_by_shift(expanded, model_rank)
 
     def list_models(self, tags: Optional[str] = None) -> List[ModelInfo]:
         """列出匹配的可用模型
@@ -1383,8 +616,9 @@ class LLMProviderManager:
                         response.response_tool_calls = (response.response_tool_calls or []) + event.tool_calls
 
                     if event.response_message:
-                        response.response_message = format_strategy.parse_response_message(
-                            response, event.response_message)
+                        for message in event.response_message:
+                            response.response_message.append(format_strategy.parse_response_message(
+                                response, message))
 
                     # 发送分块内容到Channel
                     if event.reasoning:

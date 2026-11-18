@@ -31,7 +31,7 @@ aitoolman 是面向开发者的 LLM（大语言模型）中间件，旨在解决
 ### 1.3 使用场景
 1. **文本处理管线**：结合提示词模板与后处理管线，构建分类、摘要、翻译、结构化提取等稳定处理流程。
 2. **配置统一管理**：集中管理多个模型与提供商的 API 密钥、模型参数与提供商设置。
-3. **模型路由与降级**：按标签与优先级选择模型，失败时自动降级，平衡成本、速度与效果。
+3. **模型路由与可用性**：使用 `model_tag` 按成本/效果选择具体模型，使用 `model_provider` 组织同一模型不同提供商做负载均衡；遇到可重试错误时，可在用户代码中按候选顺序重试，平衡成本、速度与效果。
 4. **任务编排**：支持串行与并行的 LLM 任务，配合并发上限与停止控制。
 
 在本框架中，提示词模板是核心，对话上下文是辅助。鼓励通过精心设计的模板参数编排，代替对话上下文的堆砌，从而避免信息遗忘和误导。
@@ -114,9 +114,9 @@ class LLMModuleRequest(typing.NamedTuple):
     """应用层模板请求参数（模块配置）"""
     module_name: str                    # 模块名称
     template_params: Dict[str, Any]     # 模板参数
-    model_name: Optional[str] = None  # 指定模型名/标签，多个标签以英文逗号分隔，可含全局 :N 旋转后缀，覆盖模块默认配置
-    model_rank: int = 0   # 模型路由候选排名（从0开始，超出自动取模，详见模型路由功能）
-    rank_by_model: bool = False  # True 按模型旋转后拆分提供商，False 拆分提供商后旋转
+    model_name: Optional[str] = None  # 可指定 [api] 配置名、model_provider 逻辑模型名、model_tag 标签名或标签组合，覆盖模块默认配置
+    model_rank: int = 0   # 候选偏移量，旋转对象由 rank_by_model 决定；用户代码重试时可递增以切换下一个候选
+    rank_by_model: bool = False  # True 时 model_rank 与 :N 在模型层叠加旋转后再展开提供商；False 时仅旋转展开后的提供商列表
     context_messages: List[Message] = []  # 上下文消息
     media_content: Optional[List[MediaContent]] = None  # 多媒体内容
 
@@ -138,6 +138,7 @@ class LLMModuleResult:
     module_name: Optional[str]          # 模块名称
     request: LLMDirectRequest           # 实际请求参数
     post_processor: Optional[str] = None  # 后处理器
+    provider_response_id: Optional[str] = None  # 提供商响应 ID
     response_text: str = ""             # 原始响应文本
     response_reasoning: str = ""        # 原始推理文本
     text: str = ""                      # 处理后的文本
@@ -145,7 +146,7 @@ class LLMModuleResult:
     status: FinishReason = FinishReason.stop  # 完成状态
     error_text: Optional[str] = None    # 错误信息
     request_params: Dict[str, Any] = field(default_factory=dict)  # 原始模板参数
-    response_message: Optional[Message] = None  # 原始响应消息
+    response_message: List[Message] = field(default_factory=list)  # 原始响应消息
     data: Any = None                    # 后处理结果
 
     def raise_for_status(self):
@@ -219,6 +220,7 @@ class LLMProviderResponse:
     total_response_time: Optional[float] = None  # 总响应时间
 
     # 响应内容
+    provider_response_id: Optional[str] = None  # 提供商响应 ID
     response_text: str = ""                 # 完整响应文本
     response_reasoning: str = ""            # 完整推理文本
     response_tool_calls: List[ToolCall] = field(default_factory=list)  # 工具调用
@@ -231,7 +233,7 @@ class LLMProviderResponse:
     completion_tokens: Optional[int] = None # 输出 token 数
 
     # 原始数据
-    response_message: Optional[Message] = None  # 原始响应消息
+    response_message: List[Message] = field(default_factory=list)  # 原始响应消息
 ```
 
 ### 状态与错误类型
@@ -258,7 +260,7 @@ LLMModuleResult 或 FinishReason 中有 `raise_for_status()` 方法自动将完�
 
 ```python
 class LLMError(RuntimeError): ...
-class LLMRetriableError(LLMError): ...  # 可重试错误，建议更换同类模型重试，使用模型路由时可将model_rank+1切换下一个候选模型
+class LLMRetriableError(LLMError): ...  # 可重试错误；用户代码可将 model_rank + 1 后重试，切换下一个候选模型
 class LLMProviderConfigError(LLMError): ... # 模型提供商配置错误
 class LLMNoAvailableModelError(LLMProviderConfigError): ... # 无可用模型错误
 class LLMPermissionDeniedError(LLMProviderConfigError): ... # 权限不足错误
@@ -731,7 +733,19 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
 class AnthropicFormat(LLMFormatStrategy):
     """Anthropic Claude API 格式"""
+
+
+class ResponsesFormat(LLMFormatStrategy):
+    """OpenAI Responses API 格式"""
 ```
+
+三种格式的 Message 与 ToolCall 映射如下：
+
+| 格式 | Message | ToolCall |
+|---|---|---|
+| OpenAI Chat Completions | `messages[]` 中的 `{role, content}`，`raw_value` 原样回传 | `tool_calls[{id, type, function: {name, arguments}}]` |
+| Anthropic | `messages[]` 中的 `{role, content: [block]}`；system 进 `system`，tool 结果进 `tool_result` 块 | `tool_use` 块 `{id, name, input}` |
+| OpenAI Responses | `input[]` 项；system 进 `instructions`，tool 结果进 `function_call_output` | `function_call` 项 `{call_id, name, arguments}` |
 
 
 ### 5.2 LLMProviderManager 提供商管理器
@@ -755,49 +769,46 @@ class LLMProviderManager:
 ```
 
 ### 5.3 模型路由
-框架内置灵活的模型路由机制，通过标签分组实现业务代码与具体模型的解耦，支持多标签匹配、自动权重计算、Token超限过滤、多候选降级重试等能力，便于统一调整模型资源、平衡成本和效果。
+框架内置灵活的模型路由机制：`model_provider` 用于把效果相同的多个提供商组织成一个逻辑模型，主要用于负载均衡和提高可用性；`model_tag` 用于根据成本/效果选择具体模型，列表顺序指定候选优先级，嵌套列表表示相同优先级。使用时，`model_name` 可指定 `[api]` 配置名、`[model_provider]` 逻辑模型名、`[model_tag]` 标签名或标签组合；组合标签取同时满足所有标签的候选，并综合各标签权重计算评分，选择评分最高者。系统还支持输入 Token 超限过滤和用户代码按候选列表重试，便于统一调整模型资源、平衡成本和效果。
 
 #### 5.3.1 配置方式
-在提供商配置文件的 `[model_tag]` 段定义标签与模型的映射关系，每个标签下的模型列表按推荐优先级排序（越靠前权重越高）；`[model_provider]` 段声明一个模型有多个提供商，其逻辑模型名可用于标签或直接调用。业务代码中直接使用标签，无需关心底层具体提供商，支持随时调整模型组合而不修改业务代码。
-详细配置说明参考《[配置文件文档](./config.md)》的 model_tag / model_provider 部分。
+配置时先用 `[model_provider]` 把效果相同的多个 `[api]` 配置名映射为一个逻辑模型名，用于负载均衡和提高可用性；逻辑模型名在标签中共享其所在位置的优先级，并按队列长度及 `context_id`（未提供时为 `client_id`）稳定随机选择提供商。再用 `[model_tag]` 按成本/效果组织候选模型，列表顺序指定优先级，嵌套列表表示相同优先级；列表项可使用 `[api]` 配置名/模型名或 `[model_provider]` 逻辑模型名。业务代码可直接使用标签，无需关心底层具体提供商，并支持随时调整模型组合而不修改业务代码。详细配置说明参考《[配置文件文档](./config.md)》的 model_tag / model_provider 部分。
 
 #### 5.3.2 路由算法
-输入标签字符串（`input_tags`）后，系统按以下规则计算最优候选提供商列表：
-1. **解析全局旋转值**：整串末尾 `:N` 剥离为全局旋转值（N 缺省为 1，非法后缀抛 `LLMNoAvailableModelError`），剩余部分按英文逗号分隔为标签；任一项未匹配到标签/模型名/逻辑模型名即抛 `LLMNoAvailableModelError`
-2. **精确匹配优先**：遍历标签项，若存在与模型名或逻辑模型名完全匹配的项，该模型直接入选（评分 1.0）
-3. **标签交集匹配**：查找每个标签对应的模型集合及权重，取所有标签对应模型的交集（单个模型名/逻辑模型名视为单元素集合，权重为1）
-4. **Token限制过滤**：若传入 `messages` 参数，自动估算输入Token总数，过滤掉配置了 `max_input_tokens` 且Token总数超出限制的模型；逻辑模型在拆分提供商时按其提供商的限制过滤
-5. **权重排序**：对每个模型在所有标签中的权重求和，按总权重从高到低排序
-6. **排队长度排序**：权重相同的同级模型，按当前排队任务数从低到高排序，优先选择排队较少的模型；逻辑模型取其提供商的最小队列长度
-7. **稳定随机排序**：若权重和并发量仍相同，以 `context_id`（如有）或 `client_id` 为随机种子进行稳定排序，同一上下文的多次调用结果稳定，不同上下文之间实现负载均衡
-8. **按提供商拆分**：按 `rank_by_model` 选择拆分时机——True 时先按 `shift=(N-1+model_rank)` 旋转模型列表再拆分，False 时先拆分提供商再旋转提供商列表
-
-返回候选提供商及其模型层评分列表
+输入模型名称或标签组合后，系统按以下用户场景规则生成候选提供商列表：
+1. **解析用户指定名称**：`model_name` 支持单个名称或英文逗号分隔的标签组合；整串末尾 `:N` 表示从第 N 位候选开始，前面的模型移动到队列最后（恒定按模型层旋转）；非法后缀或无匹配项抛出 `LLMNoAvailableModelError`。
+2. **精确名称优先**：直接指定 `[api]` 配置名或 `[model_provider]` 逻辑模型名时，优先使用该模型或逻辑模型。
+3. **组合标签匹配**：取所有标签对应模型的交集，综合各标签权重计算评分，选择评分最高者。
+4. **Token 限制过滤**：若传入 `messages`，自动估算输入 Token 总数，过滤掉超过 `max_input_tokens` 限制的模型；逻辑模型在展开提供商时按各提供商限制过滤。
+5. **同级候选排序**：列表顺序指定优先级，嵌套列表中的模型共享优先级；同优先级候选按当前排队任务数、`context_id`（未提供时为 `client_id`）稳定随机排序，用于负载均衡并保持同一上下文结果稳定。
+6. **候选重试**：`:N` 恒定按模型层旋转；`rank_by_model=True` 时 `model_rank` 与 `:N` 在模型层叠加，`rank_by_model=False` 时 `model_rank` 仅旋转提供商列表；用户代码遇到可重试错误时，将 `model_rank + 1` 后重试即可切换到下一个候选，超出候选数时自动取模。
+7. **候选排序方式**：`:N` 恒定按模型层旋转；`model_rank` 的旋转对象由 `rank_by_model` 决定（`True` 在模型层旋转后再展开提供商，`False` 仅旋转展开后的提供商列表）。
+8. **返回候选列表**：返回按上述场景排序后的候选提供商及模型层评分列表。
 
 #### 5.3.3 使用方式
-- **resolve_model 接口**：直接调用 `client.resolve_model(tags, messages, context_id=context_id, model_rank=model_rank, rank_by_model=rank_by_model)`，传入标签字符串、可选的消息列表和上下文 ID（可选），得到排序后的候选提供商及模型层评分列表
-- **模块调用传参**：通过 `LLMModuleRequest` 的 `model_name` 参数或 `app['module'](_model_name=xxx)` 的 `_model_name` 参数，传入标签字符串，系统自动路由到最优提供商
-- **单字符串输入**：`resolve_model` 接口与模块 `model_name` 参数均使用单个字符串，多个标签以英文逗号分隔（如 `"image,cheap"`）；整串末尾可附加 `:N` 后缀，对最终候选列表循环旋转 N-1 位
-- **model_rank 参数**：用于选择候选列表中的第N个模型（从0开始计数），若超过候选列表长度则自动取模；与全局 `:N` 的旋转值相加（`shift=(N-1+model_rank)%候选数`）。当遇到 `LLMRetriableError` 可重试错误时，可将 `model_rank` 加1后重试，自动切换到下一个优先级的候选模型，实现故障降级和负载均衡
-- **rank_by_model 参数**：选择旋转作用的对象。True 时评分后先按模型旋转，再按 `[model_provider]` 拆分为提供商；False 时先拆分为提供商再旋转。默认 False
-- **context_id 参数**：`resolve_model` 的 `context_id` 参数用于作为稳定随机排序的随机种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id` 作为种子
+- **resolve_model 接口**：传入单个名称或标签组合、可选消息列表和上下文 ID，得到评分后的候选提供商列表。
+- **模块调用传参**：`LLMModuleRequest.model_name` 或 `app['module'](_model_name=xxx)` 可指定 `[api]` 配置名、`[model_provider]` 逻辑模型名、`[model_tag]` 标签名或标签组合。
+- **单字符串输入**：多个标签以英文逗号分隔；组合标签取交集并综合各标签权重计算评分，选择评分最高者；整串末尾 `:N` 从第 N 位候选开始，前面的模型移动到队列最后（恒定按模型层旋转）。
+- **model_rank 参数**：候选偏移量，旋转对象由 `rank_by_model` 决定；用户代码捕获可重试错误后，将 `model_rank + 1` 重试，切换到下一个候选。
+- **rank_by_model 参数**：`True` 时 `model_rank` 与 `:N` 在模型层叠加旋转后再展开提供商；`False`（默认）时 `model_rank` 仅旋转展开后的提供商列表。
+- **context_id 参数**：作为稳定随机选择的种子，同一 `context_id` 的多次调用结果保持一致；未显式传入时使用 `client_id`，在不同上下文之间实现负载均衡。
 
 
 使用示例：
 ```python
-# 选择 fast 标签排序后的候选提供商
+# 选择 fast 标签评分后的候选提供商
 result = await app['module'](_model_name="fast", text="Hello")
 
-# 多标签交叉，整串末尾旋转 2 位
+# 组合标签评分后从第 3 位候选开始
 candidates = await client.resolve_model("code,multimodal:3")
 ```
 
 #### 5.3.4 应用场景
-- 按业务场景分组：如 `fast`（快速响应）、`precise`（高精度）、`low_cost`（低成本）、`code`（代码处理）、`multimodal`（多模态）等，业务代码直接使用场景标签
-- 多标签交叉匹配：如传入 "code,multimodal" 自动选择同时支持代码和多模态能力，在两者中最优的模型
-- 故障自动降级：主模型不可用时自动切换到备用模型，提升服务可用性
-- 成本动态调整：根据业务优先级自动选择不同成本档位的模型
-- 全局排序调整：使用整串末尾 :N 语法灵活调整最终候选列表起点，无需修改配置文件即可临时切换首选提供商
+- 按业务场景分组：以 `model_tag` 按成本/效果组织候选模型，业务代码直接使用场景标签。
+- 多标签交叉匹配：组合标签取交集并综合各标签权重计算评分，选择评分最高者。
+- 负载均衡与可用性：`model_provider` 组织效果相同的提供商做负载均衡；遇到可重试错误时，由用户代码递增 `model_rank` 重试到下一个候选。
+- 成本动态调整：根据业务优先级自动选择不同成本/效果档位的模型。
+- 全局排序调整：使用整串末尾 `:N` 临时调整首选候选，前面的模型移动到队列最后（恒定按模型层旋转）；配合 `model_rank` 与 `rank_by_model=True` 可选择不同模型，提高输出多样性。
 
 ## 6. 实用工具
 
@@ -886,10 +897,10 @@ parallel = 1
 api_type = "openai"
 rank_adjust_ratio = 0.25 # 模型路由权重调整参数，可选
 
-# 模型标签配置，用于模型路由，按优先级排序，尽量写全
+# 模型标签配置，按成本/效果组织候选模型，列表顺序指定优先级，尽量写全
 # 业务代码使用标签，无需关心底层具体模型，支持灵活切换和路由
-# 模型路由支持同时传入多个标签，系统会自动匹配同时符合所有标签的可用模型，结合输入Token数限制、模型优先级自动选择最优模型。
-# 例如传入 "code,multimodal" 可自动选择支持多模态的代码模型，传入 "low_cost,fast" 可自动选择低成本且响应快的模型，适配各类交叉场景。
+# 多个标签以英文逗号分隔，组合后综合各标签权重计算评分，选择评分最高者；列表项可为 [api] 配置名或 model_provider 逻辑模型名
+# 例如传入 "code,multimodal" 选择支持多模态的代码模型，传入 "low_cost,fast" 选择低成本且响应快的模型，适配各类交叉场景
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # 低成本模型组，适合批量文本处理
 "fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # 高速响应模型组，适合快速处理任务
@@ -968,7 +979,7 @@ post_processor = "builtin.parse_json"
 
 # 日程规划模块（支持工具调用）
 [module.task_planner]
-model = ["fast", "low_cost"]
+model = "fast,low_cost"
 stream = true
 template.user = """
 你作为日程助手，分析用户指令：
@@ -991,7 +1002,7 @@ tools.add_task.param.content.required = true
 
 # JSON 提取模块
 [module.json_extractor]
-model = ["precise", "fast"]
+model = "precise,fast"
 template.user = """
 从以下文本中提取结构化信息：
 {{text}}
@@ -1061,7 +1072,7 @@ async def main():
             header=True
         ))
 
-        # 调用代码编辑器模块，指定使用代码+多模态标签组，自动选择最优模型
+        # 调用代码编辑器模块，指定代码+多模态组合标签，按综合评分选择候选模型
         result = await app['code_editor'](
             code_content=open("app.py").read(),
             instruction="参考截图添加错误处理逻辑",
@@ -1101,7 +1112,7 @@ async def process_ticket(app_factory, ticket):
     result = await app['ticket_classifier'](
         ticket_content=ticket['content'],
         ticket_type=ticket['type'],
-        _model_name="low_cost,fast" # 使用低成本+高速模型组
+        _model_name="low_cost,fast" # 按低成本+快速组合标签选择候选模型
     )
     result.raise_for_status()
     return {
@@ -1338,6 +1349,18 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### 8.7 智能体上下文串联
+
+`response_message` 是按输出顺序排列的 `Message` 列表，其中每个 `Message.raw_value` 保存提供商返回的消息原文。将其整体加入上下文后，`run_tool_calls` 会自动拼接工具执行结果，并返回携带完整上下文的下一步请求。
+
+```python
+result = await client.request(request)
+if result.tool_calls:
+    fn_map = {"get_weather": get_weather}
+    next_request = await result.run_tool_calls(fn_map)
+    result = await client.request(next_request)
+```
+
 ## 9. 部署与集成
 
 ### 9.1 应用场景
@@ -1354,7 +1377,7 @@ aitoolman 微服务架构适用于以下场景：
 - **ZeroMQ 通信**：高性能、低延迟的进程间通信
 - **认证授权**：支持普通接口令牌和管理权限令牌两级认证，确保接口安全
 - **请求队列**：智能调度，避免超额请求
-- **模型路由**：自动按配置中的自定义标签选择最优模型，支持Token超限过滤
+- **模型路由**：按 `model_tag` 的成本/效果候选优先级选择模型；`model_provider` 用于效果相同提供商的负载均衡与可用性提升，并支持 Token 超限过滤。
 - **实时监控**：通过 PUB 接口发布审计日志
 - **客户端管理**：支持请求取消、批量取消等操作
 - **热更新能力**：运行时修改配置、模型状态、标签规则，无需重启服务
@@ -1385,13 +1408,13 @@ client = LLMZmqClient(
 
 命令行客户端测试：
 ```bash
-# 交互式测试，指定单个模型标签
+# 交互式测试，指定 [api] 配置名、model_provider 逻辑模型名或 model_tag 标签名
 python3 -m aitoolman client \
   -z tcp://localhost:5555 \
   -m fast \
   -a your-auth-token
 
-# 指定多个标签，自动路由到匹配的最优模型
+# 指定组合标签，按综合评分选择候选模型
 python3 -m aitoolman client \
   -z tcp://localhost:5555 \
   -m "code,multimodal" \
@@ -1459,7 +1482,7 @@ python3 -m aitoolman manage -z tcp://localhost:5555 -a manage_token update_confi
 - **模板变量**：使用 `{{ variable }}` 和其他 Jinja2 模板语法
 - **上下文控制**：尽量少用上下文消息，优先优化提示词质量
 - **工具描述**：为工具提供清晰、具体的描述和参数说明；不提供无用工具
-- **标签分组**：根据业务场景将模型分组为不同标签，业务代码使用标签而非具体模型名，便于后续统一调整模型
+- **标签分组**：根据成本/效果将模型组织为不同标签，列表顺序指定候选优先级；同一模型不同提供商用 `model_provider` 组织为同一逻辑模型，业务代码使用名称或标签而非具体提供商。
 
 ### 10.3 错误处理
 ```python
@@ -1488,7 +1511,7 @@ except LLMResponseFormatError as e:
 - **资源管理**：使用 `ResourceManager` 避免超额请求
 - **缓存策略**：对重复查询实现结果缓存
 - **嵌套任务**：多层嵌套任务场景下使用 `release_worker()` 释放配额，避免死锁，提升并发利用率
-- **模型路由**：根据任务特性选择合适的标签组合，平衡成本、速度和效果
+- **模型路由**：根据任务特性选择合适的 `model_tag` 组合，平衡成本、速度和效果；同效果提供商通过 `model_provider` 做负载均衡。
 
 ### 10.5 调试技巧
 - **通道监听**：创建自定义Channel并传入请求，使用 `print_channel_output` 实时查看 LLM 输出

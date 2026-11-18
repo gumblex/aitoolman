@@ -326,6 +326,7 @@ class LLMZmqServer:
                 'queue_length': response.queue_length,
                 'time_to_first_token': response.time_to_first_token,
                 'total_response_time': response.total_response_time,
+                'provider_response_id': response.provider_response_id,
                 'response_text': response.response_text,
                 'response_reasoning': response.response_reasoning,
                 'response_tool_calls': [tc._asdict() for tc in response.response_tool_calls],
@@ -333,8 +334,9 @@ class LLMZmqServer:
                 'finish_reason': response.finish_reason.value if isinstance(response.finish_reason, FinishReason) else response.finish_reason,
                 'error_text': response.error_text,
                 'prompt_tokens': response.prompt_tokens,
+                'cached_tokens': response.cached_tokens,
                 'completion_tokens': response.completion_tokens,
-                'response_message': response.response_message.to_dict() if response.response_message else None
+                'response_message': [m.to_dict() for m in response.response_message]
             }
         )
         # logger.debug("send_msg: %s", message)
@@ -366,6 +368,7 @@ class LLMZmqServer:
             'queue_length': response.queue_length,
             'time_to_first_token': response.time_to_first_token,
             'total_response_time': response.total_response_time,
+            'provider_response_id': response.provider_response_id,
             'response_text': response.response_text,
             'response_reasoning': response.response_reasoning,
             'response_tool_calls': (
@@ -375,13 +378,12 @@ class LLMZmqServer:
             'finish_reason': response.finish_reason,
             'error_text': response.error_text,
             'prompt_tokens': response.prompt_tokens,
+            'cached_tokens': response.cached_tokens,
             'completion_tokens': response.completion_tokens,
             'request_messages': [m.to_dict() for m in request.messages],
             'request_tools': request.tools,
             'request_options': request.options,
-            'response_message': (
-                response.response_message._asdict()
-                if response.response_message else None)
+            'response_message': [m._asdict() for m in response.response_message]
         }
         await self.pub_socket.send_multipart([
             b'llm_request',

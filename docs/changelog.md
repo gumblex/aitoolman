@@ -2,13 +2,16 @@
 
 ## 0.10.0
 ### 新增
+- 新增 api type = "responses" (OpenAI Responses) 支持
 - 新增 `[model_provider]` 配置，一个逻辑模型名可对应多个提供商
-- 模型路由支持全局 `:N` 旋转语法（如 `"image,cheap:3"`），旋转值与 `model_rank` 相加
-- `LLMModuleRequest` 新增 `rank_by_model`，用于选择按模型或按提供商切换次优候选
+- 模型路由支持全局 `:N` 旋转语法（如 `"image,cheap:3"`），按模型层旋转
+- `LLMModuleRequest` 新增 `rank_by_model`，用于选择 `model_rank` 按模型层或按提供商列表旋转
 - provider 请求附加 `User-Agent: aitoolman/<version>`
 - CLI 新增 `version` 子命令
+- `LLMProviderResponse` / `LLMModuleResult` 新增 `provider_response_id`，记录提供商返回的响应 ID
 
 ### 修改
+- `LLMProviderResponse` / `LLMModuleResult` 的 `response_message` 改为按输出顺序排列的 `Message` 列表
 - `resolve_model` 返回提供商及其模型层评分列表；模型名与标签统一为英文逗号分隔的字符串
 - 移除 `llm_provider.toml` 的 `[model_alias]` 兼容性；应用层 `[model_alias]` 保持不变
 - 移除 `/N` 旋转与按标签 `tag:rank` 旋转语法
