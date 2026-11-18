@@ -107,7 +107,7 @@ class LLMClient(abc.ABC):
         """解析出最终使用的真实模型名及其评分
 
         Args:
-            tags: 标签/模型名/逻辑模型名，多个以英文逗号分隔，末尾可带 :N 全局旋转后缀，恒定按模型层旋转
+            tags: 标签/模型名/逻辑模型名，多个以英文逗号分隔，末尾可带 :N 全局旋转后缀
             messages: 可选消息列表，用于Token数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
             model_rank: 候选偏移量，旋转对象由 rank_by_model 决定

@@ -31,7 +31,7 @@ Whether it's simple one-time queries or complex multi-step business processes, a
 ### 1.3 Use Cases
 1. **Text Processing Pipelines**: Build stable pipelines for classification, summarization, translation and structured extraction with prompt templates and post-processing.
 2. **Unified Configuration Management**: Centrally manage API keys, model parameters and provider settings across multiple models and providers.
-3. **Model Routing and Availability**: Use `model_tag` to select models by cost and effect, and use `model_provider` to group providers with the same effective model for load balancing. When a retriable error occurs, user code can retry with the next candidate to balance cost, speed and quality.
+3. **Model Routing and Failover**: Group different provider endpoints by cost and task effect for model prioritization, balancing cost, speed and quality, and provide an easy-to-use failover mechanism.
 4. **Task Orchestration**: Support serial and parallel LLM tasks with concurrency limits and stop control.
 
 In this framework, prompt templates are core, and dialogue context is supplementary. Careful template parameter orchestration is encouraged instead of stacking dialogue context, thereby avoiding information forgetting and misguidance.
@@ -764,46 +764,73 @@ class LLMProviderManager:
 ```
 
 ### 5.3 Model Routing
-The framework includes a flexible model routing mechanism. `model_provider` groups multiple providers of the same effective model into one logical model, mainly for load balancing and availability; `model_tag` selects concrete models by cost and effect, with list order defining candidate priority and nested lists defining equal priority. When calling the framework, `model_name` can be an `[api]` config name, a `[model_provider]` logical name, a `[model_tag]` name, or a tag combination. A tag combination keeps candidates that satisfy all tags and selects the highest-scoring one using a combined score from the tag weights. The system also supports input-token-limit filtering and candidate retries in user code, making it easier to adjust model resources and balance cost and effect.
 
-#### 5.3.1 Configuration Method
-When configuring routing, first use `[model_provider]` to map multiple `[api]` config names of the same effective model to one logical model name for load balancing and availability. The logical model name shares the priority of its position in a tag, and its providers are selected by queue length and stable random ordering using `context_id` (or `client_id` when not provided). Then use `[model_tag]` to organize candidates by cost and effect: list order defines priority, nested lists define equal priority, and each item can be an `[api]` config/model name or a `[model_provider]` logical name. Business code can use tags directly without concerning itself with specific providers, and model combinations can be adjusted without changing business code. For detailed configuration instructions, refer to the model_tag / model_provider section of the [Configuration File Documentation](./config.md).
+Model routing is used to decouple business code from specific models/providers, achieving cost control, load balancing, failover, or output diversity.
 
-#### 5.3.2 Routing Algorithm
-After a model name or tag combination is provided, the system generates the ordered candidate provider list according to the following user-facing rules:
-1. **Parse the user-specified name**: `model_name` accepts a single name or comma-separated tag combination. A trailing `:N` starts from the Nth candidate and moves preceding candidates to the end (always rotated at the model layer); invalid suffixes or unmatched items raise `LLMNoAvailableModelError`.
-2. **Exact name first**: An exact `[api]` config name or `[model_provider]` logical name is used directly.
-3. **Tag combination matching**: Intersect the candidates of all tags and choose the highest-scoring one using a combined score from tag weights.
-4. **Token limit filtering**: If `messages` is provided, estimate input tokens and filter models exceeding `max_input_tokens`; logical models are filtered by provider limits when expanded.
-5. **Same-tier ordering**: List order defines priority and nested lists share priority. Same-priority candidates are ordered by queue length and stable random ordering using `context_id` (or `client_id` when absent), providing load balancing while keeping results stable for one context.
-6. **Candidate retries**: `:N` always rotates at the model layer; with `rank_by_model=True`, `model_rank` accumulates with `:N` at the model layer, and with `rank_by_model=False`, `model_rank` only rotates the provider list. When user code catches a retriable error, incrementing `model_rank` retries with the next candidate; values beyond the candidate count wrap around.
-7. **Candidate ordering mode**: `:N` always rotates at the model layer; the rotation target of `model_rank` is determined by `rank_by_model` (`True` rotates at the model layer before expanding providers, `False` only rotates the expanded provider list).
-8. **Return candidates**: Return the ordered candidate providers with model-layer scores.
+- `[model_provider]`: Declares different provider endpoints of the same model as one logical model, mainly for load balancing and availability.
+- `[model_tag]`: Groups and prioritizes models by cost, task effect, etc. The earlier in the list, the higher the priority; nested lists indicate the same priority. Providers within the same logical model share that position's priority and are selected by stable random ordering using `context_id` (or `client_id` when not provided), for load balancing and keeping selection stable within a session.
 
-#### 5.3.3 Usage
-- **resolve_model interface**: Pass a single name or tag combination, optional messages and optional context ID to obtain scored candidate providers.
-- **Module call parameters**: `LLMModuleRequest.model_name` or `app['module'](_model_name=xxx)` accepts an `[api]` config name, a `[model_provider]` logical name, a `[model_tag]` name, or a tag combination.
-- **Single string input**: Separate multiple tags with commas. A tag combination intersects candidates and selects the highest-scoring one using a combined score from tag weights; a trailing `:N` starts from the Nth candidate and moves preceding candidates to the end (always rotated at the model layer).
-- **model_rank parameter**: Candidate offset whose rotation target is determined by `rank_by_model`. After user code catches a retriable error, increment `model_rank` and retry to switch to the next candidate.
-- **rank_by_model parameter**: `True` rotates `model_rank` together with `:N` at the model layer before expanding providers; `False` (default) only rotates the expanded provider list.
-- **context_id parameter**: Seeds stable random ordering. Calls with the same `context_id` are stable; when omitted, `client_id` is used for load balancing across contexts.
+When using, `model_name` (or `_model_name` in module calls) can specify:
 
+- An endpoint name in `[api]`;
+- A logical model name in `[model_provider]`;
+- A tag name in `[model_tag]`;
+- A combination of multiple tags separated by commas, e.g. `"code,multimodal"`. The combined tag takes candidates satisfying all tags and selects the current suitable model by integrating each tag's ordering.
 
-Usage example:
-```python
-# Select scored candidate providers of the fast tag
-result = await app['module'](_model_name="fast", text="Hello")
+To support retries and diversity:
 
-# Start from the third candidate after scoring the tag combination
-candidates = await client.resolve_model("code,multimodal:3")
+- A trailing `:N` means starting from the Nth candidate, moving preceding candidates to the end. E.g. `"fast:3"`.
+- `model_rank` is used for in-program retries. When encountering a retriable error, increment `model_rank` and retry to switch to the next candidate; it wraps after exceeding the candidate count.
+- With `rank_by_model=True`, `model_rank` switches candidates at the model level, selecting different models, suitable for improving output diversity; default `False` rotates `model_rank` only within the expanded provider list, more suitable for failover among multiple providers of the same model.
+
+#### 5.3.1 Configuration Example
+
+```toml
+[model_provider]
+# Two provider endpoints for the same model: load balancing, failover
+"qwen-plus" = ["qwen-plus-aliyun", "qwen-plus-backup"]
+
+[model_tag]
+# Low cost priority: earlier means higher priority; nested list means same priority
+"low_cost" = ["qwen-flash", "doubao-mini", ["qwen-plus", "glm-flash"]]
+# High-quality code tasks
+"code" = ["deepseek-pro", "qwen-max", "glm-pro"]
+# Multimodal tasks
+"multimodal" = ["doubao-pro", "qwen-vl"]
 ```
 
-#### 5.3.4 Application Scenarios
-- Group by business scenario: use `model_tag` to organize candidates by cost and effect, and use scenario tags directly in business code.
-- Multi-tag cross matching: tag combinations intersect candidates and select the highest-scoring one using a combined score from tag weights.
-- Load balancing and availability: `model_provider` groups providers of the same effective model for load balancing; after a retriable error, user code increments `model_rank` to retry with the next candidate.
-- Dynamic cost adjustment: automatically select cost/effect tiers according to business priority.
-- Global rank adjustment: use a trailing `:N` to temporarily change the preferred candidate, moving preceding candidates to the end (always rotated at the model layer); combine it with `model_rank` and `rank_by_model=True` to select different models for output diversity.
+#### 5.3.2 Usage Example
+
+```python
+# Use tag directly
+result = await app['module'](_model_name="fast", text="Hello")
+
+# Combined tags: select candidates satisfying both code and multimodal
+result = await app['module'](_model_name="code,multimodal", text="...")
+
+# Retry by candidate in business code
+for model_rank in range(3):
+    try:
+        request = LLMModuleRequest(
+            module_name="translator",
+            template_params={"text": "Hello"},
+            model_name="fast",
+            model_rank=model_rank,
+        )
+        result = await app.call(request)
+        result.raise_for_status()
+        break
+    except LLMRetriableError:
+        continue
+```
+
+#### 5.3.3 Application Scenarios
+
+- **Failover**: Configure multiple provider endpoints for the same model; if one endpoint fails, switch candidate to continue request.
+- **Cost and effect balance**: Use `model_tag` to distinguish low-cost, fast, code, text-editing, multimodal scenarios; business code only uses tags.
+- **Combined filtering**: Use combined tags like `"code,multimodal"` to satisfy multiple conditions simultaneously.
+- **Output diversity**: Set `rank_by_model=True` and adjust `model_rank` to let retries fall on different models.
+- **Manual adjustment**: Use `:N` to start from the specified candidate, suitable for scenarios requiring diversity.
 
 ## 6. Utility Tools
 
@@ -891,10 +918,10 @@ parallel = 1
 api_type = "openai"
 rank_adjust_ratio = 0.25 # Model routing weight adjustment parameter, optional
 
-# Model tag configuration for routing, organized by cost and effect with list order defining candidate priority; define needed tags as completely as possible
-# Use tags in business code without concerning underlying specific models, supporting flexible switching and routing
-# Separate multiple tags with commas; combine tag weights into a score and select the highest-scoring candidate; items may be [api] config names or model_provider logical names
-# For example, "code,multimodal" selects a multimodal model for code tasks, and "low_cost,fast" selects a low-cost, low-latency model for cross scenarios
+# Model routing:
+# - [model_provider] declares different provider endpoints of the same model as one logical model, for load balancing and failover.
+# - [model_tag] groups and prioritizes models by cost, task effect: earlier in list means higher priority, nested list means same priority.
+#   Items can be endpoint names in [api], or logical model names in [model_provider].
 [model_tag]
 "low_cost" = ["doubao-seed-2.0-mini", "qwen-flash", "deepseek-v4-flash"]  # Low-cost model group, suitable for batch text processing
 "fast" = ["deepseek-v4-flash", "qwen-flash", "doubao-seed-2.0-lite"]  # High-speed response model group, suitable for fast task processing
@@ -1372,7 +1399,7 @@ The aitoolman microservice architecture is suitable for the following scenarios:
 - **ZeroMQ Communication**: High-performance, low-latency inter-process communication
 - **Authentication and Authorization**: Supports two-level authentication for common interface tokens and management permission tokens to ensure interface security
 - **Request Queue**: Intelligent scheduling to avoid excessive requests
-- **Model Routing**: Select models by the cost/effect candidate priority defined in `model_tag`; `model_provider` provides load balancing and availability for providers of the same effective model, with token-limit filtering.
+- **Model Routing**: Group models by specified tags to achieve dynamic model candidate updates, load balancing, failover and diversity guarantee.
 - **Real-Time Monitoring**: Publish audit logs via PUB interface
 - **Client Management**: Support request cancellation, batch cancellation, and other operations
 - **Hot Reload Capability**: Modify configurations, model status, tag rules at runtime without restarting the service
@@ -1477,7 +1504,7 @@ Principles of prompt design:
 - **Template variables**: Use `{{ variable }}` and other Jinja2 template syntax.
 - **Context control**: Minimize the use of context messages; prioritize optimizing prompt quality.
 - **Tool description**: Provide clear, specific descriptions and parameter explanations for tools; do not provide useless tools.
-- **Tag Grouping**: Group models into tags by cost and effect, with list order defining candidate priority; organize providers of the same effective model into one logical model with `model_provider`, and use names or tags instead of concrete providers in business code.
+- **Tag Grouping**: Group models into tags by cost and effect, with list order defining candidate priority; use logical names or tags instead of concrete providers in business code.
 
 ### 10.3 Error Handling
 ```python

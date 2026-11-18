@@ -258,7 +258,7 @@ class LLMProviderManager:
         """解析出最终使用的提供商名及其评分
 
         Args:
-            input_tags: 标签/模型名/逻辑模型名，支持以英文逗号分隔多个标签，末尾可带 :N 全局旋转后缀，恒定按模型层旋转
+            input_tags: 标签/模型名/逻辑模型名，支持以英文逗号分隔多个标签，末尾可带 :N 全局旋转后缀
             messages: 可选消息列表，用于 Token 数估算过滤
             context_id: 可选上下文 ID，用于稳定随机排序的种子
             model_rank: 候选偏移量，旋转对象由 rank_by_model 决定

@@ -158,6 +158,11 @@ class LLMZmqClient(LLMClient):
                 and not response_data['response_reasoning']):
             await request.output_channel.write(ChannelEvent('reasoning', None))
             await request.output_channel.write(ChannelEvent('response', None))
+        response_message = response_data.get('response_message') or []
+        if isinstance(response_message, dict):
+            response_message = [Message.from_dict(response_message)]
+        else:
+            response_message = list(map(Message.from_dict, response_message))
         response = LLMProviderResponse(
             client_id=response_data['client_id'],
             context_id=response_data['context_id'],
@@ -179,7 +184,7 @@ class LLMZmqClient(LLMClient):
             cached_tokens=response_data.get('cached_tokens'),
             completion_tokens=response_data['completion_tokens'],
             provider_response_id=response_data.get('provider_response_id'),
-            response_message=[Message.from_dict(m) for m in (response_data.get('response_message') or [])]
+            response_message=response_message
         )
         try:
             request.response.set_result(response)
@@ -358,14 +363,12 @@ class LLMZmqClient(LLMClient):
         except TimeoutError:
             raise LLMApiRequestError("resolve_model RPC request timeout")
         candidates = []
-        for item in result or []:
-            if (not isinstance(item, (list, tuple)) or len(item) != 2
-                    or not isinstance(item[0], str)
-                    or not isinstance(item[1], (int, float))):
-                raise LLMApplicationError(
-                    "Incompatible resolve_model response from server,"
-                    " please upgrade aitoolman server and client")
-            candidates.append((item[0], float(item[1])))
+        for item in result:
+            if isinstance(item, str):
+                # compatible with < 0.10.0
+                candidates.append((item, 0.0))
+            else:
+                candidates.append((item[0], item[1]))
         return candidates
 
     async def update_config(self, new_config: Dict[str, Any]):
