@@ -104,6 +104,9 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         event = self.format_strategy.parse_stream_event(
             response, ServerSentEvent(data=b"[DONE]"))
         self.assertTrue(event.is_end)
+        # 无累积快照时回退为最小结束消息
+        self.assertEqual(event.response_message,
+                         [{"role": "assistant", "content": ""}])
 
     def test_parse_stream_chunk_valid_data(self):
         response = LLMProviderResponse(
@@ -242,6 +245,71 @@ class TestOpenAIFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.reasoning, "")
         self.assertEqual(event.tool_calls, [])
 
+    def test_parse_stream_tool_calls_index_merging(self):
+        """tool_calls 交错增量按 index 定位合并进 message 快照"""
+        response = self._make_response(True)
+        chunks = [
+            {"choices": [{"index": 0, "delta": {
+                "role": "assistant",
+                "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                "function": {"name": "add", "arguments": ""}}]}}]},
+            {"choices": [{"index": 0, "delta": {"content": "hi"}}]},
+            {"choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": '{"a"'}}]}}]},
+            {"choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": ': 1}'}}]}}]},
+        ]
+        for chunk in chunks:
+            self.format_strategy.parse_stream_event(
+                response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+
+        message = self.format_strategy._choice_messages[0]
+        self.assertEqual(message["role"], "assistant")
+        self.assertEqual(message["content"], "hi")
+        self.assertEqual(message["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "add")
+        self.assertEqual(message["tool_calls"][0]["function"]["arguments"], '{"a": 1}')
+
+    def test_parse_stream_unknown_delta_fields_merge_into_snapshot(self):
+        """delta 未知字段经通用合并自然并入 message 快照"""
+        response = self._make_response(True)
+        chunk = {"choices": [{"index": 0, "delta": {
+            "content": "hi", "custom_field": {"x": 1}}}]}
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+        self.assertEqual(
+            self.format_strategy._choice_messages[0]["custom_field"], {"x": 1})
+
+    def test_parse_stream_done_end_message_structure(self):
+        """[DONE] 结束消息为协议真实 assistant message 结构"""
+        response = self._make_response(True)
+        chunks = [
+            {"choices": [{"delta": {"role": "assistant", "content": "Hello",
+                                    "reasoning_content": "Think"}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function",
+                 "function": {"name": "add", "arguments": '{"a": 1}'}}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+        for chunk in chunks:
+            self.format_strategy.parse_stream_event(
+                response, ServerSentEvent(data=msgspec.json.encode(chunk)))
+        end = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(data=b"[DONE]"))
+
+        self.assertTrue(end.is_end)
+        self.assertEqual(response.finish_reason, "tool_calls")
+        self.assertEqual(len(end.tool_calls), 1)
+        self.assertEqual(end.tool_calls[0].id, "call_1")
+        self.assertEqual(end.tool_calls[0].name, "add")
+        self.assertEqual(end.tool_calls[0].arguments, {"a": 1})
+        self.assertEqual(len(end.response_message), 1)
+        raw = end.response_message[0]
+        self.assertEqual(raw["role"], "assistant")
+        self.assertEqual(raw["content"], "Hello")
+        self.assertEqual(raw["reasoning_content"], "Think")
+        self.assertEqual(raw["tool_calls"][0]["function"]["arguments"], '{"a": 1}')
+
 
 class TestAnthropicFormat(unittest.TestCase):
     def setUp(self):
@@ -368,6 +436,142 @@ class TestAnthropicFormat(unittest.TestCase):
             "stop_reason": "end_turn",
             "x_extra": "v"
         })
+
+    def test_parse_stream_full_block_lifecycle(self):
+        """流式完整块生命周期：text/thinking/tool_use 交错累积，结束消息为完整 message"""
+        response = self._make_response(True)
+
+        message_start = {
+            "type": "message_start",
+            "message": {
+                "id": "msg_2", "type": "message", "role": "assistant",
+                "model": "claude-3", "content": [],
+                "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 8, "output_tokens": 1}
+            }
+        }
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_start",
+                                      data=msgspec.json.encode(message_start)))
+
+        # block 0: text
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_start",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_start", "index": 0,
+                                          "content_block": {"type": "text"}})))
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_delta", "index": 0,
+                                          "delta": {"type": "text_delta",
+                                                    "text": "Hi"}})))
+        self.assertEqual(event.content, "Hi")
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_stop",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_stop", "index": 0})))
+
+        # block 1: thinking + signature
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_start",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_start", "index": 1,
+                                          "content_block": {"type": "thinking",
+                                                            "thinking": ""}})))
+        event = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_delta", "index": 1,
+                                          "delta": {"type": "thinking_delta",
+                                                    "thinking": "why"}})))
+        self.assertEqual(event.reasoning, "why")
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_delta", "index": 1,
+                                          "delta": {"type": "signature_delta",
+                                                    "signature": "sig=="}})))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_stop",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_stop", "index": 1})))
+
+        # block 2: tool_use 分段 partial_json
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_start",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_start", "index": 2,
+                                          "content_block": {"type": "tool_use",
+                                                            "id": "toolu-9",
+                                                            "name": "add_task",
+                                                            "input": {}}})))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_delta", "index": 2,
+                                          "delta": {"type": "input_json_delta",
+                                                    "partial_json": '{"cont'}})))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_delta", "index": 2,
+                                          "delta": {"type": "input_json_delta",
+                                                    "partial_json": 'ent": "a"}'}})))
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="content_block_stop",
+                                      data=msgspec.json.encode({
+                                          "type": "content_block_stop", "index": 2})))
+
+        # message_delta: stop_reason 与 usage 覆盖
+        self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_delta",
+                                      data=msgspec.json.encode({
+                                          "type": "message_delta",
+                                          "delta": {"stop_reason": "tool_use",
+                                                    "stop_sequence": None},
+                                          "usage": {"input_tokens": 8,
+                                                    "output_tokens": 12}})))
+
+        end = self.format_strategy.parse_stream_event(
+            response, ServerSentEvent(event="message_stop",
+                                      data=msgspec.json.encode({"type": "message_stop"})))
+        self.assertTrue(end.is_end)
+        self.assertEqual(response.finish_reason, "tool_calls")
+        self.assertEqual(len(end.tool_calls), 1)
+        self.assertEqual(end.tool_calls[0].id, "toolu-9")
+        self.assertEqual(end.tool_calls[0].name, "add_task")
+        self.assertEqual(end.tool_calls[0].arguments, {"content": "a"})
+        self.assertEqual(end.response_message, [{
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "content": [
+                {"type": "text", "text": "Hi"},
+                {"type": "thinking", "thinking": "why", "signature": "sig=="},
+                {"type": "tool_use", "id": "toolu-9", "name": "add_task",
+                 "input": {"content": "a"}}
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 8, "output_tokens": 12}
+        }])
+        self.assertNotIn("content", response.response_meta)
+        self.assertEqual(response.response_meta, {
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 8, "output_tokens": 12}
+        })
+        self.assertEqual(response.completion_tokens, 12)
+
+        # 内部状态已清空
+        self.assertIsNone(self.format_strategy._snapshot)
+        self.assertEqual(self.format_strategy._blocks, {})
+        self.assertEqual(self.format_strategy._partial_json, {})
 
     def test_parse_stream_invalid_chunk_returns_empty_event(self):
         """非法 JSON chunk 记录告警并返回空事件"""
@@ -536,7 +740,7 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.provider_response_id, "resp_1")
         self.assertEqual(response.response_text, "你好")
         self.assertEqual(response.response_reasoning, "想")
-        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.finish_reason, "tool_calls")
         self.assertEqual(response.prompt_tokens, 10)
         self.assertEqual(response.completion_tokens, 5)
         self.assertEqual(response.cached_tokens, 3)
@@ -551,6 +755,45 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.response_message[1].content, "你好")
         self.assertEqual(
             response.response_message[2].raw_value["call_id"], "call_1")
+
+    def test_parse_response_message_output_items(self):
+        """message 项提取 output_text 文本，reasoning/function_call 项 raw_value 承载原始项"""
+        response = self._make_response(False)
+        message_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "你好"}]
+        }
+        reasoning_item = {
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "想"}]
+        }
+        function_call_item = {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "add",
+            "arguments": '{"a": 1}'
+        }
+
+        message = self.format_strategy.parse_response_message(response, message_item)
+        self.assertEqual(message.role, "assistant")
+        self.assertEqual(message.content, "你好")
+        self.assertEqual(message.raw_value, message_item)
+
+        reasoning = self.format_strategy.parse_response_message(response, reasoning_item)
+        self.assertIsNone(reasoning.content)
+        self.assertEqual(reasoning.raw_value, reasoning_item)
+
+        function_call = self.format_strategy.parse_response_message(
+            response, function_call_item)
+        self.assertEqual(function_call.raw_value, function_call_item)
+
+        converted = self.format_strategy.parse_response_message(response, {
+            "role": "assistant", "content": "Hi"})
+        self.assertEqual(converted.content, "Hi")
+        self.assertEqual(
+            converted.raw_value, {"role": "assistant", "content": "Hi"})
 
     def test_parse_stream_response_created(self):
         """response.created 记录提供商响应 ID"""
@@ -582,7 +825,6 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
                 "delta": "Hello"
             })))
         self.assertEqual(event.content, "Hello")
-        self.assertEqual(self.format_strategy.stream_content_buffer, "Hello")
         self.assertEqual(self.format_strategy.stream_message_text[0], "Hello")
 
         event = self.format_strategy.parse_stream_event(
@@ -592,7 +834,6 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
                 "delta": "think"
             })))
         self.assertEqual(event.reasoning, "think")
-        self.assertEqual(self.format_strategy.stream_reasoning_buffer, "think")
 
     def test_parse_stream_reasoning_raw_and_summary(self):
         """reasoning_raw_text/reasoning_summary_text 增量累积，done 修正完整文本"""
@@ -660,7 +901,7 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
             })))
         self.assertEqual(
             self.format_strategy.stream_tool_index[2]["arguments"], '{"a": 2}')
-        self.assertEqual(len(self.format_strategy.stream_tool_buffers), 1)
+        self.assertEqual(list(self.format_strategy.stream_tool_index), [2])
 
     def test_parse_stream_end_event_with_output(self):
         """response.completed 携带完整 output 时返回按序消息列表并清空缓冲"""
@@ -693,8 +934,9 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.prompt_tokens, 10)
         self.assertEqual(response.completion_tokens, 5)
         self.assertEqual(len(event.response_message), 1)
-        self.assertEqual(event.response_message[0]["content"], "Hello")
-        self.assertEqual(self.format_strategy.stream_content_buffer, "")
+        self.assertEqual(event.response_message[0]["content"],
+                         [{"type": "output_text", "text": "Hello"}])
+        self.assertEqual(self.format_strategy.stream_message_text, {})
 
     def test_parse_stream_end_event_fallback_to_stream_state(self):
         """结束载荷无 output 时回退到流式累积项构造消息列表"""
@@ -736,7 +978,8 @@ class TestResponsesFormat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.response_message[0]["type"], "reasoning")
         self.assertEqual(event.response_message[0]["content"],
                          [{"type": "reasoning_text", "text": "raw"}])
-        self.assertEqual(event.response_message[1]["content"], "Hi")
+        self.assertEqual(event.response_message[1]["content"],
+                         [{"type": "output_text", "text": "Hi"}])
 
     def test_parse_stream_invalid_event_returns_empty(self):
         """非法 JSON、空行与未知事件返回空事件，不中断流"""

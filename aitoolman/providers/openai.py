@@ -40,15 +40,62 @@ class OpenAIChunk(msgspec.Struct):
     usage: Optional[OpenAIUsage] = None
 
 
+# 每帧重复携带的标识性字段
+_OVERWRITE_KEYS = ("id", "role")
+
+
+def _accumulate_delta(acc: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并 delta 到 acc（对齐官方流式叠加语义）"""
+    for key, delta_value in delta.items():
+        acc_value = acc.get(key)
+        is_delta_list = isinstance(delta_value, list)
+        has_indexed_items = is_delta_list and any(
+            isinstance(item, dict) and "index" in item
+            for item in delta_value
+        )
+
+        if acc_value is None:
+            if has_indexed_items:
+                # 初始化为空列表，向下落入按 index 合并分支
+                acc_value = acc[key] = []
+            else:
+                acc[key] = delta_value
+                continue
+        elif key == "index" or key == "type" or (key in _OVERWRITE_KEYS and delta_value):
+            # index/type 与每帧重复携带的标识性字段（role/id）直接覆盖而非拼接
+            acc[key] = delta_value
+            continue
+
+        if isinstance(acc_value, (str, int, float)) and isinstance(delta_value, (str, int, float)):
+            acc[key] += delta_value
+        elif isinstance(acc_value, dict) and isinstance(delta_value, dict):
+            # 递归合并就地修改 acc_value 并返回其自身，无需重复赋值 acc[key]
+            _accumulate_delta(acc_value, delta_value)
+        elif isinstance(acc_value, list) and is_delta_list:
+            if all(isinstance(item, (str, int, float)) for item in acc_value) and (
+                    acc_value or not has_indexed_items):
+                acc[key] += delta_value
+            else:
+                # acc_value 与 acc[key] 为同一列表对象，复用局部引用减少重复下标
+                for entry in delta_value:
+                    if not isinstance(entry, dict):
+                        raise TypeError("Unexpected type: %s" % type(entry).__name__)
+                    try:
+                        acc_value[entry["index"]] = _accumulate_delta(
+                            acc_value[entry["index"]], entry)
+                    except IndexError:
+                        acc_value.insert(entry["index"], entry)
+    return acc
+
+
 class OpenAICompatibleFormat(LLMFormatStrategy):
-    KNOWN_DELTA_FIELDS = frozenset((
-        'content', 'reasoning_content', 'role', 'tool_calls'
-    ))
 
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
 
         self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
+        # choice index → message 快照（delta 经通用递归合并累积）
+        self._choice_messages: Dict[int, dict] = {}
         self._stream_chunk_decoder = msgspec.json.Decoder(type=OpenAIChunk)
 
     def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]:
@@ -214,19 +261,27 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
 
         # 2. 处理流式结束标记（统一返回工具调用）
         if line_bytes == b"[DONE]":
+            # 取最小 index 的 message 快照构造协议真实结束消息
+            if self._choice_messages:
+                response_message = self._choice_messages[min(self._choice_messages)]
+                if not response_message.get("role"):
+                    response_message["role"] = "assistant"
+                if response_message.get("content") is None:
+                    response_message["content"] = ""
+            else:
+                response_message = {"role": "assistant", "content": ""}
             # 转换累积的工具调用为ToolCall列表
-            final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
-            response_message = self.build_stream_response_message()
+            final_tool_calls = self.parse_tool_calls(response_message.get("tool_calls") or [])
 
-            # 清空缓冲区
-            self.clear_stream_buffers()
-            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
+            # 末帧原始事件中的未知字段并入后写入 response_meta
             if self.stream_last_raw_event is not None:
                 response_meta = util.decode_json(self.stream_last_raw_event.data)
                 if 'choices' in response_meta:
                     del response_meta['choices']
                 self.stream_last_raw_event = None
                 response.response_meta = response_meta
+            # 清空内部快照状态
+            self._choice_messages = {}
             # 设置结束标记并返回完整工具调用
             if not response.finish_reason:
                 response.finish_reason = FinishReason.stop.value
@@ -255,10 +310,17 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
             if chunk_data.usage.prompt_tokens_details is not None:
                 response.cached_tokens = chunk_data.usage.prompt_tokens_details.cached_tokens
 
-        # 5. 提取delta内容
+        # 5. choices 全量按 index 累积 message 快照
         choices = chunk_data.choices or []
         if not choices:
             return ProviderStreamEvent.empty()
+        for choice in choices:
+            index = choice.index if choice.index is not None else 0
+            # _accumulate_delta 仅就地修改 acc、不修改 delta，无需冗余浅拷贝
+            self._choice_messages[index] = _accumulate_delta(
+                self._choice_messages.get(index) or {}, choice.delta or {})
+
+        # 首个 choice 的 delta 提取增量内容
         choice = choices[0]
         delta: Dict[str, Any] = choice.delta or {}
 
@@ -266,37 +328,10 @@ class OpenAICompatibleFormat(LLMFormatStrategy):
         if choice.finish_reason:
             response.finish_reason = map_finish_reason(choice.finish_reason) or choice.finish_reason
 
-        # 7. 增量累积工具调用内容
-        for tool_delta in delta.get('tool_calls') or ():
-            tool_id = tool_delta.get("id")
-            if tool_id:
-                tool_item = tool_delta.copy()
-                self.stream_tool_buffers.append(tool_item)
-                continue
-            elif not self.stream_tool_buffers:
-                logger.warning("[%s] Function delta without id: %s", response.request_id, delta)
-                continue
-
-            tool_item = self.stream_tool_buffers[-1]
-            fn_delta = tool_delta.get("function", {})
-            fn_item = tool_item.get("function", {})
-            tool_item['function'] = fn_item
-            for key, value in fn_delta.items():
-                fn_item[key] = fn_item.get(key, '') + value
-
         content_delta = delta.get('content') or ''
         reasoning_delta = delta.get('reasoning_content') or ''
 
-        if content_delta:
-            self.stream_content_buffer += content_delta
-        if reasoning_delta:
-            self.stream_reasoning_buffer += reasoning_delta
-
-        for key, value in delta.items():
-            if key not in self.KNOWN_DELTA_FIELDS:
-                self.stream_other_data = value
-
-        # 8. 返回当前chunk的内容（工具调用暂不返回）
+        # 7. 返回当前chunk的内容（工具调用暂不返回）
         return ProviderStreamEvent(
             False,
             content_delta,
@@ -467,6 +502,29 @@ class ResponsesFormat(LLMFormatStrategy):
         logger.debug("[%s] request body: %s", request.request_id, body)
         return body
 
+    def parse_response_message(self, response, message: Dict[str, Any]) -> Message:
+        """将Responses输出项转为Message（raw_value承载原始项，message项提取output_text文本）"""
+        item_type = message.get("type")
+        if item_type in ("reasoning", "function_call"):
+            return Message(role="assistant", content=None, raw_value=message)
+        if item_type == "message":
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            else:
+                text = "".join(
+                    part.get("text") or ""
+                    for part in (content or [])
+                    if part.get("type") == "output_text"
+                )
+            return Message(role="assistant", content=text, raw_value=message)
+        # 流式结束构造的 {"role": "assistant", "content": ...} 文本形态
+        return Message(
+            role=message.get("role", "assistant"),
+            content=message.get("content"),
+            raw_value=message
+        )
+
     def parse_batch_response(self, response, response_data: Dict[str, Any]) -> None:
         """解析Responses API非流式响应（遍历output数组按type分发）"""
         response.response_meta = {k: v for k, v in response_data.items() if k != 'output'}
@@ -495,6 +553,9 @@ class ResponsesFormat(LLMFormatStrategy):
         status = response_data.get("status")
         if status:
             response.finish_reason = RESPONSES_STATUS_MAP.get(status) or status
+        # 含 function_call 输出时对齐 Chat Completions 语义，标记 tool_calls
+        if tool_call_items and response.finish_reason == FinishReason.stop.value:
+            response.finish_reason = FinishReason.tool_calls.value
 
         # Token统计（含缓存命中token）
         usage = response_data.get("usage") or {}
@@ -505,8 +566,9 @@ class ResponsesFormat(LLMFormatStrategy):
         # 按输出顺序构造可回传上下文的输出项消息
         response.provider_response_id = response_data.get("id")
         response.response_message = [
-            Message(role="assistant", content=message_item.get("content"), raw_value=message_item)
-            for message_item in self._build_output_messages(output_items)
+            self.parse_response_message(response, item)
+            for item in output_items
+            if item.get("type", "message") in ("message", "reasoning", "function_call")
         ]
 
     @staticmethod
@@ -524,15 +586,8 @@ class ResponsesFormat(LLMFormatStrategy):
             if item_type == "reasoning":
                 messages.append(item)
             elif item_type == "message":
-                text_parts: List[str] = []
-                content = item.get("content")
-                if isinstance(content, str):
-                    text_parts.append(content)
-                elif isinstance(content, list):
-                    for part in content:
-                        if part.get("type") == "output_text":
-                            text_parts.append(part.get("text") or "")
-                messages.append({"role": "assistant", "content": "".join(text_parts)})
+                # 保留原始 item 全部字段原样回传（content 已含完整输出文本）
+                messages.append(item)
             elif item_type == "function_call":
                 messages.append({
                     "type": "function_call",
@@ -557,13 +612,12 @@ class ResponsesFormat(LLMFormatStrategy):
                     item["summary"] = [{"type": "summary_text", "text": summary_text}]
                 messages.append(item)
             elif item_type == "message":
-                content = self.stream_message_text.get(output_index)
-                if content is None:
-                    content = self.stream_content_buffer
-                messages.append({
-                    "role": "assistant",
-                    "content": content
-                })
+                # 保留原始 item 全部字段，仅以累积文本按 output_text 结构覆盖 content
+                item["content"] = [{
+                    "type": "output_text",
+                    "text": self.stream_message_text.get(output_index, "")
+                }]
+                messages.append(item)
             elif item_type == "function_call":
                 tool_item = self.stream_tool_index.get(output_index) or item
                 messages.append({
@@ -576,7 +630,10 @@ class ResponsesFormat(LLMFormatStrategy):
 
     def _handle_end_event(self, response, event_type: str, data: Dict[str, Any]) -> ProviderStreamEvent:
         """处理response.completed/incomplete/failed结束事件（携带完整response载荷）"""
-        final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
+        final_tool_calls = self.parse_tool_calls([
+            self.stream_tool_index[index]
+            for index in sorted(self.stream_tool_index, key=self._sort_output_index)
+        ])
 
         response_data = data.get("response") or {}
         response.response_meta = {k: v for k, v in response_data.items() if k != 'output'}
@@ -589,6 +646,9 @@ class ResponsesFormat(LLMFormatStrategy):
             "response.failed": "failed"
         }[event_type]
         response.finish_reason = RESPONSES_STATUS_MAP.get(status) or status
+        # 含 function_call 输出时对齐 Chat Completions 语义，标记 tool_calls
+        if final_tool_calls and response.finish_reason == FinishReason.stop.value:
+            response.finish_reason = FinishReason.tool_calls.value
 
         usage = response_data.get("usage") or {}
         response.prompt_tokens = usage.get("input_tokens")
@@ -602,8 +662,7 @@ class ResponsesFormat(LLMFormatStrategy):
         else:
             response_messages = self._build_stream_messages()
 
-        # 清空缓冲区与流式状态
-        self.clear_stream_buffers()
+        # 清空流式状态
         self._reset_stream_state()
         return ProviderStreamEvent(True, "", "", final_tool_calls, response_messages)
 
@@ -643,7 +702,6 @@ class ResponsesFormat(LLMFormatStrategy):
             content_delta = data.get("delta") or ""
             output_index = data.get("output_index")
             if content_delta:
-                self.stream_content_buffer += content_delta
                 self.stream_message_text[output_index] = (
                     self.stream_message_text.get(output_index, "") + content_delta
                 )
@@ -651,8 +709,6 @@ class ResponsesFormat(LLMFormatStrategy):
 
         if event_type == "response.reasoning_text.delta":
             reasoning_delta = data.get("delta") or ""
-            if reasoning_delta:
-                self.stream_reasoning_buffer += reasoning_delta
             return ProviderStreamEvent(False, "", reasoning_delta, [], None)
 
         # 思维链原文/摘要增量同样作为 reasoning 文本输出
@@ -666,7 +722,6 @@ class ResponsesFormat(LLMFormatStrategy):
                     else self.stream_reasoning_summary
                 )
                 target[output_index] = target.get(output_index, "") + reasoning_delta
-                self.stream_reasoning_buffer += reasoning_delta
             return ProviderStreamEvent(False, "", reasoning_delta, [], None)
 
         if event_type in ("response.reasoning_raw_text.done", "response.reasoning_summary_text.done"):
@@ -693,7 +748,6 @@ class ResponsesFormat(LLMFormatStrategy):
                     "name": item.get("name") or "",
                     "arguments": item.get("arguments") or ""
                 }
-                self.stream_tool_buffers.append(tool_item)
                 self.stream_tool_index[output_index] = tool_item
             if item_type in ("function_call", "reasoning", "message"):
                 self.stream_output_items[output_index] = dict(item)

@@ -32,7 +32,7 @@ def subparser_server(subparsers):
 def subparser_client(subparsers):
     subp = subparsers.add_parser('client')
     subp.add_argument(
-        "-v", "--verbose", action='store_true',
+        "-v", "--verbose", action='count', default=0,
         help="Print debug log"
     )
 
@@ -93,26 +93,26 @@ def subparser_code_edit(subparsers):
         epilog="""
 Usage Examples:
 # Single file processing
-python3 -m aitoolman code-edit -i input.py -o output.py --llm-config llm_provider.toml
+python3 -m aitoolman code-edit -i input.py -o output.py -c llm_provider.toml
 
 # Multi-file processing (output to directory)
-python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir --llm-config llm_provider.toml
+python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir -c llm_provider.toml
 
 # Use reference files
-python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py --llm-config llm_provider.toml
+python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py -c llm_provider.toml
 
 # Batch mode (no real-time reasoning display)
-python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 --llm-config llm_provider.toml
+python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 -c llm_provider.toml
 
 # Overwrite existing files
-python3 -m aitoolman code-edit -i input.py -o input.py --overwrite --llm-config llm_provider.toml
+python3 -m aitoolman code-edit -i input.py -o input.py --overwrite -c llm_provider.toml
 
 # Use remote ZMQ service
 python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --auth TOKEN --model Code-Model  
         """.strip()
     )
     subp.add_argument(
-        "-v", "--verbose", action='store_true',
+        "-v", "--verbose", action='count', default=0,
         help="Print debug log"
     )
 
@@ -181,8 +181,8 @@ python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://loc
 def subparser_monitor(subparsers):
     subp = subparsers.add_parser('monitor')
     subp.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Print detailed content (verbose mode)"
+        "-v", "--verbose", action='count', default=0,
+        help="Print debug log"
     )
     subp.add_argument(
         '--pub-endpoint', default='tcp://localhost:5556',
@@ -279,6 +279,10 @@ python3 -m aitoolman http --zmq-endpoint tcp://localhost:5555 --auth TOKEN --cli
 
 def subparser_version(subparsers):
     subp = subparsers.add_parser('version', help='Print version')
+    subp.add_argument(
+        "-v", "--verbose", action='count', default=0,
+        help="Print debug log"
+    )
     return subp
 
 
@@ -390,6 +394,8 @@ async def _run_client_session(args):
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(response.text)
 
+        logger.debug("Response: %s", response)
+
 
 async def _run_code_edit_session(args):
     from . import code_editor
@@ -458,10 +464,6 @@ async def _run_manage_session(args):
 
 
 def run_server(args):
-    if args.verbose > 1:
-        for name in logging.root.manager.loggerDict:
-            if name.startswith('aitoolman'):
-                logging.getLogger(name).setLevel(logging.DEBUG)
     from . import zmqserver
     config = util.load_config(args.config)
     service = zmqserver.LLMZmqServer(config)
@@ -516,7 +518,14 @@ def main():
 
     args = parser.parse_args()
     if getattr(args, 'verbose', 0):
-        logging.getLogger('aitoolman').setLevel(logging.DEBUG)
+        for name in logging.root.manager.loggerDict:
+            if name.startswith('aitoolman.providers'):
+                if args.verbose > 1:
+                    logging.getLogger(name).setLevel(logging.DEBUG)
+                else:
+                    logging.getLogger(name).setLevel(logging.INFO)
+            elif name.startswith('aitoolman'):
+                logging.getLogger(name).setLevel(logging.DEBUG)
 
     globals()['run_' + args.subparser_name.replace('-', '_')](args)
 

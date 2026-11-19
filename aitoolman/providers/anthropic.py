@@ -5,6 +5,7 @@ from typing import Optional, Dict, List, Any
 
 import msgspec
 
+from .. import postprocess
 from .. import sse
 from .. import util
 from ..model import FinishReason, Message, ToolCall
@@ -13,7 +14,6 @@ from .common import (
     ProviderStreamEvent,
     map_finish_reason,
     serialize_tool_parameters,
-    struct_meta_merge,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class AnthropicDelta(msgspec.Struct):
     type: Optional[str] = None
     text: Optional[str] = None
     thinking: Optional[str] = None
+    signature: Optional[str] = None
     partial_json: Optional[str] = None
     stop_reason: Optional[str] = None
     stop_sequence: Optional[str] = None
@@ -63,8 +64,6 @@ class AnthropicStreamEvent(msgspec.Struct):
     usage: Optional[AnthropicUsage] = None
 
 
-# response_meta 已知字段：按 Struct 字段顺序合并非 None 值（同名后者覆盖）
-ANTHROPIC_META_FIELDS = ('id', 'type', 'role', 'model', 'stop_reason', 'stop_sequence', 'usage')
 ANTHROPIC_KNOWN_FIELDS = ('type', 'index', 'message', 'content_block', 'delta', 'usage')
 
 
@@ -72,8 +71,9 @@ class AnthropicFormat(LLMFormatStrategy):
     def __init__(self, model_config: Dict[str, Any]):
         super().__init__(model_config)
 
-        self.current_tool_index = -1
-        self.stream_meta_buffer: Dict[str, Any] = {}
+        self._snapshot: Optional[Dict[str, Any]] = None
+        self._blocks: Dict[int, Dict[str, Any]] = {}
+        self._partial_json: Dict[int, str] = {}
         self.stream_last_raw_event: Optional[sse.ServerSentEvent] = None
         self._stream_chunk_decoder = msgspec.json.Decoder(type=AnthropicStreamEvent)
 
@@ -112,7 +112,15 @@ class AnthropicFormat(LLMFormatStrategy):
     def serialize_message(self, message: Message) -> Dict[str, Any]:
         """Serialize a Message to Anthropic's message format"""
         if message.raw_value is not None:
-            return message.raw_value
+            raw = message.raw_value
+            # 完整 assistant message 按官方 to_param 语义回传 role 与 content
+            if (isinstance(raw, dict) and raw.get("type") == "message"
+                    and "content" in raw):
+                return {
+                    "role": raw.get("role", "assistant"),
+                    "content": raw.get("content")
+                }
+            return raw
 
         # Handle tool results (role=tool)
         if message.role == "tool":
@@ -214,7 +222,7 @@ class AnthropicFormat(LLMFormatStrategy):
         body["messages"] = serialized_messages
 
         # Handle tools
-        if request.tools and self.model_config.get("abilities", {}).get("tool"):
+        if request.tools:
             body["tools"] = self.serialize_tool_description(request.tools)
 
         logger.debug("[%s] request body: %s", request.request_id, body)
@@ -222,10 +230,23 @@ class AnthropicFormat(LLMFormatStrategy):
 
     @classmethod
     def parse_response_message(cls, response, message: Dict[str, Any]) -> Message:
+        """从 message 的 content 块提取文本与思考内容"""
+        content_text = ""
+        reasoning_text = ""
+        content_blocks = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content_blocks, list):
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    content_text += block.get("text") or ""
+                elif block_type == "thinking":
+                    reasoning_text += block.get("thinking") or ""
         return Message(
             role="assistant",
-            content=response.response_text,
-            reasoning_content=response.response_reasoning,
+            content=content_text,
+            reasoning_content=reasoning_text,
             raw_value=message
         )
 
@@ -291,25 +312,38 @@ class AnthropicFormat(LLMFormatStrategy):
 
         # Handle stream end
         if line_bytes == b"[DONE]" or event_type == "message_stop":
-            final_tool_calls = self.parse_tool_calls(self.stream_tool_buffers)
-            response_message = self.build_stream_response_message()
+            if self._snapshot is None:
+                self._snapshot = {"type": "message", "role": "assistant", "content": []}
 
-            # 末帧原始事件中的未知字段并入后写入 response_meta 并清空缓冲
+            # 末帧原始事件中的未知字段并入快照
             if self.stream_last_raw_event is not None:
                 raw = util.decode_json(self.stream_last_raw_event.data)
                 for key, value in raw.items():
                     if key not in ANTHROPIC_KNOWN_FIELDS:
-                        self.stream_meta_buffer[key] = value
+                        self._snapshot[key] = value
                 self.stream_last_raw_event = None
-            response.response_meta = self.stream_meta_buffer
 
-            # Clear buffers
-            self.clear_stream_buffers()
-            self.stream_meta_buffer = {}
-            self.current_tool_index = -1
+            # content 按 index 排序定稿
+            self._snapshot["content"] = [
+                self._blocks[index] for index in sorted(self._blocks)]
+            final_tool_calls = self.parse_tool_calls([
+                block for block in self._snapshot["content"]
+                if isinstance(block, dict) and block.get("type") == "tool_use"])
+            response.response_meta = {
+                key: value for key, value in self._snapshot.items()
+                if key != "content" and value is not None}
+            response_message = dict(self._snapshot)
+
+            # Clear state
+            self._snapshot = None
+            self._blocks = {}
+            self._partial_json = {}
 
             if not response.finish_reason:
-                response.finish_reason = FinishReason.stop.value
+                # 有工具调用输出时对齐 Chat Completions 语义标记 tool_calls
+                response.finish_reason = (
+                    FinishReason.tool_calls.value if final_tool_calls
+                    else FinishReason.stop.value)
 
             return ProviderStreamEvent(True, "", "", final_tool_calls, [response_message])
 
@@ -326,16 +360,28 @@ class AnthropicFormat(LLMFormatStrategy):
         # 缓存末帧原始事件（流结束后还原未知字段）
         self.stream_last_raw_event = event
 
-        # message_start: 按已知字段顺序合并 message 中的 meta（content 除外）
+        # message_start: 初始化完整 message 快照
         if chunk_data.type == "message_start" and chunk_data.message is not None:
-            struct_meta_merge(chunk_data.message, ANTHROPIC_META_FIELDS, self.stream_meta_buffer)
-            if chunk_data.message.id is not None:
-                response.provider_response_id = chunk_data.message.id
-            if chunk_data.message.usage is not None:
-                response.prompt_tokens = chunk_data.message.usage.input_tokens
-                response.completion_tokens = chunk_data.message.usage.output_tokens
-                if chunk_data.message.usage.cache_read_input_tokens is not None:
-                    response.cached_tokens = chunk_data.message.usage.cache_read_input_tokens
+            message = chunk_data.message
+            self._snapshot = {
+                "id": message.id,
+                "type": message.type,
+                "role": message.role,
+                "model": message.model,
+                "content": [],
+                "stop_reason": message.stop_reason,
+                "stop_sequence": message.stop_sequence,
+            }
+            if message.usage is not None:
+                self._snapshot["usage"] = {
+                    k: v for k, v in msgspec.structs.asdict(message.usage).items()
+                    if v is not None}
+                response.prompt_tokens = message.usage.input_tokens
+                response.completion_tokens = message.usage.output_tokens
+                if message.usage.cache_read_input_tokens is not None:
+                    response.cached_tokens = message.usage.cache_read_input_tokens
+            if message.id is not None:
+                response.provider_response_id = message.id
 
         # Handle token usage (顶层 usage，如 message_delta 事件)
         usage = chunk_data.usage
@@ -344,29 +390,55 @@ class AnthropicFormat(LLMFormatStrategy):
             response.completion_tokens = usage.output_tokens
             if usage.cache_read_input_tokens is not None:
                 response.cached_tokens = usage.cache_read_input_tokens
-            self.stream_meta_buffer['usage'] = {
-                k: v for k, v in msgspec.structs.asdict(usage).items() if v is not None}
+            if self._snapshot is not None:
+                self._snapshot["usage"] = {
+                    k: v for k, v in msgspec.structs.asdict(usage).items() if v is not None}
 
         # message_delta: 合并 delta 中的 stop_reason/stop_sequence
         if chunk_data.type == "message_delta" and chunk_data.delta is not None:
-            for meta_key in ('stop_reason', 'stop_sequence'):
-                meta_value = getattr(chunk_data.delta, meta_key, None)
-                if meta_value is not None:
-                    self.stream_meta_buffer[meta_key] = meta_value
+            if self._snapshot is not None:
+                if chunk_data.delta.stop_reason is not None:
+                    self._snapshot["stop_reason"] = chunk_data.delta.stop_reason
+                    # 原生 stop_reason 映射为统一 finish_reason（如 tool_use → tool_calls）
+                    mapped_reason = map_finish_reason(chunk_data.delta.stop_reason)
+                    if mapped_reason:
+                        response.finish_reason = mapped_reason
+                if chunk_data.delta.stop_sequence is not None:
+                    self._snapshot["stop_sequence"] = chunk_data.delta.stop_sequence
 
-        # Handle content_block (start of new content block)
+        # Handle content_block_start (start of new content block)
         if chunk_data.content_block is not None:
             block = chunk_data.content_block
+            block_index = chunk_data.index if chunk_data.index is not None \
+                else len(self._blocks)
             block_type = block.type
 
-            if block_type == "tool_use":
-                # New tool call started
-                self.current_tool_index += 1
-                self.stream_tool_buffers.append({
-                    "id": block.id,
-                    "name": block.name,
-                    "input": {}
-                })
+            if block_type == "text":
+                new_block = {"type": "text", "text": ""}
+            elif block_type == "thinking":
+                new_block = {"type": "thinking", "thinking": "", "signature": ""}
+            elif block_type == "tool_use":
+                new_block = {"type": "tool_use", "id": block.id,
+                             "name": block.name, "input": {}}
+            else:
+                # 其余类型登记原始字段
+                new_block = {key: value
+                             for key, value in msgspec.structs.asdict(block).items()
+                             if value is not None}
+            self._blocks[block_index] = new_block
+
+        # Handle content_block_stop (定稿工具入参)
+        if chunk_data.type == "content_block_stop":
+            block_index = chunk_data.index if chunk_data.index is not None else -1
+            block = self._blocks.get(block_index)
+            if block is not None and block.get("type") == "tool_use":
+                partial_json = self._partial_json.pop(block_index, "")
+                parsed_input: Dict[str, Any] = {}
+                if partial_json:
+                    parsed = postprocess.parse_json(partial_json)
+                    if isinstance(parsed, dict):
+                        parsed_input = parsed
+                block["input"] = parsed_input
 
         # Handle delta (content updates)
         delta_text = ""
@@ -375,31 +447,30 @@ class AnthropicFormat(LLMFormatStrategy):
         if chunk_data.delta is not None:
             delta = chunk_data.delta
             delta_type = delta.type
+            block_index = chunk_data.index if chunk_data.index is not None else -1
+            block = self._blocks.get(block_index)
 
             if delta_type == "text_delta":
                 text = delta.text or ''
                 delta_text = text
-                self.stream_content_buffer += text
+                if block is not None:
+                    block["text"] = (block.get("text") or "") + text
 
             elif delta_type == "thinking_delta":
                 thinking = delta.thinking or ''
                 delta_reasoning = thinking
-                self.stream_reasoning_buffer += thinking
+                if block is not None:
+                    block["thinking"] = (block.get("thinking") or "") + thinking
+
+            elif delta_type == "signature_delta":
+                signature = delta.signature or ''
+                if block is not None:
+                    block["signature"] = (block.get("signature") or "") + signature
 
             elif delta_type == "input_json_delta":
-                # Update current tool call's input
-                if self.current_tool_index >= 0 and self.stream_tool_buffers:
-                    partial_json = delta.partial_json or ''
-                    current_tool = self.stream_tool_buffers[
-                        self.current_tool_index]
-                    # Accumulate partial JSON (simplified approach)
-                    current_input = current_tool.get("input", {})
-                    if isinstance(current_input, dict) and not current_input:
-                        # Start with empty dict, will be filled by partial_json
-                        current_tool["input"] = partial_json
-                    elif isinstance(current_input, str):
-                        # Append to existing partial JSON string
-                        current_tool["input"] = current_input + partial_json
+                partial_json = delta.partial_json or ''
+                self._partial_json[block_index] = (
+                    self._partial_json.get(block_index, "") + partial_json)
 
         return ProviderStreamEvent(
             False,

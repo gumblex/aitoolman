@@ -3,8 +3,6 @@ import abc
 import typing
 from typing import Optional, Dict, List, Any
 
-import msgspec
-
 from .. import sse
 from ..model import LLMProviderRequest, LLMProviderResponse, Message, ToolCall
 
@@ -65,44 +63,10 @@ def serialize_tool_parameters(param_configs: Dict[str, Dict[str, Any]]) -> Dict[
     return parameters
 
 
-def struct_meta_merge(source, field_names, buffer: Dict[str, Any]) -> None:
-    """按字段顺序将 Struct 中非 None 的字段合并入缓冲（Struct 值转为纯 dict，剔除值为 None 的键）"""
-    for name in field_names:
-        value = getattr(source, name, None)
-        if value is None:
-            continue
-        if isinstance(value, msgspec.Struct):
-            value = {k: v for k, v in msgspec.structs.asdict(value).items() if v is not None}
-        buffer[name] = value
-
-
 class LLMFormatStrategy(abc.ABC):
     """LLM请求/响应格式策略抽象类"""
     def __init__(self, model_config: Dict[str, Any]):
         self.model_config = model_config  # 模型配置（包含api_type、url、headers等）
-        # 流式解析公共缓冲
-        self.stream_content_buffer = ''
-        self.stream_reasoning_buffer = ''
-        self.stream_tool_buffers: List[Dict[str, Any]] = []
-        self.stream_other_data: Dict[str, Any] = {}
-
-    def clear_stream_buffers(self) -> None:
-        """清空流式解析缓冲"""
-        self.stream_content_buffer = ''
-        self.stream_reasoning_buffer = ''
-        self.stream_tool_buffers = []
-        self.stream_other_data = {}
-
-    def build_stream_response_message(self) -> Dict[str, Any]:
-        """流式结束时构造 response_message（content/tool_calls，含推理内容时附加 reasoning_content）"""
-        response_message = {
-            "content": self.stream_content_buffer,
-            "tool_calls": self.stream_tool_buffers
-        }
-        if self.stream_reasoning_buffer:
-            response_message["reasoning_content"] = self.stream_reasoning_buffer
-        response_message.update(self.stream_other_data)
-        return response_message
 
     @abc.abstractmethod
     def serialize_tool_description(self, tools_configs: Dict[str, Dict[str, Any]]) -> List[Dict]:

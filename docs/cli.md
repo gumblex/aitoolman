@@ -1,4 +1,13 @@
 # 命令行工具
+
+## 日志级别
+
+各子命令的 `-v` 均为计数参数，控制日志输出级别：
+
+- 默认：`aitoolman.providers` 包日志级别为 WARNING，其余 `aitoolman` 模块为 INFO
+- `-v`：`aitoolman` 包日志级别为 DEBUG，`aitoolman.providers` 包为 INFO
+- `-vv`：`aitoolman` 包与 `aitoolman.providers` 包均为 DEBUG
+
 ## ZeroMQ 服务
 ```
 usage: python3 -m aitoolman server [-h] [-v] [-c CONFIG]
@@ -73,8 +82,8 @@ options:
 usage: python3 -m aitoolman code-edit [-h] [-v] (-c CONFIG | -z ZMQ_ENDPOINT) [-a AUTH]
                                       -m MODEL [-r REFERENCE [REFERENCE ...]]
                                       [-i INPUT [INPUT ...]] [-o OUTPUT] [-O RAW_OUTPUT]
-                                      [-p PROMPT] [-M [MEDIA ...]] [--batch] [--no-system]
-                                      [--overwrite]
+                                      [-p PROMPT] [-M [MEDIA ...]] [-L SIZE_LIMIT]
+                                      [--batch] [--no-system] [--overwrite]
 
 LLM文本文件编辑工具 - 使用AI助手修改/生成文本文件
 
@@ -96,29 +105,28 @@ options:
   -p, --prompt PROMPT   提示词文件路径
   -M, --media [MEDIA ...]
                         图片/视频文件路径（多模态）
+  -L, --size-limit SIZE_LIMIT
+                        文件大小限制（字节），默认 200KB，设为 0 禁用限制
   --batch               批处理模式（不实时显示思考过程）
   --no-system           不使用系统提示词
   --overwrite           覆盖现有文件（默认情况下会生成.new后缀的文件）
 
 使用示例:
     # 单文件处理
-    python3 -m aitoolman code-edit -i input.py -o output.py --llm-config llm_provider.toml
+    python3 -m aitoolman code-edit -i input.py -o output.py -c llm_provider.toml
 
     # 多文件处理（输出到目录）
-    python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir --llm-config llm_provider.toml
+    python3 -m aitoolman code-edit -i file1.py file2.py -o output_dir -c llm_provider.toml
 
 
     # 使用参考文件
-    python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py --llm-config l
-lm_provider.toml
+    python3 -m aitoolman code-edit -i app.py -o output.py --reference api.py utils.py -c llm_provider.toml
 
     # 批处理模式（不实时显示思考过程）
-    python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 --llm-config
- llm_provider.toml
+    python3 -m aitoolman code-edit -i input.py -o output.py --batch --model DeepSeek-v3 -c llm_provider.toml
 
     # 覆盖现有文件
-    python3 -m aitoolman code-edit -i input.py -o input.py --overwrite --llm-config llm_provider.tom
-l
+    python3 -m aitoolman code-edit -i input.py -o input.py --overwrite -c llm_provider.toml
 
     # 使用远程ZMQ服务
     python3 -m aitoolman code-edit -i input.py -o output.py --zmq-endpoint tcp://localhost:5555 --au
@@ -161,10 +169,11 @@ options:
 
 ## 版本
 ```
-usage: python3 -m aitoolman version [-h]
+usage: python3 -m aitoolman version [-h] [-v]
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help     show this help message and exit
+  -v, --verbose  Print debug log
 ```
 
 打印当前版本，如 `aitoolman 0.10.0`。

@@ -12,6 +12,7 @@
 
 ### 修改
 - `LLMProviderResponse` / `LLMModuleResult` 的 `response_message` 改为按输出顺序排列的 `Message` 列表
+- 提高 openai/anthropic 协议兼容性
 - `resolve_model` 返回提供商及其模型层评分列表；模型名与标签统一为英文逗号分隔的字符串
 - 移除 `llm_provider.toml` 的 `[model_alias]` 兼容性；应用层 `[model_alias]` 保持不变
 - 移除 `/N` 旋转与按标签 `tag:rank` 旋转语法

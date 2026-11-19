@@ -121,7 +121,7 @@ async def print_channel_output(channel: ChannelReader, topic_names: Dict[str, st
             continue
         if event.topic != current_topic:
             if header:
-                print('===== %s =====' % topic_names[event.topic])
+                sys.stdout.write('===== %s =====\n' % topic_names[event.topic])
             current_topic = event.topic
         sys.stdout.write(event.data)
         sys.stdout.flush()
